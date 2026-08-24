@@ -1,0 +1,6 @@
+{
+  "name": "AI 视频工作台",
+  "description": "AI驱动的短视频智能生成与剪辑工作台，支持一键文案生成、自动分镜、画面生成、字幕配音与多比例视频合成导出",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
