@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   X, 
   Download, 
@@ -17,6 +17,7 @@ import {
 import confetti from 'canvas-confetti';
 import { VideoProject } from '../types';
 import { exportProjectToMP4 } from '../utils/mp4Exporter';
+import { clipShotNarration } from '../utils/narrationTrack';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -35,6 +36,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
     sizeMb?: string;
   } | null>(null);
 
+  useEffect(() => {
+    if (isOpen) return;
+    setExportedResult((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+    setIsExporting(false);
+    setExportProgress(0);
+    setExportStageText('准备就绪');
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const totalDuration = project.clips.reduce((acc, c) => acc + (c.duration || 3.5), 0);
@@ -44,7 +56,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
     setIsExporting(true);
     setExportProgress(5);
     setExportStageText('正在初始化 H.264 编码器...');
-    setExportedResult(null);
+    setExportedResult((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
 
     try {
       const result = await exportProjectToMP4(project, (prog, stageText) => {
@@ -98,7 +113,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
 
       srtContent += `${index + 1}\n`;
       srtContent += `${formatSRTTime(startSec)} --> ${formatSRTTime(endSec)}\n`;
-      srtContent += `${clip.narration}\n`;
+      srtContent += `${clipShotNarration(clip)}\n`;
       if (clip.secondaryText) srtContent += `${clip.secondaryText}\n`;
       srtContent += `\n`;
     });
@@ -271,16 +286,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
             返回编辑
           </button>
 
-          {!exportedResult && (
-            <button
-              onClick={handleStartExportVideo}
-              disabled={isExporting}
-              className="px-5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer disabled:opacity-50 transition-all active:scale-95"
-            >
-              {isExporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-black" /> : <Video className="w-3.5 h-3.5" />}
-              {isExporting ? '正在渲染 MP4...' : '开始渲染导出 MP4'}
-            </button>
-          )}
+          <button
+            onClick={handleStartExportVideo}
+            disabled={isExporting}
+            className="px-5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer disabled:opacity-50 transition-all active:scale-95"
+          >
+            {isExporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-black" /> : <Video className="w-3.5 h-3.5" />}
+            {isExporting ? '正在渲染 MP4...' : exportedResult ? '重新渲染 MP4' : '开始渲染导出 MP4'}
+          </button>
         </div>
       </div>
     </div>

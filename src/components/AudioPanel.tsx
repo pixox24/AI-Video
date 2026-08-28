@@ -1,44 +1,82 @@
 import React, { useState, useEffect } from 'react';
-import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, CheckCircle2, RotateCcw, Trash2, Sliders, Radio } from 'lucide-react';
-import { AudioConfig } from '../types';
-import { BGM_TRACKS } from '../utils/presets';
+import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio } from 'lucide-react';
+import { AudioConfig, CustomTtsApiConfig, ScriptGenre } from '../types';
+import { BGM_GENRE_ORDER, BGM_TRACKS, DEFAULT_BGM_TRACK_ID, bgmTracksForGenre } from '../utils/presets';
 import { audioEngine } from '../utils/audioEngine';
+import { GENRE_PACKS } from '../utils/scriptBudget';
+import { ttsEngineLabel, ttsSourceKey, ttsSupportsSpeechRate, ttsVoicesForApi } from '../utils/ttsCatalog';
+import { hideStatusToast, showStatusToast } from '../utils/statusToast';
+import { getTtsPreviewUrl, makeVoicePreviewKey, VOICE_PREVIEW_TEXT } from '../utils/ttsPreviewCache';
+import { ToolRail } from './ToolRail';
 
 interface AudioPanelProps {
   config: AudioConfig;
   onChange: (config: AudioConfig) => void;
   sampleNarrationText: string;
+  narrationFresh?: boolean;
+  isGeneratingNarration?: boolean;
+  narrationError?: string | null;
+  onGenerateFullNarration?: () => void;
+  recommendedGenre?: ScriptGenre | null;
+  timelinePlaying?: boolean;
+  ttsApi?: CustomTtsApiConfig;
+  onVoiceChange?: (voiceId: string) => void;
+  onOpenSettings?: () => void;
 }
 
-export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sampleNarrationText }) => {
+export const AudioPanel: React.FC<AudioPanelProps> = ({
+  config,
+  onChange,
+  sampleNarrationText,
+  narrationFresh = false,
+  isGeneratingNarration = false,
+  narrationError,
+  onGenerateFullNarration,
+  recommendedGenre = null,
+  timelinePlaying = false,
+  ttsApi,
+  onVoiceChange,
+  onOpenSettings
+}) => {
   const [isPlayingPreviewVoice, setIsPlayingPreviewVoice] = useState(false);
   const [previewingBgmId, setPreviewingBgmId] = useState<string | null>(null);
   const [customTrackName, setCustomTrackName] = useState<string | null>(null);
   const [customTrackSize, setCustomTrackSize] = useState<string | null>(null);
   const [customAudioUrl, setCustomAudioUrl] = useState<string | null>(null);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [genreFilter, setGenreFilter] = useState<ScriptGenre | 'all'>(recommendedGenre || 'all');
 
-  const voiceCharacters = [
-    { id: 'magnetic-male', name: '磁性男声 (云希)', desc: '影视解说/短视频第一爆款音色，富有磁性', badge: '影视标配' },
-    { id: 'warm-female', name: '温柔女声 (晓晓)', desc: '亲和治愈，适合生活美学/情感哲思', badge: '全网热门' },
-    { id: 'tech-anchor', name: '商业播音 (云扬)', desc: '干练专业，适合科技前沿/商业资讯', badge: '商业首选' },
-    { id: 'documentary-male', name: '纪录片沉稳 (云健)', desc: '深沉浑厚，适合历史大片/地理探索', badge: '史诗大片' },
-    { id: 'vibrant-creator', name: '活力主播 (晓伊)', desc: '轻快自然，适合好物种草/旅行日常', badge: '生动自然' },
-    { id: 'bilingual-en', name: '美语播音 (Christopher)', desc: '地道国际双语播音主播音色', badge: '双语国际' },
-  ];
+  const voiceCharacters = ttsVoicesForApi(ttsApi);
+  const supportsSpeechRate = ttsSupportsSpeechRate(ttsApi);
+  const customVoice = config.voiceCharacter && !voiceCharacters.some((item) => item.id === config.voiceCharacter)
+    ? {
+        id: config.voiceCharacter,
+        name: `自定义 · ${config.voiceCharacter}`,
+        desc: '来自设置里的 voice id，不在当前目录',
+        badge: '自定义'
+      }
+    : null;
+  const visibleVoices = customVoice ? [...voiceCharacters, customVoice] : voiceCharacters;
 
   const volumePresets = [
     { label: '静音 0%', value: 0.0 },
-    { label: '推荐 10%', value: 0.10, isDefault: true },
+    { label: '推荐 16%', value: 0.16, isDefault: true },
     { label: '清晰 25%', value: 0.25 },
     { label: '主打 50%', value: 0.50 }
   ];
 
+  const recommendedTrackId = recommendedGenre
+    ? GENRE_PACKS.find((pack) => pack.id === recommendedGenre)?.bgmTrackId
+    : null;
+  const visibleTracks = bgmTracksForGenre(genreFilter);
+
   // Show a quick auto-dismiss toast feedback
   const showFeedback = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 2400);
+    showStatusToast(msg, { tone: 'ok' });
   };
+
+  useEffect(() => {
+    if (recommendedGenre) setGenreFilter(recommendedGenre);
+  }, [recommendedGenre]);
 
   // Subscribe to audio engine preview states for bi-directional synchronization
   useEffect(() => {
@@ -71,13 +109,27 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
       setIsPlayingPreviewVoice(false);
     } else {
       setIsPlayingPreviewVoice(true);
-      const textToSpeak = sampleNarrationText || '这是AI自动合成的短视频旁白配音效果，正在为你实时试听。';
-      audioEngine.speakNarration(
-        textToSpeak,
+      const previewKey = makeVoicePreviewKey(ttsSourceKey(ttsApi, config.voiceCharacter), 1);
+      const cached = getTtsPreviewUrl(previewKey);
+      if (!cached) {
+        showStatusToast('正在合成试听音色…', { tone: 'progress', id: 'voice-preview', durationMs: 0 });
+      }
+      void audioEngine.speakNarration(
+        VOICE_PREVIEW_TEXT,
         config.voiceCharacter,
         config.speechRate,
-        () => setIsPlayingPreviewVoice(false)
-      );
+        () => setIsPlayingPreviewVoice(false),
+        { persistPreview: true }
+      ).then((result) => {
+        if (result?.fromCache) {
+          hideStatusToast('voice-preview');
+          return;
+        }
+        showStatusToast('试听已缓存，同一音色下次不再请求', { tone: 'ok', id: 'voice-preview' });
+      }).catch(() => {
+        hideStatusToast('voice-preview');
+        setIsPlayingPreviewVoice(false);
+      });
     }
   };
 
@@ -120,6 +172,25 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
       bgmEnabled: true
     });
 
+    if (isPlayingPreviewVoice) {
+      audioEngine.stopNarration();
+      setIsPlayingPreviewVoice(false);
+    }
+
+    if (timelinePlaying) {
+      audioEngine.stopPreviewBgm();
+      setPreviewingBgmId(null);
+    } else {
+      const auditionUrl = trackId === 'custom-uploaded' ? (customAudioUrl || undefined) : undefined;
+      setPreviewingBgmId(trackId);
+      audioEngine.previewBgmTrack(
+        trackId,
+        config.bgmVolume > 0 ? Math.max(config.bgmVolume, 0.20) : 0.20,
+        auditionUrl,
+        () => setPreviewingBgmId(null)
+      );
+    }
+
     showFeedback(`已切换视频配乐：${trackTitle.replace(/^[^\s]+\s*/, '')}`);
   };
 
@@ -136,7 +207,8 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
       onChange({
         ...config,
         bgmTrackId: 'custom-uploaded',
-        bgmEnabled: true
+        bgmEnabled: true,
+        customBgmUrl: url
       });
 
       // Auto start preview for instant user feedback
@@ -156,27 +228,16 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
       audioEngine.stopPreviewBgm();
       setPreviewingBgmId(null);
     }
-    // Revert to default epic cinematic
     onChange({
       ...config,
-      bgmTrackId: 'epic-cinematic'
+      bgmTrackId: DEFAULT_BGM_TRACK_ID,
+      customBgmUrl: undefined
     });
     showFeedback('已移除自定义音频，恢复默认背景音乐');
   };
 
   return (
-    <div
-      id="audio-tool-panel"
-      className="w-80 lg:w-84 flex-shrink-0 bg-[#131318] border border-[#23232c] rounded-2xl flex flex-col h-full overflow-hidden select-none z-20 shadow-xl shadow-black/40 relative"
-    >
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 bg-amber-500 text-black font-semibold text-[11px] rounded-lg shadow-lg shadow-amber-500/20 flex items-center gap-1.5 animate-in fade-in slide-in-from-top-2 duration-150">
-          <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
-          <span className="truncate max-w-[220px]">{toastMessage}</span>
-        </div>
-      )}
-
+    <ToolRail id="audio-tool-panel">
       {/* Header */}
       <div className="p-3.5 border-b border-[#23232c] bg-[#16161c] flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -217,15 +278,75 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
             </label>
           </div>
 
-          {/* Voice Character Cards */}
+          <div className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl border border-[#292934] bg-[#181820]">
+            <div className="min-w-0">
+              <div className="text-[10px] text-zinc-500">当前引擎</div>
+              <div className="text-[11px] text-zinc-200 truncate">{ttsEngineLabel(ttsApi)}</div>
+            </div>
+            {onOpenSettings && (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="flex-shrink-0 text-[10px] px-2 py-1 rounded-lg border border-[#3a3a4a] text-zinc-400 hover:text-amber-300 hover:border-amber-500/40 cursor-pointer"
+              >
+                去设置
+              </button>
+            )}
+          </div>
+
+          <div id="full-narration-status" className="p-2.5 rounded-xl border border-[#2b2b36] bg-[#181820] space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-zinc-200 font-medium">整段旁白</span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                isGeneratingNarration
+                  ? 'text-amber-300 border-amber-500/40 bg-amber-500/10'
+                  : narrationFresh
+                    ? 'text-emerald-300 border-emerald-500/40 bg-emerald-500/10'
+                    : config.narrationTrack
+                      ? 'text-amber-300 border-amber-500/40 bg-amber-500/10'
+                      : 'text-zinc-500 border-zinc-700 bg-zinc-800'
+              }`}>
+                {isGeneratingNarration
+                  ? '正在合成'
+                  : narrationFresh
+                    ? '已写入预览'
+                    : config.narrationTrack
+                      ? '需重新生成'
+                      : '还没生成'}
+              </span>
+            </div>
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              可在这里单独重配音，不改画面文件。合成后各镜时长会按口播自动对齐。分镜表里也有同一入口。
+            </p>
+            <button
+              onClick={onGenerateFullNarration}
+              disabled={isGeneratingNarration || !onGenerateFullNarration}
+              className="w-full py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-semibold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 text-xs"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${isGeneratingNarration ? 'animate-spin' : ''}`} />
+              {isGeneratingNarration ? '正在生成整段旁白...' : narrationFresh ? '重新生成整段旁白' : '生成整段旁白'}
+            </button>
+            {config.narrationTrack && narrationFresh && (
+              <div className="text-[10px] text-zinc-500 font-mono">
+                时长 {config.narrationTrack.duration.toFixed(1)}s
+              </div>
+            )}
+            {narrationError && (
+              <div className="text-[11px] text-rose-300 leading-relaxed">{narrationError}</div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 gap-2">
-            {voiceCharacters.map((vc) => {
+            {visibleVoices.map((vc) => {
               const isSelected = config.voiceCharacter === vc.id;
               return (
                 <div
                   key={vc.id}
                   id={`voice-char-${vc.id}`}
-                  onClick={() => onChange({ ...config, voiceCharacter: vc.id as any })}
+                  onClick={() => {
+                    if (onVoiceChange) onVoiceChange(vc.id);
+                    else onChange({ ...config, voiceCharacter: vc.id });
+                  }}
                   className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
                     isSelected
                       ? 'bg-[#252530] border-amber-500 ring-1 ring-amber-500/40 text-zinc-100'
@@ -252,12 +373,11 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
             })}
           </div>
 
-          {/* Voice Pitch / Rate / Test Voice Button */}
           <div className="space-y-2.5 pt-1">
             <div className="space-y-1">
               <div className="flex items-center justify-between text-zinc-400">
                 <span>语速调节</span>
-                <span className="font-mono text-zinc-200">{config.speechRate}x</span>
+                <span className="font-mono text-zinc-200">{supportsSpeechRate ? `${config.speechRate}x` : '此引擎不支持'}</span>
               </div>
               <input
                 type="range"
@@ -265,9 +385,15 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
                 max="1.5"
                 step="0.1"
                 value={config.speechRate}
+                disabled={!supportsSpeechRate}
                 onChange={(e) => onChange({ ...config, speechRate: Number(e.target.value) })}
-                className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                className={`w-full h-1.5 bg-zinc-700 rounded-lg appearance-none accent-amber-500 ${
+                  supportsSpeechRate ? 'cursor-pointer' : 'opacity-40 cursor-not-allowed'
+                }`}
               />
+              {!supportsSpeechRate && (
+                <p className="text-[10px] text-zinc-500">当前百炼模型不会吃语速滑条，之后可换 Instruct 再开。</p>
+              )}
             </div>
 
             <button
@@ -316,8 +442,39 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
           </div>
 
           <p className="text-[11px] text-zinc-400">
-            点击卡片<span className="text-amber-400 font-medium">应用为视频配乐</span>，点击右侧播放键<span className="text-zinc-200 font-medium">独立试听</span>。
+            点卡片<span className="text-amber-400 font-medium">立刻应用到预览</span>；预览正在播时会直接换曲，暂停时会先试听。右侧播放键只负责独立试听。
+            {recommendedGenre && (
+              <span className="block mt-1 text-zinc-500">当前文案体裁「{recommendedGenre}」已匹配一条推荐曲。</span>
+            )}
           </p>
+
+          <div className="flex flex-wrap gap-1">
+            <button
+              type="button"
+              onClick={() => setGenreFilter('all')}
+              className={`px-2 py-0.5 rounded-full text-[10px] border transition-colors ${
+                genreFilter === 'all'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : 'bg-[#1b1b22] text-zinc-400 border-[#292934] hover:text-zinc-200'
+              }`}
+            >
+              全部 {BGM_TRACKS.length}
+            </button>
+            {BGM_GENRE_ORDER.map((genre) => (
+              <button
+                key={genre}
+                type="button"
+                onClick={() => setGenreFilter(genre)}
+                className={`px-2 py-0.5 rounded-full text-[10px] border transition-colors ${
+                  genreFilter === genre
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-[#1b1b22] text-zinc-400 border-[#292934] hover:text-zinc-200'
+                }`}
+              >
+                {genre}
+              </button>
+            ))}
+          </div>
 
           {/* Custom Uploaded Track Card (If exists) */}
           {customTrackName && (
@@ -381,9 +538,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
 
           {/* BGM Tracks List */}
           <div className="space-y-1.5">
-            {BGM_TRACKS.map((track) => {
+            {visibleTracks.map((track) => {
               const isSelected = config.bgmTrackId === track.id && config.bgmEnabled;
               const isPreviewing = previewingBgmId === track.id;
+              const isRecommended = recommendedTrackId === track.id;
 
               return (
                 <div
@@ -399,8 +557,8 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
                   <div className="space-y-1 flex-1 pr-2 min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-semibold text-xs text-zinc-100 truncate">{track.title}</span>
-                      {track.id === 'epic-cinematic' && (
-                        <span className="px-1.5 py-0.2 text-[9px] font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded">默认</span>
+                      {isRecommended && (
+                        <span className="px-1.5 py-0.2 text-[9px] font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded">体裁推荐</span>
                       )}
                       {isSelected && (
                         <span className="px-1.5 py-0.2 text-[9px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded flex items-center gap-0.5">
@@ -409,9 +567,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
                       )}
                     </div>
                     <div className="text-[10px] text-zinc-400 flex items-center gap-2 flex-wrap">
-                      <span className="px-1.5 py-0.2 bg-zinc-800 rounded text-zinc-300">{track.category}</span>
+                      {track.genres.map((genre) => (
+                        <span key={genre} className="px-1.5 py-0.2 bg-zinc-800 rounded text-zinc-300">{genre}</span>
+                      ))}
                       <span className="text-zinc-500 font-mono">{track.durationText}</span>
-                      <span className="text-zinc-500 font-mono">{track.bpm} BPM</span>
                       <span className="text-zinc-400 truncate">{track.mood}</span>
                     </div>
                   </div>
@@ -464,17 +623,17 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
                 </span>
                 <div className="flex items-center gap-1.5">
                   <span className="font-mono text-zinc-200 font-semibold">{Math.round(config.bgmVolume * 100)}%</span>
-                  {config.bgmVolume !== 0.10 && (
+                  {Math.abs(config.bgmVolume - 0.16) > 0.02 && (
                     <button
                       onClick={() => {
-                        onChange({ ...config, bgmVolume: 0.10 });
-                        audioEngine.setBgmVolume(0.10);
-                        showFeedback('音量已重置为推荐默认 10%');
+                        onChange({ ...config, bgmVolume: 0.16 });
+                        audioEngine.setBgmVolume(0.16);
+                        showFeedback('音量已重置为推荐默认 16%');
                       }}
                       className="text-[10px] text-zinc-500 hover:text-amber-400 flex items-center gap-0.5 cursor-pointer"
-                      title="重置为默认 10%"
+                      title="重置为默认 16%"
                     >
-                      <RotateCcw className="w-2.5 h-2.5" /> 恢复10%
+                      <RotateCcw className="w-2.5 h-2.5" /> 恢复16%
                     </button>
                   )}
                 </div>
@@ -539,6 +698,6 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({ config, onChange, sample
           </div>
         </div>
       </div>
-    </div>
+    </ToolRail>
   );
 };

@@ -1,4 +1,4 @@
-import { VideoProject, VisualStyle, SubtitleConfig, AudioConfig, CustomImageApiConfig, CustomLlmApiConfig } from '../types';
+import { VideoProject, VisualStyle, SubtitleConfig, AudioConfig, CustomImageApiConfig, CustomLlmApiConfig, CustomTtsApiConfig, ScriptGenre } from '../types';
 
 export const DEFAULT_CUSTOM_IMAGE_API: CustomImageApiConfig = {
   enabled: false,
@@ -26,11 +26,24 @@ export function isCustomImageProvider(api?: CustomImageApiConfig): boolean {
 
 export const DEFAULT_CUSTOM_LLM_API: CustomLlmApiConfig = {
   enabled: false,
-  provider: 'deepseek',
-  endpoint: 'https://api.deepseek.com',
+  provider: 'builtin',
+  endpoint: '',
   apiKey: '',
-  model: 'deepseek-v4-flash'
+  model: ''
 };
+
+export function resolveLlmApi(api?: CustomLlmApiConfig): CustomLlmApiConfig {
+  if (!api) return { ...DEFAULT_CUSTOM_LLM_API };
+  if (api.provider === 'builtin' || api.enabled === false) {
+    return { ...DEFAULT_CUSTOM_LLM_API, ...api, provider: 'builtin', enabled: false };
+  }
+  return { ...DEFAULT_CUSTOM_LLM_API, ...api, enabled: true };
+}
+
+export function isCustomLlmProvider(api?: CustomLlmApiConfig): boolean {
+  const resolved = resolveLlmApi(api);
+  return resolved.provider !== 'builtin' && !!resolved.apiKey.trim() && !!resolved.endpoint.trim();
+}
 
 export interface LlmProviderPreset {
   id: CustomLlmApiConfig['provider'];
@@ -45,6 +58,17 @@ export interface LlmProviderPreset {
 }
 
 export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
+  {
+    id: 'builtin',
+    name: '内置引擎',
+    badge: '无需密钥',
+    description: '未配置自定义 LLM 时，使用服务端 Gemini（若已配置）或本地分镜引擎',
+    defaultEndpoint: '',
+    defaultModel: '',
+    popularModels: [],
+    docHint: '适合先跑通流程。需要更高质量的中文分镜和润色时，改选 DeepSeek 并填写 API Key。',
+    available: true
+  },
   {
     id: 'deepseek',
     name: 'DeepSeek',
@@ -162,6 +186,107 @@ export const IMAGE_API_PROVIDER_PRESETS: ImageApiProviderPreset[] = [
   }
 ];
 
+export const DEFAULT_CUSTOM_TTS_API: CustomTtsApiConfig = {
+  enabled: false,
+  provider: 'edge',
+  endpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+  apiKey: '',
+  model: 'qwen3-tts-flash',
+  voice: 'Cherry'
+};
+
+export function resolveTtsApi(api?: CustomTtsApiConfig): CustomTtsApiConfig {
+  if (!api) return { ...DEFAULT_CUSTOM_TTS_API };
+  if (api.provider === 'edge' || api.enabled === false) {
+    return { ...DEFAULT_CUSTOM_TTS_API, ...api, provider: 'edge', enabled: false };
+  }
+  return { ...DEFAULT_CUSTOM_TTS_API, ...api, enabled: true };
+}
+
+export function isCustomTtsProvider(api?: CustomTtsApiConfig): boolean {
+  const resolved = resolveTtsApi(api);
+  return resolved.provider !== 'edge' && !!resolved.apiKey.trim();
+}
+
+export interface TtsProviderPreset {
+  id: CustomTtsApiConfig['provider'];
+  name: string;
+  badge: string;
+  description: string;
+  defaultEndpoint: string;
+  defaultModel: string;
+  defaultVoice: string;
+  popularModels: { id: string; label: string; hint: string }[];
+  popularVoices: { id: string; label: string; hint: string }[];
+  docHint: string;
+  available: boolean;
+}
+
+export const TTS_PROVIDER_PRESETS: TtsProviderPreset[] = [
+  {
+    id: 'edge',
+    name: '内置 Edge TTS',
+    badge: '无需密钥',
+    description: '微软 Edge 神经语音，免费无需密钥，已内置在声音面板',
+    defaultEndpoint: '',
+    defaultModel: '',
+    defaultVoice: '',
+    popularModels: [],
+    popularVoices: [],
+    docHint: '直接在「声音」页选择音色即可，无需额外配置。',
+    available: true
+  },
+  {
+    id: 'bailian',
+    name: '阿里云百炼 Qwen-TTS',
+    badge: '已接入',
+    description: 'DashScope 千问语音合成，中文表现力强，需北京地域 API Key',
+    defaultEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    defaultModel: 'qwen3-tts-flash',
+    defaultVoice: 'Cherry',
+    popularModels: [
+      { id: 'qwen3-tts-flash', label: 'Qwen3-TTS-Flash', hint: '轻量快速，日常配音推荐' },
+      { id: 'qwen3-tts-instruct-flash', label: 'Instruct-Flash', hint: '支持指令控制语速/情感' },
+      { id: 'qwen-tts', label: 'Qwen-TTS', hint: '经典稳定版音色' }
+    ],
+    popularVoices: [
+      { id: 'Cherry', label: 'Cherry', hint: '甜美活力女声' },
+      { id: 'Serena', label: 'Serena', hint: '温柔知性女声' },
+      { id: 'Ethan', label: 'Ethan', hint: '沉稳磁性男声' },
+      { id: 'Chelsie', label: 'Chelsie', hint: '清晰播音女声' },
+      { id: 'Jasper', label: 'Jasper', hint: '年轻阳光男声' }
+    ],
+    docHint: '在百炼控制台创建北京地域 API Key（sk-...）。支持音色列表见百炼「Qwen-TTS 音色列表」文档。',
+    available: true
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    badge: '即将开放',
+    description: '高表现力中文配音，后续开放',
+    defaultEndpoint: '',
+    defaultModel: '',
+    defaultVoice: '',
+    popularModels: [],
+    popularVoices: [],
+    docHint: '',
+    available: false
+  },
+  {
+    id: 'azure',
+    name: 'Azure Speech',
+    badge: '即将开放',
+    description: '企业级多语言神经语音，后续开放',
+    defaultEndpoint: '',
+    defaultModel: '',
+    defaultVoice: '',
+    popularModels: [],
+    popularVoices: [],
+    docHint: '',
+    available: false
+  }
+];
+
 export const STYLE_DEFINITIONS: Record<VisualStyle, {
   id: VisualStyle;
   name: string;
@@ -273,98 +398,206 @@ export interface BgmTrackDefinition {
   url: string;
   fallbackUrl: string;
   durationText: string;
+  genres: ScriptGenre[];
+  credit?: string;
 }
+
+export const BGM_GENRE_ORDER: ScriptGenre[] = ['科普', '反常识', '故事', '教程', '带货', '情绪', '热点解读', '口播金句'];
 
 export const BGM_TRACKS: BgmTrackDefinition[] = [
   {
-    id: 'epic-cinematic',
-    title: '🌌 宇宙史诗 · 电影原声',
-    category: '电影原声',
-    bpm: 85,
-    mood: '宏大、神秘、院线史诗交响',
-    previewColor: '#6366f1',
-    url: '/audio/bgm/epic-cinematic.mp3',
-    fallbackUrl: 'https://commondatastorage.googleapis.com/codeskulptor-assets/sounddogs/soundtrack.mp3',
-    durationText: '01:31'
+    id: 'kepu-thinking',
+    title: '🧠 思考底垫 · 科普口播',
+    category: '科普',
+    bpm: 92,
+    mood: '轻思考、不抢话、适合讲机制',
+    previewColor: '#38bdf8',
+    url: '/audio/bgm/kepu-thinking.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Thinking%20Music.mp3',
+    durationText: '02:37',
+    genres: ['科普', '热点解读'],
+    credit: 'Kevin MacLeod · Thinking Music · CC BY 3.0'
   },
   {
-    id: 'chill-lofi',
-    title: '☕ 轻松复古 · 80s 律动',
-    category: '轻松复古',
-    bpm: 78,
-    mood: '治愈、节奏、惬意舒适',
-    previewColor: '#f59e0b',
-    url: '/audio/bgm/chill-lofi.mp3',
-    fallbackUrl: 'https://cdn.jsdelivr.net/gh/goldfire/howler.js@master/examples/player/audio/80s_vibe.mp3',
-    durationText: '01:00'
+    id: 'kepu-deliberate',
+    title: '📘 沉稳论述 · 机制讲解',
+    category: '科普',
+    bpm: 80,
+    mood: '沉稳、纪录片感、把一件事讲明白',
+    previewColor: '#0ea5e9',
+    url: '/audio/bgm/kepu-deliberate.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Deliberate%20Thought.mp3',
+    durationText: '02:57',
+    genres: ['科普'],
+    credit: 'Kevin MacLeod · Deliberate Thought · CC BY 3.0'
   },
   {
-    id: 'cyber-pulse',
-    title: '⚡ 赛博狂飙 · 电子狂欢',
-    category: '电子科幻',
-    bpm: 120,
-    mood: '科技、前沿、能量充沛',
-    previewColor: '#ec4899',
-    url: '/audio/bgm/cyber-pulse.mp3',
-    fallbackUrl: 'https://cdn.jsdelivr.net/gh/goldfire/howler.js@master/examples/player/audio/rave_digger.mp3',
-    durationText: '01:18'
-  },
-  {
-    id: 'running-energy',
-    title: '🔥 高燃动感 · 活力冲刺',
-    category: '高燃卡点',
-    bpm: 128,
-    mood: '极速、昂扬、爆发力',
-    previewColor: '#f97316',
-    url: '/audio/bgm/running-energy.mp3',
-    fallbackUrl: 'https://cdn.jsdelivr.net/gh/goldfire/howler.js@master/examples/player/audio/running_out.mp3',
-    durationText: '01:08'
-  },
-  {
-    id: 'ambient-ethereal',
-    title: '✨ 空灵幻境 · 梦幻光影',
-    category: '唯美氛围',
-    bpm: 68,
-    mood: '空灵、诗意、情绪沉浸',
-    previewColor: '#a855f7',
-    url: '/audio/bgm/ambient-ethereal.ogg',
-    fallbackUrl: 'https://commondatastorage.googleapis.com/codeskulptor-assets/Epoq-Lepidoptera.ogg',
-    durationText: '04:32'
-  },
-  {
-    id: 'tech-future',
-    title: '🚀 科技脉冲 · 智能未来',
-    category: '商业科技',
+    id: 'fan-sneaky',
+    title: '🕵️ 反转探案 · 先藏后揭',
+    category: '反常识',
     bpm: 110,
-    mood: '现代、智能、轻快节奏',
-    previewColor: '#06b6d4',
-    url: '/audio/bgm/tech-future.mp3',
-    fallbackUrl: 'https://raw.githubusercontent.com/mdn/webaudio-examples/master/audio-analyser/viper.mp3',
-    durationText: '00:41'
+    mood: '俏皮紧张、适合拆误解和反转',
+    previewColor: '#f43f5e',
+    url: '/audio/bgm/fan-sneaky.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Sneaky%20Snitch.mp3',
+    durationText: '02:13',
+    genres: ['反常识', '热点解读'],
+    credit: 'Kevin MacLeod · Sneaky Snitch · CC BY 3.0'
   },
   {
-    id: 'warm-acoustic',
-    title: '🌿 温暖叙事 · 情感治愈',
-    category: '生活纪实',
-    bpm: 90,
-    mood: '温情、自然、娓娓道来',
-    previewColor: '#10b981',
-    url: '/audio/bgm/warm-acoustic.mp3',
-    fallbackUrl: 'https://cdn.jsdelivr.net/gh/rafaelreis-hotmart/Audio-Sample-files/sample.mp3',
-    durationText: '04:36'
+    id: 'story-touching',
+    title: '📖 故事钢琴 · 人物转折',
+    category: '故事',
+    bpm: 72,
+    mood: '钢琴叙事、金句前后停得住',
+    previewColor: '#fb7185',
+    url: '/audio/bgm/story-touching.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Touching%20Story.mp3',
+    durationText: '01:06',
+    genres: ['故事', '情绪'],
+    credit: 'Kevin MacLeod · Touching Story · CC BY 3.0'
   },
   {
-    id: 'deep-exploration',
-    title: '🪐 深空探索 · 沉浸迷幻',
-    category: '纪录探索',
-    bpm: 75,
-    mood: '深邃、沉浸、奇幻探索',
-    previewColor: '#3b82f6',
-    url: '/audio/bgm/deep-exploration.mp3',
-    fallbackUrl: 'https://commondatastorage.googleapis.com/codeskulptor-demos/DDR_assets/Sevish_-__nbsp_.mp3',
-    durationText: '03:40'
+    id: 'tutorial-lemon',
+    title: '🍋 轻松柠檬 · 跟着做',
+    category: '教程',
+    bpm: 108,
+    mood: '轻快、不压口播、适合步骤演示',
+    previewColor: '#facc15',
+    url: '/audio/bgm/tutorial-lemon.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Easy%20Lemon.mp3',
+    durationText: '02:06',
+    genres: ['教程'],
+    credit: 'Kevin MacLeod · Easy Lemon · CC BY 3.0'
+  },
+  {
+    id: 'tutorial-carefree',
+    title: '🎈 轻快无压 · 步骤演示',
+    category: '教程',
+    bpm: 115,
+    mood: '轻松、明亮、适合生活教程',
+    previewColor: '#84cc16',
+    url: '/audio/bgm/tutorial-carefree.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Carefree.mp3',
+    durationText: '02:44',
+    genres: ['教程', '带货'],
+    credit: 'Kevin MacLeod · Carefree · CC BY 3.0'
+  },
+  {
+    id: 'shop-catwalk',
+    title: '🛍️ 街拍律动 · 种草带货',
+    category: '带货',
+    bpm: 129,
+    mood: '时髦、轻快、适合产品出镜',
+    previewColor: '#fb7185',
+    url: '/audio/bgm/shop-catwalk.mp3',
+    fallbackUrl: 'https://assets.mixkit.co/music/371/371.mp3',
+    durationText: '01:40',
+    genres: ['带货'],
+    credit: 'Arulo · Cat Walk · Mixkit License'
+  },
+  {
+    id: 'shop-house',
+    title: '🏠 宅家律动 · 种草卡点',
+    category: '带货',
+    bpm: 123,
+    mood: 'House 律动、适合好物展示',
+    previewColor: '#e879f9',
+    url: '/audio/bgm/shop-house.mp3',
+    fallbackUrl: 'https://assets.mixkit.co/music/745/745.mp3',
+    durationText: '01:51',
+    genres: ['带货', '教程'],
+    credit: 'Lily J · House Vibez · Mixkit License'
+  },
+  {
+    id: 'emotion-frozen',
+    title: '❄️ 冰星夜曲 · 情绪金句',
+    category: '情绪',
+    bpm: 88,
+    mood: '空灵、停留、适合共鸣与金句',
+    previewColor: '#a78bfa',
+    url: '/audio/bgm/emotion-frozen.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Frozen%20Star.mp3',
+    durationText: '03:41',
+    genres: ['情绪', '故事'],
+    credit: 'Kevin MacLeod · Frozen Star · CC BY 3.0'
+  },
+  {
+    id: 'news-investigations',
+    title: '🗞️ 调查底垫 · 热点解读',
+    category: '热点解读',
+    bpm: 100,
+    mood: '调查感、不吵、适合讲这件事意味着什么',
+    previewColor: '#64748b',
+    url: '/audio/bgm/news-investigations.mp3',
+    fallbackUrl: 'https://incompetech.com/music/royalty-free/mp3-royaltyfree/Investigations.mp3',
+    durationText: '01:34',
+    genres: ['热点解读', '科普', '反常识'],
+    credit: 'Kevin MacLeod · Investigations · CC BY 3.0'
+  },
+  {
+    id: 'punch-nba',
+    title: '🎤 说唱卡点 · 金句口播',
+    category: '口播金句',
+    bpm: 86,
+    mood: '都市说唱底鼓、一句就能记住',
+    previewColor: '#f59e0b',
+    url: '/audio/bgm/punch-nba.mp3',
+    fallbackUrl: 'https://assets.mixkit.co/music/403/403.mp3',
+    durationText: '01:44',
+    genres: ['口播金句', '带货'],
+    credit: 'Arulo · G Eazy NBA type · Mixkit License'
+  },
+  {
+    id: 'punch-tonight',
+    title: '🌃 夜色节拍 · 短句记忆',
+    category: '口播金句',
+    bpm: 103,
+    mood: '夜色节拍、适合短口播和钩子',
+    previewColor: '#818cf8',
+    url: '/audio/bgm/punch-tonight.mp3',
+    fallbackUrl: 'https://assets.mixkit.co/music/841/841.mp3',
+    durationText: '01:53',
+    genres: ['口播金句', '热点解读'],
+    credit: 'Michael Ramir C. · Tonight · Mixkit License'
   }
 ];
+
+export const DEFAULT_BGM_TRACK_ID = 'kepu-thinking';
+
+const RETIRED_BGM_IDS: Record<string, string> = {
+  'epic-cinematic': 'news-investigations',
+  'chill-lofi': 'tutorial-lemon',
+  'cyber-pulse': 'punch-tonight',
+  'running-energy': 'shop-catwalk',
+  'ambient-ethereal': 'emotion-frozen',
+  'warm-acoustic': 'story-touching',
+  'deep-exploration': 'kepu-deliberate',
+  'tech-future': 'kepu-thinking'
+};
+
+export function resolveBgmTrackId(id: string | null | undefined): string {
+  if (!id || id === 'custom-uploaded' || id === 'none') return id || DEFAULT_BGM_TRACK_ID;
+  if (RETIRED_BGM_IDS[id]) return RETIRED_BGM_IDS[id];
+  return BGM_TRACKS.some((track) => track.id === id) ? id : DEFAULT_BGM_TRACK_ID;
+}
+
+export function bgmById(id: string | null | undefined): BgmTrackDefinition | null {
+  if (!id) return null;
+  return BGM_TRACKS.find((track) => track.id === resolveBgmTrackId(id)) || BGM_TRACKS[0] || null;
+}
+
+export function bgmTracksForGenre(genre: ScriptGenre | 'all' | null | undefined): BgmTrackDefinition[] {
+  if (!genre || genre === 'all') return BGM_TRACKS;
+  const matched = BGM_TRACKS.filter((track) => track.genres.includes(genre));
+  return matched.length ? matched : BGM_TRACKS;
+}
+
+export function recommendedBgmIdForGenre(genre: ScriptGenre | null | undefined): string | null {
+  if (!genre) return null;
+  const primary = BGM_TRACKS.find((track) => track.genres[0] === genre);
+  return primary?.id || BGM_TRACKS.find((track) => track.genres.includes(genre))?.id || null;
+}
 
 export const DEFAULT_SUBTITLE_CONFIG: SubtitleConfig = {
   enabled: true,
@@ -385,8 +618,8 @@ export const DEFAULT_SUBTITLE_CONFIG: SubtitleConfig = {
 
 export const DEFAULT_AUDIO_CONFIG: AudioConfig = {
   bgmEnabled: true,
-  bgmTrackId: 'epic-cinematic',
-  bgmVolume: 0.10,
+  bgmTrackId: DEFAULT_BGM_TRACK_ID,
+  bgmVolume: 0.16,
   voiceoverEnabled: true,
   voiceoverVolume: 0.95,
   voiceCharacter: 'magnetic-male',
@@ -416,7 +649,7 @@ export const SAMPLE_PROJECTS: VideoProject[] = [
     },
     audio: {
       ...DEFAULT_AUDIO_CONFIG,
-      bgmTrackId: 'epic-cinematic'
+      bgmTrackId: 'kepu-thinking'
     },
     clips: [
       {
@@ -490,7 +723,7 @@ export const SAMPLE_PROJECTS: VideoProject[] = [
     },
     audio: {
       ...DEFAULT_AUDIO_CONFIG,
-      bgmTrackId: 'cyber-pulse'
+      bgmTrackId: 'punch-tonight'
     },
     clips: [
       {

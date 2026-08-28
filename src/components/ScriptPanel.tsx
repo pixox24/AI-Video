@@ -1,351 +1,1773 @@
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
-  Wand2,
+  ArrowRight,
+  Clapperboard,
+  Clock,
+  FileText,
+  Lightbulb,
+  Link2,
+  Loader2,
+  Package,
+  Pause,
+  PenLine,
   RefreshCw,
   Sparkles,
-  Layers,
-  Clock,
-  Lightbulb,
-  CheckCircle2,
-  Sliders,
-  ArrowRight
+  Volume2,
+  Wand2,
+  Zap
 } from 'lucide-react';
-import { StoryboardClip, ScriptSubTab, CameraMotion, TransitionType, VisualStyle, CustomLlmApiConfig } from '../types';
-import { TOPIC_IDEAS } from '../utils/presets';
-import { generateProceduralArtwork } from '../utils/visualGenerator';
+import {
+  AspectRatio,
+  BeatFunction,
+  CustomLlmApiConfig,
+  CustomTtsApiConfig,
+  ResearchNotes,
+  ScriptGenre,
+  ScriptIntent,
+  ScriptPace,
+  ScriptPlatform,
+  ScriptStage,
+  ScriptWorkspace,
+  ShotEnergy,
+  StoryboardClip,
+  TopicCard,
+  StylePack,
+  VisualStyle
+} from '../types';
+import { countNarrationChars } from '../utils/narrationTrack';
+import {
+  PACE_PRESETS,
+  PLATFORM_OPTIONS,
+  STAGE_META,
+  TARGET_SECONDS_PRESETS,
+  applyNarrationToBeats,
+  beatIntentLabel,
+  buildDurationBudget,
+  estimatedShotCount,
+  formatSeconds,
+  GENRE_PACKS,
+  genrePackById,
+  lockedShotImplication,
+  narrationFromBeats,
+  recommendDuration,
+  usageRatio
+} from '../utils/scriptBudget';
+import {
+  applyGenrePack,
+  applyHoldToWorkspace,
+  applyResearchNoteToHook,
+  applyResearchNoteToTopic,
+  canApplyStoryboard,
+  diagnoseExistingScript,
+  fallbackDraft,
+  fallbackTopicCards,
+  forecastScriptHash,
+  forecastSummary,
+  forecastToClips,
+  hookPreviewText,
+  resolveStoryboardApplyMode,
+  stampAppliedWorkspace,
+  stylePackFingerprint,
+  mixTopicCards,
+  rebuildForecast,
+  refreshWorkspaceDerived,
+  RESEARCH_DRAG_MIME,
+  RESEARCH_FIELDS,
+  stageCompleted,
+  workspaceTopicTitle
+} from '../utils/scriptWorkspace';
+import { bgmById } from '../utils/presets';
 
 interface ScriptPanelProps {
-  topic: string;
+  workspace: ScriptWorkspace;
+  onChange: (workspace: ScriptWorkspace) => void;
   onTopicChange: (topic: string) => void;
   onClipsChange: (clips: StoryboardClip[]) => void;
   visualStyle: VisualStyle;
+  stylePack?: StylePack;
+  aspectRatio?: AspectRatio;
   customLlmApi?: CustomLlmApiConfig;
+  customTtsApi?: CustomTtsApiConfig;
+  voiceCharacter?: string;
+  speechRate?: number;
   onSelectClip: (clipId: string) => void;
   onOpenStoryboard?: () => void;
+  onNeedFullNarration?: (clips: StoryboardClip[]) => void;
+  onApplyStyleOnly?: () => void;
+  existingClips?: StoryboardClip[];
+  isApplyingStyle?: boolean;
+  onRecommendBgm?: (trackId: string) => void;
+  isGeneratingNarration?: boolean;
+  narrationError?: string | null;
+  narrationFresh?: boolean;
 }
 
+const INTENT_CARDS: {
+  id: ScriptIntent;
+  title: string;
+  desc: string;
+  icon: React.ReactNode;
+}[] = [
+  { id: 'blank', title: '今天不知道拍什么', desc: '给你三张可拍的选题卡', icon: <Lightbulb className="w-5 h-5" /> },
+  { id: 'direction', title: '有方向没题目', desc: '一句话扩成三个不同角度', icon: <Sparkles className="w-5 h-5" /> },
+  { id: 'product', title: '有产品 / 账号', desc: '卖点变成可拍场景', icon: <Package className="w-5 h-5" /> },
+  { id: 'reference', title: '有对标', desc: '保留节奏，换角度', icon: <Link2 className="w-5 h-5" /> },
+  { id: 'have-script', title: '已有文案', desc: '粘贴口播，诊断时长和切镜', icon: <FileText className="w-5 h-5" /> }
+];
+
+const ENERGY_LABEL: Record<ShotEnergy, string> = {
+  fast: '快',
+  medium: '中',
+  slow: '慢',
+  hold: '停'
+};
+
+const ENERGY_COLOR: Record<ShotEnergy, string> = {
+  fast: 'bg-orange-400',
+  medium: 'bg-amber-400',
+  slow: 'bg-sky-400',
+  hold: 'bg-violet-400'
+};
+
+const FUNCTION_LABEL: Record<BeatFunction, string> = {
+  hook: '钩子',
+  setup: '铺垫',
+  turn: '转折',
+  proof: '证据',
+  reveal: '揭示',
+  cta: '收束'
+};
+
 export const ScriptPanel: React.FC<ScriptPanelProps> = ({
-  topic,
+  workspace,
+  onChange,
   onTopicChange,
   onClipsChange,
   visualStyle,
+  stylePack,
+  aspectRatio = '16:9',
   customLlmApi,
+  customTtsApi,
+  voiceCharacter = 'magnetic-male',
+  speechRate = 1,
   onSelectClip,
-  onOpenStoryboard
+  onOpenStoryboard,
+  onNeedFullNarration,
+  onApplyStyleOnly,
+  existingClips = [],
+  isApplyingStyle = false,
+  onRecommendBgm,
+  isGeneratingNarration = false,
+  narrationError = null,
+  narrationFresh = false
 }) => {
-  const [subTab, setSubTab] = useState<ScriptSubTab>('one-click');
-  const [genre, setGenre] = useState('爆款科普');
-  const [targetDuration, setTargetDuration] = useState<number>(30);
-  const [clipCount, setClipCount] = useState<number>(4);
-  const [tone, setTone] = useState<'punchy' | 'emotional' | 'humorous'>('punchy');
-  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const genres = ['爆款科普', '商业宣传', '情感治愈', '科幻未来', '历史传奇', '旅行纪实'];
-
-  const applyGeneratedShots = (rawShots: any[] | null, sourceTopic: string) => {
-    const safeCount = Math.max(3, Math.min(8, clipCount));
-    const avgDur = Math.round((targetDuration / safeCount) * 10) / 10;
-    const shots = rawShots && rawShots.length > 0
-      ? rawShots
-      : Array.from({ length: safeCount }, (_, i) => ({
-          order: i + 1,
-          duration: avgDur,
-          narration: `【镜头 ${i + 1}】围绕「${sourceTopic}」展开精彩解析，层层递进揭秘核心看点。`,
-          secondaryText: `Scene ${i + 1}: Exploring the core perspectives of ${sourceTopic}.`,
-          visualPrompt: `Cinematic atmospheric shot showing ${sourceTopic}, scene ${i + 1}, highly detailed, masterwork composition`,
-          chineseVisualPrompt: `画面展现 ${sourceTopic} 第 ${i + 1} 幕核心场景`,
-          cameraMotion: i === 0 ? 'zoom-in' : i === 1 ? 'pan-left' : 'cinematic-orbit',
-          transition: 'crossfade'
-        }));
-
-    const newClips: StoryboardClip[] = shots.map((shot: any, index: number) => ({
-      id: `clip-${Date.now()}-${index}`,
-      order: shot.order || index + 1,
-      duration: typeof shot.duration === 'number' ? shot.duration : avgDur,
-      narration: shot.narration || `镜头 ${index + 1}：关于${sourceTopic}的精彩解析`,
-      secondaryText: shot.secondaryText || `Shot ${index + 1}: Key perspective on ${sourceTopic}`,
-      visualPrompt: shot.visualPrompt || `${sourceTopic}, scene ${index + 1}, cinematic lighting, 8k resolution`,
-      chineseVisualPrompt: shot.chineseVisualPrompt || `第 ${index + 1} 幕画面，细腻光影与氛围感`,
-      cameraMotion: (shot.cameraMotion as CameraMotion) || 'zoom-in',
-      transition: (shot.transition as TransitionType) || 'crossfade',
-      imageUrl: generateProceduralArtwork(shot.narration || sourceTopic, visualStyle, '16:9', index),
-      isGeneratingImage: false
-    }));
-
-    onClipsChange(newClips);
-    if (newClips.length > 0) onSelectClip(newClips[0].id);
-    setStatusMessage(`已生成 ${newClips.length} 个分镜头，正在进入分镜台`);
-    window.setTimeout(() => onOpenStoryboard?.(), 350);
+  const handleGenrePack = (genre: ScriptGenre) => {
+    onChange(applyGenrePack(workspace, genre));
+    const pack = genrePackById(genre);
+    if (pack?.bgmTrackId) onRecommendBgm?.(pack.bgmTrackId);
+    const track = pack?.bgmTrackId ? bgmById(pack.bgmTrackId) : null;
+    setStatus(track ? `已套 ${genre} 体裁包，配乐切到「${track.title.replace(/^[^\s]+\s*/, '')}」` : `已套 ${genre} 体裁包`);
+    setError(null);
   };
 
-  const handleGenerateScript = async () => {
-    if (!topic.trim()) {
-      setStatusMessage('请输入短视频主题或提示词');
+  const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId) || null;
+  const chars = workspace.durationBudget.usedChars;
+  const applyReady = canApplyStoryboard(workspace);
+  const topicTitle = workspaceTopicTitle(workspace, '未选题');
+
+  const commit = (next: ScriptWorkspace) => {
+    onChange(refreshWorkspaceDerived(next));
+  };
+
+  const setStage = (stage: ScriptStage) => commit({ ...workspace, stage, gate: 'deep' });
+
+  const handleFastGate = async () => {
+    if (workspace.intent === 'have-script' && (workspace.fullNarration || workspace.intentNotes).trim()) {
+      await handleDiagnose();
       return;
     }
+    if (workspace.selectedTopicId && (selected || workspace.intentNotes.trim())) {
+      await handleDraft();
+      return;
+    }
+    if (workspace.intent === 'reference' && workspace.referenceUrl.trim()) {
+      await handleReference();
+      return;
+    }
+    await handleScoutTopics();
+  };
 
-    setIsGeneratingScript(true);
-    setStatusMessage('AI 正在构思黄金3秒抓人Hook与智能分镜剧本...');
-
+  const handleScoutTopics = async () => {
+    if (workspace.intent === 'direction' || workspace.intent === 'product' || workspace.intent === 'reference') {
+      if (!workspace.intentNotes.trim()) {
+        setError('先写一句话，再出选题卡');
+        return;
+      }
+    }
+    setBusy('topics');
+    setError(null);
+    setStatus('正在找三个不同角度...');
     try {
-      const res = await fetch('/api/script/generate', {
+      const res = await fetch('/api/script/topics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          topic: topic.trim(),
-          genre,
-          targetDuration,
-          visualStyle,
-          clipCount,
-          tone,
+          intent: workspace.intent || 'blank',
+          intentNotes: workspace.intentNotes,
+          platform: workspace.durationBudget.platform,
+          pace: workspace.durationBudget.pace,
+          researchNotes: workspace.researchNotes,
+          researchBrief: workspace.researchBrief,
+          genrePackId: workspace.genrePackId,
           llmApi: customLlmApi
         })
       });
-
       const data = await res.json().catch(() => ({}));
-      const rawShots = data?.shots && Array.isArray(data.shots) && data.shots.length > 0
-        ? data.shots
-        : null;
-      applyGeneratedShots(rawShots, topic.trim());
-    } catch (err: any) {
-      console.warn('Script generation exception, activating robust client fallback:', err);
-      applyGeneratedShots(null, topic.trim());
+      const cards: TopicCard[] = Array.isArray(data?.cards) && data.cards.length > 0
+        ? data.cards.slice(0, 3)
+        : fallbackTopicCards(workspace.intentNotes, workspace.intent);
+      commit({
+        ...workspace,
+        gate: 'fast',
+        topicCards: cards,
+        selectedTopicId: null,
+        stage: 'topic'
+      });
+      setStatus('选出一张卡。点卡只锁题，不会写全文。');
+    } catch {
+      const cards = fallbackTopicCards(workspace.intentNotes, workspace.intent);
+      commit({ ...workspace, gate: 'fast', topicCards: cards, selectedTopicId: null, stage: 'topic' });
+      setStatus('网络不可用，已用本地选题卡。');
     } finally {
-      setIsGeneratingScript(false);
+      setBusy(null);
     }
+  };
+
+  const handleSelectCard = (card: TopicCard) => {
+    const rec = recommendDuration(workspace.durationBudget.platform, card.genre, card.conceptCount);
+    const durationBudget = buildDurationBudget({
+      platform: workspace.durationBudget.platform,
+      pace: card.paceHint || rec.pace,
+      targetSeconds: card.durationHint || rec.seconds,
+      usedChars: chars,
+      conceptUsed: card.conceptCount
+    });
+    onTopicChange(card.title);
+    commit({
+      ...workspace,
+      selectedTopicId: card.id,
+      durationBudget,
+      stage: 'duration',
+      gate: workspace.gate
+    });
+    setStatus(rec.reason);
+    setError(null);
+  };
+
+  const handleDraft = async () => {
+    const topic = selected?.title || workspace.intentNotes.trim();
+    if (!topic) {
+      setError('先选定选题，或在意图里写方向');
+      return;
+    }
+    setBusy('draft');
+    setError(null);
+    setStatus('按字数预算写节拍和口播...');
+    try {
+      const res = await fetch('/api/script/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic,
+          topicCard: selected,
+          intent: workspace.intent,
+          intentNotes: workspace.intentNotes,
+          researchNotes: workspace.researchNotes,
+          budget: workspace.durationBudget,
+          genrePack: genrePackById(workspace.genrePackId || selected?.genre || null),
+          llmApi: customLlmApi,
+          stylePack
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      await applyDraftResult(data, topic);
+    } catch {
+      await applyDraftResult(null, topic);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const refineSpeechSpans = async (base: ScriptWorkspace, narration: string): Promise<ScriptWorkspace> => {
+    try {
+      const res = await fetch('/api/script/split-spans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ narration, llmApi: customLlmApi })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (Array.isArray(data?.spans) && data.spans.length > 0) {
+        return rebuildForecast({ ...base, fullNarration: narration, speechSpans: data.spans });
+      }
+    } catch {
+      // local sentence + contrast visuals
+    }
+    return rebuildForecast({ ...base, fullNarration: narration, speechSpans: [] });
+  };
+
+  const applyDraftResult = async (data: any, topic: string) => {
+    const fallback = fallbackDraft({
+      topic,
+      hook: selected?.hook,
+      genre: selected?.genre,
+      maxChars: workspace.durationBudget.maxChars
+    });
+    const beats = Array.isArray(data?.beats) && data.beats.length >= 2 ? data.beats : fallback.beats;
+    const fullNarration = typeof data?.fullNarration === 'string' && data.fullNarration.trim()
+      ? data.fullNarration.trim()
+      : fallback.fullNarration;
+    const drafted: ScriptWorkspace = {
+      ...workspace,
+      beats: beats.map((beat: any, index: number) => ({
+        id: beat.id || `beat-${index + 1}`,
+        order: index + 1,
+        function: beat.function || 'setup',
+        intent: beat.intent || beatIntentLabel(beat.function || 'setup'),
+        narration: beat.narration || '',
+        targetSeconds: Number(beat.targetSeconds) || 0,
+        energy: beat.energy || 'medium',
+        visualIntent: beat.visualIntent || '',
+        needsHold: Boolean(beat.needsHold)
+      })),
+      fullNarration,
+      speechSpans: [],
+      stage: 'copy',
+      gate: 'fast'
+    };
+    const next = await refineSpeechSpans(drafted, fullNarration);
+    if (typeof data?.title === 'string' && data.title.trim()) {
+      onTopicChange(data.title.trim());
+    }
+    onChange(next);
+    setStatus('口播按整句切开。对照句会同一口气、两张画面。');
+  };
+
+  const handleDiagnose = async () => {
+    const pasted = (workspace.fullNarration || workspace.intentNotes || '').trim();
+    if (countNarrationChars(pasted) < 8) {
+      setError('先把已有口播粘贴进来');
+      return;
+    }
+    const diagnosed = diagnoseExistingScript({
+      ...workspace,
+      fullNarration: pasted,
+      intentNotes: workspace.intentNotes || pasted,
+      speechSpans: [],
+      gate: 'fast'
+    });
+    const next = await refineSpeechSpans(diagnosed, pasted);
+    onChange(next);
+    setStatus('已按整句切口播；一句里若有对照，会切两张图。');
+    setError(null);
+  };
+
+  const applyMode = resolveStoryboardApplyMode({
+    workspace,
+    stylePack,
+    clipCount: existingClips.length
+  });
+
+  const handleApply = () => {
+    if (!applyReady) return;
+    const clips = forecastToClips(workspace.forecastShots, visualStyle, aspectRatio, stylePack, existingClips);
+    commit(stampAppliedWorkspace(workspace, workspace.forecastShots, stylePack, clips.length));
+    onNeedFullNarration?.(clips);
+    setStatus(`已写入 ${clips.length} 镜。对照句同一口气配两图。`);
+  };
+
+  const handleStyleOnly = () => {
+    if (!existingClips.length) {
+      setError('还没有分镜，请先写入分镜');
+      return;
+    }
+    onApplyStyleOnly?.();
+    commit({
+      ...workspace,
+      appliedAt: Date.now(),
+      appliedShotCount: workspace.appliedShotCount || existingClips.length,
+      appliedScriptHash: workspace.appliedScriptHash || forecastScriptHash(workspace.forecastShots),
+      appliedStyleFingerprint: stylePackFingerprint(stylePack)
+    });
+    setStatus('画面词已写入分镜，可去分镜表查看。尚未生图。');
+    setError(null);
+  };
+
+  const handleHoldChange = (shotId: string, holdDuration: number) => {
+    onChange(applyHoldToWorkspace(workspace, shotId, holdDuration));
+  };
+
+  const handleFillHook = (key: keyof ResearchNotes) => {
+    const value = (workspace.researchNotes[key] || '').trim();
+    if (!value) {
+      setError('这条笔记还是空的');
+      return;
+    }
+    onChange(applyResearchNoteToHook(workspace, key));
+    setError(null);
+    setStatus(key === 'visualRef' ? '画面笔记已填进钩子镜的画面意图。' : '已把这条笔记填进钩子。');
+  };
+
+  const handleResearch = async () => {
+    const topic = selected?.title || workspace.intentNotes.trim() || workspaceTopicTitle(workspace);
+    if (!topic && !workspace.referenceUrl.trim()) {
+      setError('先写主题或贴对标链接');
+      return;
+    }
+    setBusy('research');
+    setError(null);
+    setStatus('四刀浅调研进行中：对标 / 受众 / 事实 / 画面...');
+    try {
+      const res = await fetch('/api/script/research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic,
+          intentNotes: workspace.intentNotes,
+          referenceUrl: workspace.referenceUrl,
+          platform: workspace.durationBudget.platform,
+          llmApi: customLlmApi
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      commit({
+        ...workspace,
+        researchBrief: {
+          summary: data.summary || '',
+          blades: Array.isArray(data.blades) ? data.blades : [],
+          notes: { ...workspace.researchNotes, ...(data.notes || {}) },
+          source: data.source || 'model',
+          fetchedAt: data.fetchedAt || Date.now()
+        },
+        researchNotes: { ...workspace.researchNotes, ...(data.notes || {}) },
+        stage: 'research',
+        gate: 'deep'
+      });
+      setStatus(data.source === 'model' ? '网页没搜到多少，已用模型归纳。可改笔记再出概念。' : '四刀有结果。可填进钩子，或根据调研出三个概念。');
+    } catch {
+      setError('浅调研失败，先手写四条笔记也能继续。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleReference = async () => {
+    const url = workspace.referenceUrl.trim();
+    if (!url) {
+      setError('先粘贴对标链接');
+      return;
+    }
+    setBusy('reference');
+    setError(null);
+    setStatus('正在反拆对标：保留什么、改什么...');
+    try {
+      const res = await fetch('/api/script/reference', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          topic: selected?.title || workspace.intentNotes,
+          intentNotes: workspace.intentNotes,
+          llmApi: customLlmApi
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      const cards: TopicCard[] = Array.isArray(data?.cards) && data.cards.length > 0
+        ? data.cards.slice(0, 3)
+        : fallbackTopicCards(workspace.intentNotes, 'reference');
+      commit({
+        ...workspace,
+        topicCards: cards,
+        selectedTopicId: null,
+        referenceBreakdown: {
+          url,
+          title: data.title || url,
+          keep: data.keep || [],
+          change: data.change || [],
+          whyBetter: data.whyBetter || '',
+          hookStyle: data.hookStyle || '',
+          pacingNote: data.pacingNote || ''
+        },
+        stage: 'topic',
+        gate: 'fast'
+      });
+      setStatus('对标已拆。选出一张，或杂交钩子和结构。');
+    } catch {
+      setError('对标链接打不开，改成描述也可以选题。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleConcepts = async () => {
+    setBusy('concepts');
+    setError(null);
+    setStatus('按调研出三个不同结构的概念...');
+    try {
+      const res = await fetch('/api/script/concepts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: selected?.title || workspace.intentNotes,
+          intentNotes: workspace.intentNotes,
+          researchNotes: workspace.researchNotes,
+          researchBrief: workspace.researchBrief,
+          genrePackId: workspace.genrePackId,
+          llmApi: customLlmApi
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      const cards: TopicCard[] = Array.isArray(data?.cards) && data.cards.length > 0
+        ? data.cards.slice(0, 3)
+        : fallbackTopicCards(workspace.intentNotes, workspace.intent);
+      commit({
+        ...workspace,
+        topicCards: cards,
+        selectedTopicId: null,
+        conceptMix: { hookFromId: cards[0]?.id || null, structureFromId: cards[1]?.id || cards[0]?.id || null },
+        stage: 'topic',
+        gate: 'deep'
+      });
+      setStatus('三个概念的结构应不同。可以杂交。');
+    } catch {
+      setError('概念生成失败，用手写方向再点给我选题。');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleMix = () => {
+    if (!workspace.conceptMix.hookFromId || !workspace.conceptMix.structureFromId) {
+      setError('先选钩子来自哪张、结构来自哪张');
+      return;
+    }
+    const mixed = mixTopicCards(workspace);
+    const card = mixed.topicCards.find((item) => item.id === mixed.selectedTopicId);
+    if (card) {
+      const rec = recommendDuration(mixed.durationBudget.platform, card.genre, card.conceptCount);
+      onTopicChange(card.title);
+      onChange(refreshWorkspaceDerived({
+        ...mixed,
+        durationBudget: buildDurationBudget({
+          ...mixed.durationBudget,
+          pace: card.paceHint || rec.pace,
+          targetSeconds: card.durationHint || rec.seconds,
+          conceptUsed: card.conceptCount
+        }),
+        stage: 'duration'
+      }));
+      setStatus(card.whyThisWorks || rec.reason);
+      setError(null);
+      return;
+    }
+    setError('杂交失败，换两张卡再试');
+  };
+
+  const stopPreview = () => {
+    const audio = previewAudioRef.current;
+    if (audio) {
+      try {
+        audio.pause();
+        audio.src = '';
+      } catch {
+        // ignore
+      }
+    }
+    previewAudioRef.current = null;
+    setPreviewPlaying(false);
+  };
+
+  const handlePreviewHook = async () => {
+    if (previewPlaying) {
+      stopPreview();
+      return;
+    }
+    const text = hookPreviewText(workspace);
+    if (!text) {
+      setError('先写出口播或钩子节拍，再试听');
+      return;
+    }
+    setBusy('preview');
+    setError(null);
+    setStatus('在合成约 8 秒钩子试听...');
+    try {
+      const res = await fetch('/api/audio/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          character: voiceCharacter,
+          rate: speechRate,
+          ttsApi: customTtsApi
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.audioUrl) {
+        throw new Error(data.error || '试听合成失败');
+      }
+      stopPreview();
+      const audio = new Audio(data.audioUrl);
+      previewAudioRef.current = audio;
+      audio.onended = () => setPreviewPlaying(false);
+      audio.onerror = () => {
+        setPreviewPlaying(false);
+        setError('试听音频播放失败');
+      };
+      await audio.play();
+      setPreviewPlaying(true);
+      commit({ ...workspace, hookPreviewUrl: data.audioUrl });
+      setStatus('这是钩子约 8 秒，不是整段旁白。');
+    } catch (err: any) {
+      setError(err?.message || '试听失败');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const fastGateLabel = useMemo(() => {
+    if (workspace.intent === 'have-script' && (workspace.fullNarration || workspace.intentNotes).trim()) {
+      return '诊断并拆分';
+    }
+    if (workspace.selectedTopicId) return '按预算写稿';
+    if (workspace.intent === 'reference' && workspace.referenceUrl.trim()) return '反拆对标';
+    return '给我选题';
+  }, [workspace]);
+
+  return (
+    <section
+      id="script-workspace"
+      className="flex-1 min-w-0 bg-[#131318] border border-[#23232c] rounded-2xl flex flex-col h-full overflow-hidden shadow-xl shadow-black/40"
+    >
+      <header className="px-6 py-4 border-b border-[#23232c] bg-[#16161c] flex items-center justify-between gap-4 flex-shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+            <PenLine className="w-4 h-4 text-amber-400" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-zinc-100">文案预制作台</h2>
+            <p className="text-[12px] text-zinc-500 mt-0.5 truncate">
+              先选题，再定时长，最后写口播。预览已收起，把空间留给结构。
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="hidden md:inline-flex text-[11px] px-2.5 py-1 rounded-full border bg-zinc-800 text-zinc-400 border-zinc-700 max-w-[220px] truncate">
+            {topicTitle}
+          </span>
+          <button
+            id="btn-script-fast-gate"
+            type="button"
+            onClick={handleFastGate}
+            disabled={Boolean(busy)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-amber-500 text-black hover:bg-amber-400 disabled:opacity-50 cursor-pointer"
+          >
+            {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+            快闸 · {fastGateLabel}
+          </button>
+          <button
+            id="btn-hook-preview"
+            type="button"
+            onClick={handlePreviewHook}
+            disabled={busy === 'preview'}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium border border-[#2b2b36] text-zinc-200 hover:border-amber-500/40 cursor-pointer disabled:opacity-50"
+          >
+            {busy === 'preview' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : previewPlaying ? <Pause className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+            {previewPlaying ? '停试听' : '试听钩子 8秒'}
+          </button>
+        </div>
+      </header>
+
+      <div className="flex flex-1 min-h-0">
+        <nav className="w-52 lg:w-56 flex-shrink-0 border-r border-[#23232c] bg-[#14141a] p-3 space-y-1 overflow-y-auto custom-scrollbar">
+          {STAGE_META.map((item) => {
+            const active = workspace.stage === item.id;
+            const done = stageCompleted(workspace, item.id);
+            return (
+              <button
+                key={item.id}
+                id={`script-nav-${item.id}`}
+                type="button"
+                onClick={() => setStage(item.id)}
+                className={`w-full text-left rounded-xl px-3 py-2.5 flex items-start gap-2.5 transition-all cursor-pointer ${
+                  active
+                    ? 'bg-amber-500/12 border border-amber-500/35 text-amber-200'
+                    : 'border border-transparent text-zinc-400 hover:bg-[#1c1c24] hover:text-zinc-200'
+                }`}
+              >
+                <span className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                  done === 'skipped' ? 'bg-zinc-600' : done ? 'bg-emerald-400' : 'bg-zinc-600'
+                }`} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-zinc-100">{item.label}</span>
+                    {done === 'skipped' && (
+                      <span className="text-[9px] text-zinc-500 border border-zinc-700 rounded px-1 py-px">跳过</span>
+                    )}
+                  </span>
+                  <span className="block text-[11px] text-zinc-500 mt-0.5 leading-snug">{item.hint}</span>
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div key={workspace.stage} className="flex-1 min-w-0 overflow-y-auto custom-scrollbar bg-[#121217] p-5 lg:p-6">
+          {workspace.stage === 'intent' && (
+            <IntentStage
+              workspace={workspace}
+              busy={busy === 'topics' || busy === 'reference'}
+              onIntent={(intent) => commit({ ...workspace, intent })}
+              onNotes={(intentNotes) => commit({ ...workspace, intentNotes })}
+              onReferenceUrl={(referenceUrl) => commit({ ...workspace, referenceUrl })}
+              onPlatform={(platform) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, platform }) })}
+              onPace={(pace) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, pace }) })}
+              onGenrePack={handleGenrePack}
+              onScout={handleScoutTopics}
+              onDiagnose={handleDiagnose}
+              onReference={handleReference}
+            />
+          )}
+          {workspace.stage === 'topic' && (
+            <TopicStage
+              workspace={workspace}
+              selectedId={workspace.selectedTopicId}
+              busy={busy === 'topics' || busy === 'concepts'}
+              onScout={handleScoutTopics}
+              onSelect={handleSelectCard}
+              onDropResearch={(topicId, key) => {
+                onChange(applyResearchNoteToTopic(workspace, topicId, key));
+                setStatus('钩子已换成这条调研笔记。');
+              }}
+              onMixChange={(conceptMix) => commit({ ...workspace, conceptMix })}
+              onMix={handleMix}
+            />
+          )}
+          {workspace.stage === 'research' && (
+            <ResearchStage
+              workspace={workspace}
+              busy={busy === 'research' || busy === 'concepts'}
+              onChange={(researchNotes) => commit({ ...workspace, researchNotes })}
+              onReferenceUrl={(referenceUrl) => commit({ ...workspace, referenceUrl })}
+              onFillHook={handleFillHook}
+              onResearch={handleResearch}
+              onConcepts={handleConcepts}
+            />
+          )}
+          {workspace.stage === 'duration' && (
+            <DurationStage
+              workspace={workspace}
+              selected={selected}
+              busy={busy === 'draft'}
+              onBudget={(durationBudget) => {
+                const next = { ...workspace, durationBudget };
+                onChange(workspace.fullNarration.trim() ? rebuildForecast(next) : refreshWorkspaceDerived(next));
+              }}
+              onDraft={handleDraft}
+              onGenrePack={handleGenrePack}
+            />
+          )}
+          {workspace.stage === 'beats' && (
+            <BeatsStage
+              workspace={workspace}
+              onChange={(beats) => {
+                const fullNarration = narrationFromBeats(beats);
+                onChange(rebuildForecast({ ...workspace, beats, fullNarration }));
+              }}
+              onFillHook={handleFillHook}
+            />
+          )}
+          {workspace.stage === 'copy' && (
+            <CopyStage
+              workspace={workspace}
+              onChange={(fullNarration) => {
+                const beats = applyNarrationToBeats(workspace.beats, fullNarration);
+                onChange(rebuildForecast({ ...workspace, fullNarration, beats }));
+              }}
+              onDraft={handleDraft}
+              onDiagnose={handleDiagnose}
+              busy={Boolean(busy)}
+              onHoldChange={handleHoldChange}
+              onFillHook={handleFillHook}
+            />
+          )}
+          {workspace.stage === 'rhythm' && (
+            <RhythmStage workspace={workspace} onHoldChange={handleHoldChange} />
+          )}
+        </div>
+
+        <aside className="hidden xl:flex w-72 flex-shrink-0 border-l border-[#23232c] bg-[#14141a] flex-col overflow-hidden">
+          <DirectorRail workspace={workspace} />
+        </aside>
+      </div>
+
+      <div className="xl:hidden border-t border-[#23232c] bg-[#14141a] px-5 py-3">
+        <DirectorRail workspace={workspace} compact />
+      </div>
+
+      <footer className="px-5 py-3 border-t border-[#23232c] bg-[#16161c] flex flex-wrap items-center gap-3 flex-shrink-0">
+        <button
+          id="btn-apply-storyboard"
+          type="button"
+          onClick={applyMode.mode === 'style-only' ? handleStyleOnly : handleApply}
+          disabled={!applyReady || isGeneratingNarration || isApplyingStyle || applyMode.mode === 'current'}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-black disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+        >
+          <Clapperboard className="w-4 h-4" />
+          {applyMode.mode === 'style-only'
+            ? '只更新画面，旁白沿用'
+            : applyMode.mode === 'current'
+              ? '已是当前稿'
+              : '写入分镜'}
+        </button>
+        {applyMode.mode === 'style-only' && (
+          <button
+            type="button"
+            onClick={handleApply}
+            disabled={!applyReady || isGeneratingNarration}
+            className="text-[12px] text-zinc-400 hover:text-zinc-200 cursor-pointer disabled:opacity-40"
+          >
+            整表重写并重新配音
+          </button>
+        )}
+        {applyMode.mode === 'full' && existingClips.length >= 2 && (
+          <button
+            type="button"
+            onClick={handleStyleOnly}
+            disabled={isApplyingStyle || isGeneratingNarration}
+            className="text-[12px] text-zinc-400 hover:text-zinc-200 cursor-pointer disabled:opacity-40"
+          >
+            只更新画面，旁白沿用
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onOpenStoryboard?.()}
+          className="inline-flex items-center gap-1 text-[12px] text-amber-400 hover:text-amber-300 cursor-pointer"
+        >
+          进入分镜台
+          <ArrowRight className="w-3.5 h-3.5" />
+        </button>
+        <span className="text-[11px] text-zinc-500 flex-1 min-w-[160px]">
+          {applyMode.mode === 'style-only'
+            ? '口播未改，风格已变'
+            : applyMode.mode === 'current'
+              ? '结构和风格都已是当前稿'
+              : workspace.appliedShotCount
+                ? `上次写入 ${workspace.appliedShotCount} 镜`
+                : forecastSummary(workspace)}
+        </span>
+        {(status || error) && (
+          <span className={`text-[11px] max-w-md truncate ${error ? 'text-rose-300' : 'text-amber-300'}`}>
+            {error || status}
+          </span>
+        )}
+      </footer>
+    </section>
+  );
+};
+
+function IntentStage({
+  workspace,
+  busy,
+  onIntent,
+  onNotes,
+  onReferenceUrl,
+  onPlatform,
+  onPace,
+  onGenrePack,
+  onScout,
+  onDiagnose,
+  onReference
+}: {
+  workspace: ScriptWorkspace;
+  busy: boolean;
+  onIntent: (intent: ScriptIntent) => void;
+  onNotes: (value: string) => void;
+  onReferenceUrl: (value: string) => void;
+  onPlatform: (platform: ScriptPlatform) => void;
+  onPace: (pace: ScriptPace) => void;
+  onGenrePack: (genre: ScriptGenre) => void;
+  onScout: () => void;
+  onDiagnose: () => void;
+  onReference: () => void;
+}) {
+  const intent = workspace.intent;
+  const placeholder = intent === 'product'
+    ? '产品是什么，卖给谁，最想强调哪一句'
+    : intent === 'reference'
+      ? '对标片讲了什么；有链接更好，没有就写钩子怎么开'
+      : intent === 'have-script'
+        ? '把整段口播贴在这里'
+        : intent === 'direction'
+          ? '比如：想讲咖啡因对睡眠的影响'
+          : '可选：一个关键词，或直接给我选题';
+
+  return (
+    <div className="space-y-5 max-w-5xl">
+      <SectionIntro title="从哪一步开始" desc="点一张入口卡。快闸会按这条路往下走，不会一上来写全文。" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
+        {INTENT_CARDS.map((card) => {
+          const active = intent === card.id;
+          return (
+            <button
+              key={card.id}
+              id={`intent-${card.id}`}
+              type="button"
+              onClick={() => onIntent(card.id)}
+              className={`text-left rounded-2xl border px-3.5 py-3.5 transition-all cursor-pointer ${
+                active
+                  ? 'border-amber-500/50 bg-amber-500/10'
+                  : 'border-[#2b2b36] bg-[#18181f] hover:border-amber-500/30'
+              }`}
+            >
+              <div className={`${active ? 'text-amber-400' : 'text-zinc-500'}`}>{card.icon}</div>
+              <div className="mt-2 text-[13px] font-medium text-zinc-100 leading-snug">{card.title}</div>
+              <div className="mt-1 text-[11px] text-zinc-500 leading-relaxed">{card.desc}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {intent && (
+        <div className="space-y-3 rounded-2xl border border-[#2b2b36] bg-[#18181f] p-4">
+          <label className="text-[12px] text-zinc-400">
+            {intent === 'have-script' ? '已有口播' : '补充一句（可空，空白灵感除外）'}
+          </label>
+          <textarea
+            value={workspace.intentNotes}
+            onChange={(e) => onNotes(e.target.value)}
+            rows={intent === 'have-script' ? 8 : 3}
+            placeholder={placeholder}
+            className="w-full bg-[#121217] border border-[#2b2b36] rounded-xl p-3 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 resize-none leading-relaxed select-text"
+          />
+          {(intent === 'reference' || intent === 'direction') && (
+            <input
+              id="input-reference-url"
+              value={workspace.referenceUrl}
+              onChange={(e) => onReferenceUrl(e.target.value)}
+              placeholder="对标链接（YouTube / B 站 / 网页，可空）"
+              className="w-full bg-[#121217] border border-[#2b2b36] rounded-xl px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 select-text"
+            />
+          )}
+          <div className="flex flex-wrap gap-2">
+            {GENRE_PACKS.map((pack) => (
+              <Chip
+                key={pack.id}
+                active={workspace.genrePackId === pack.id}
+                onClick={() => onGenrePack(pack.id)}
+              >
+                {pack.id}
+              </Chip>
+            ))}
+          </div>
+          {workspace.genrePackId && bgmById(genrePackById(workspace.genrePackId)?.bgmTrackId || '') && (
+            <p className="text-[11px] text-zinc-500">
+              配乐已切到「{bgmById(genrePackById(workspace.genrePackId)!.bgmTrackId)?.title.replace(/^[^\s]+\s*/, '')}」，可在音频页换曲。
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {PLATFORM_OPTIONS.map((item) => (
+              <Chip
+                key={item.id}
+                active={workspace.durationBudget.platform === item.id}
+                onClick={() => onPlatform(item.id)}
+              >
+                {item.label}
+              </Chip>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(Object.values(PACE_PRESETS) as typeof PACE_PRESETS[ScriptPace][]).map((item) => (
+              <Chip
+                key={item.id}
+                active={workspace.durationBudget.pace === item.id}
+                onClick={() => onPace(item.id)}
+              >
+                {item.label} · {item.hint}
+              </Chip>
+            ))}
+          </div>
+          {intent === 'have-script' ? (
+            <PrimaryButton id="btn-diagnose-script" busy={busy} onClick={onDiagnose}>
+              诊断并拆分
+            </PrimaryButton>
+          ) : intent === 'reference' && workspace.referenceUrl.trim() ? (
+            <PrimaryButton id="btn-reverse-reference" busy={busy} onClick={onReference}>
+              反拆对标
+            </PrimaryButton>
+          ) : (
+            <PrimaryButton id="btn-scout-topics" busy={busy} onClick={onScout}>
+              给我选题
+            </PrimaryButton>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopicStage({
+  workspace,
+  selectedId,
+  busy,
+  onScout,
+  onSelect,
+  onDropResearch,
+  onMixChange,
+  onMix
+}: {
+  workspace: ScriptWorkspace;
+  selectedId: string | null;
+  busy: boolean;
+  onScout: () => void;
+  onSelect: (card: TopicCard) => void;
+  onDropResearch: (topicId: string, key: keyof ResearchNotes) => void;
+  onMixChange: (mix: ScriptWorkspace['conceptMix']) => void;
+  onMix: () => void;
+}) {
+  return (
+    <div className="space-y-5">
+      <SectionIntro title="选出一个洞察" desc="三张卡必须不是同一个意思换标题。点卡只锁题，下一步才定时长。" />
+      {workspace.topicCards.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-[#2b2b36] p-8 text-center space-y-3">
+          <p className="text-sm text-zinc-400">还没有选题卡。</p>
+          <PrimaryButton id="btn-scout-topics" busy={busy} onClick={onScout}>给我选题</PrimaryButton>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          {workspace.topicCards.map((card) => {
+            const active = selectedId === card.id;
+            return (
+              <button
+                key={card.id}
+                id={`topic-card-${card.id}`}
+                type="button"
+                onClick={() => onSelect(card)}
+                onDragOver={(e) => {
+                  if (isResearchDragEvent(e)) e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  const key = readResearchDrag(e);
+                  if (!key) return;
+                  e.preventDefault();
+                  onDropResearch(card.id, key);
+                }}
+                className={`text-left rounded-2xl border p-4 transition-all cursor-pointer ${
+                  active ? 'border-amber-500/60 bg-amber-500/10' : 'border-[#2b2b36] bg-[#18181f] hover:border-amber-500/30'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] uppercase tracking-wide text-amber-400/90">{card.genre} · {card.hookType}</span>
+                  <span className="text-[10px] text-zinc-500">{card.durationHint}s · {PACE_PRESETS[card.paceHint]?.label}</span>
+                </div>
+                <h3 className="mt-2 text-[14px] font-semibold text-zinc-100 leading-snug">{card.title}</h3>
+                <p className="mt-2 text-[12px] text-amber-200/90 leading-relaxed">钩子：{card.hook}</p>
+                <p className="mt-2 text-[12px] text-zinc-400 leading-relaxed">{card.insight}</p>
+                <p className="mt-2 text-[11px] text-zinc-500 leading-relaxed">为什么现在：{card.whyNow}</p>
+                {card.structure && <p className="mt-1 text-[10px] text-zinc-500">结构：{card.structure}</p>}
+                {card.whyThisWorks && <p className="mt-1 text-[11px] text-zinc-500">{card.whyThisWorks}</p>}
+                {card.risk && <p className="mt-2 text-[11px] text-rose-300/80">风险：{card.risk}</p>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {workspace.referenceBreakdown && (
+        <div className="rounded-2xl border border-[#2b2b36] bg-[#18181f] p-4 space-y-2">
+          <div className="text-[12px] font-medium text-zinc-200">对标反拆 · {workspace.referenceBreakdown.title}</div>
+          <p className="text-[11px] text-zinc-400">{workspace.referenceBreakdown.whyBetter}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
+            <div>
+              <div className="text-emerald-300 mb-1">保留</div>
+              <ul className="space-y-1 text-zinc-400">
+                {workspace.referenceBreakdown.keep.map((item) => <li key={item}>· {item}</li>)}
+              </ul>
+            </div>
+            <div>
+              <div className="text-amber-300 mb-1">改掉</div>
+              <ul className="space-y-1 text-zinc-400">
+                {workspace.referenceBreakdown.change.map((item) => <li key={item}>· {item}</li>)}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+      {workspace.topicCards.length >= 2 && (
+        <div className="rounded-2xl border border-[#2b2b36] bg-[#18181f] p-4 space-y-3">
+          <div className="text-[12px] text-zinc-300">杂交：A 的钩子 + B 的结构</div>
+          <div className="flex flex-wrap gap-3 items-center">
+            <label className="text-[11px] text-zinc-500 flex items-center gap-1.5">
+              钩子
+              <select
+                value={workspace.conceptMix.hookFromId || ''}
+                onChange={(e) => onMixChange({ ...workspace.conceptMix, hookFromId: e.target.value || null })}
+                className="bg-[#121217] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-200"
+              >
+                <option value="">选一张</option>
+                {workspace.topicCards.map((card) => (
+                  <option key={card.id} value={card.id}>{card.title}</option>
+                ))}
+              </select>
+            </label>
+            <label className="text-[11px] text-zinc-500 flex items-center gap-1.5">
+              结构
+              <select
+                value={workspace.conceptMix.structureFromId || ''}
+                onChange={(e) => onMixChange({ ...workspace.conceptMix, structureFromId: e.target.value || null })}
+                className="bg-[#121217] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-200"
+              >
+                <option value="">选一张</option>
+                {workspace.topicCards.map((card) => (
+                  <option key={card.id} value={card.id}>{card.title} {card.structure ? `· ${card.structure}` : ''}</option>
+                ))}
+              </select>
+            </label>
+            <PrimaryButton id="btn-mix-concepts" busy={busy} onClick={onMix}>采用杂交</PrimaryButton>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResearchStage({
+  workspace,
+  busy,
+  onChange,
+  onReferenceUrl,
+  onFillHook,
+  onResearch,
+  onConcepts
+}: {
+  workspace: ScriptWorkspace;
+  busy: boolean;
+  onChange: (notes: ScriptWorkspace['researchNotes']) => void;
+  onReferenceUrl: (value: string) => void;
+  onFillHook: (key: keyof ResearchNotes) => void;
+  onResearch: () => void;
+  onConcepts: () => void;
+}) {
+  const notes = workspace.researchNotes;
+  return (
+    <div className="space-y-5 max-w-3xl">
+      <SectionIntro
+        title="浅调研四刀"
+        desc="对标、受众、事实、画面。可以联网搜，也可以手写。搜完能一键出三个概念。"
+      />
+      <input
+        value={workspace.referenceUrl}
+        onChange={(e) => onReferenceUrl(e.target.value)}
+        placeholder="对标链接，可空。有的话会算进对标刀。"
+        className="w-full bg-[#18181f] border border-[#2b2b36] rounded-xl px-3 py-2 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 select-text"
+      />
+      <div className="flex flex-wrap gap-2">
+        <PrimaryButton id="btn-shallow-research" busy={busy} onClick={onResearch}>开始浅调研</PrimaryButton>
+        <button
+          type="button"
+          onClick={onConcepts}
+          disabled={busy}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-[13px] font-medium border border-[#2b2b36] text-zinc-200 hover:border-amber-500/40 cursor-pointer disabled:opacity-40"
+        >
+          根据调研出三个概念
+        </button>
+      </div>
+      {workspace.researchBrief && (
+        <div className="rounded-2xl border border-[#2b2b36] bg-[#18181f] p-4 space-y-2">
+          <div className="text-[12px] text-zinc-200">{workspace.researchBrief.summary}</div>
+          <div className="text-[10px] text-zinc-500">来源：{workspace.researchBrief.source === 'web' ? '网页' : workspace.researchBrief.source === 'mixed' ? '网页 + 模型' : '模型归纳'}</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {workspace.researchBrief.blades.map((blade) => (
+              <div key={blade.id} className="rounded-xl border border-[#2b2b36] p-2.5">
+                <div className="text-[11px] text-amber-300">{blade.label}</div>
+                <div className="text-[10px] text-zinc-600 truncate">{blade.query}</div>
+                <ul className="mt-1 space-y-1">
+                  {blade.findings.slice(0, 2).map((hit) => (
+                    <li key={hit.url || hit.title} className="text-[11px] text-zinc-400 truncate">
+                      {hit.title || hit.snippet}
+                    </li>
+                  ))}
+                  {blade.findings.length === 0 && <li className="text-[11px] text-zinc-600">这刀没搜到</li>}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <HookDropZone onFillHook={onFillHook} />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {RESEARCH_FIELDS.map((field) => (
+          <div
+            key={field.key}
+            className="rounded-2xl border border-[#2b2b36] bg-[#18181f] p-3 space-y-1.5"
+          >
+            <div
+              draggable={Boolean(notes[field.key].trim())}
+              onDragStart={(e) => writeResearchDrag(e, field.key)}
+              className={`flex items-center justify-between gap-2 ${notes[field.key].trim() ? 'cursor-grab' : ''}`}
+            >
+              <span className="text-[12px] text-zinc-400">{field.label}</span>
+              <button
+                type="button"
+                disabled={!notes[field.key].trim()}
+                onClick={() => onFillHook(field.key)}
+                className="text-[11px] text-amber-400 disabled:text-zinc-600 cursor-pointer disabled:cursor-not-allowed"
+              >
+                填进钩子
+              </button>
+            </div>
+            <textarea
+              value={notes[field.key]}
+              onChange={(e) => onChange({ ...notes, [field.key]: e.target.value })}
+              rows={3}
+              placeholder={field.placeholder}
+              className="w-full bg-[#121217] border border-[#2b2b36] rounded-xl p-3 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-amber-500/50 resize-none select-text"
+            />
+            {notes[field.key].trim() && (
+              <p className="text-[10px] text-zinc-600">拖这张卡到选题或钩子槽</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DurationStage({
+  workspace,
+  selected,
+  busy,
+  onBudget,
+  onDraft,
+  onGenrePack
+}: {
+  workspace: ScriptWorkspace;
+  selected: TopicCard | null;
+  busy: boolean;
+  onBudget: (budget: ScriptWorkspace['durationBudget']) => void;
+  onDraft: () => void;
+  onGenrePack: (genre: ScriptGenre) => void;
+}) {
+  const budget = workspace.durationBudget;
+  const rec = selected
+    ? recommendDuration(budget.platform, selected.genre, selected.conceptCount)
+    : null;
+  const estimate = estimatedShotCount(budget);
+  const lockHint = lockedShotImplication(budget);
+  const canDraft = Boolean(selected || workspace.intent === 'have-script' || workspace.intentNotes.trim());
+
+  return (
+    <div className="space-y-5 max-w-4xl">
+      <SectionIntro
+        title="把时长当成预算"
+        desc={rec ? rec.reason : '改平台、节奏、秒数，字数和停留会立刻重算。体裁包会带上节拍骨架。'}
+      />
+      <div className="flex flex-wrap gap-2">
+        {GENRE_PACKS.map((pack) => (
+          <Chip key={pack.id} active={workspace.genrePackId === pack.id} onClick={() => onGenrePack(pack.id)}>
+            {pack.id} · {pack.hint}
+          </Chip>
+        ))}
+      </div>
+      {workspace.genrePackId && (
+        <p className="text-[11px] text-zinc-500">
+          {genrePackById(workspace.genrePackId)?.draftHint} 节拍：{genrePackById(workspace.genrePackId)?.beatPlan.join(' → ')}
+          {genrePackById(workspace.genrePackId)?.bgmTrackId && (
+            <> · 配乐：{bgmById(genrePackById(workspace.genrePackId)!.bgmTrackId)?.title.replace(/^[^\s]+\s*/, '')}</>
+          )}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {PLATFORM_OPTIONS.map((item) => (
+          <Chip key={item.id} active={budget.platform === item.id} onClick={() => onBudget(buildDurationBudget({ ...budget, platform: item.id }))}>
+            {item.label}
+          </Chip>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {(Object.values(PACE_PRESETS) as typeof PACE_PRESETS[ScriptPace][]).map((item) => (
+          <Chip key={item.id} active={budget.pace === item.id} onClick={() => onBudget(buildDurationBudget({ ...budget, pace: item.id }))}>
+            {item.label} {item.cps}字/秒
+          </Chip>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2 items-center">
+        {TARGET_SECONDS_PRESETS.map((seconds) => (
+          <Chip key={seconds} active={budget.targetSeconds === seconds} onClick={() => onBudget(buildDurationBudget({ ...budget, targetSeconds: seconds }))}>
+            {seconds}s
+          </Chip>
+        ))}
+        <label className="text-[11px] text-zinc-500 flex items-center gap-1.5">
+          自定义
+          <input
+            type="number"
+            min={8}
+            max={180}
+            value={budget.targetSeconds}
+            onChange={(e) => onBudget(buildDurationBudget({ ...budget, targetSeconds: Number(e.target.value) }))}
+            className="w-16 bg-[#18181f] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-200 text-[12px]"
+          />
+        </label>
+        <label className="text-[11px] text-zinc-500 flex items-center gap-1.5">
+          锁镜数
+          <input
+            type="number"
+            min={2}
+            max={24}
+            placeholder="自动"
+            value={budget.lockedShotCount ?? ''}
+            onChange={(e) => onBudget(buildDurationBudget({
+              ...budget,
+              lockedShotCount: e.target.value ? Number(e.target.value) : null
+            }))}
+            className="w-16 bg-[#18181f] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-200 text-[12px]"
+          />
+        </label>
+      </div>
+
+      {lockHint && (
+        <div className={`rounded-xl border px-3 py-2.5 text-[12px] leading-relaxed ${
+          lockHint.pulled
+            ? 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+            : 'border-[#2b2b36] bg-[#18181f] text-zinc-400'
+        }`}>
+          {lockHint.message}
+          {lockHint.pulled && (
+            <button
+              type="button"
+              onClick={() => onBudget(buildDurationBudget({ ...budget, pace: lockHint.nearestPace }))}
+              className="ml-2 text-amber-300 underline cursor-pointer"
+            >
+              改用{PACE_PRESETS[lockHint.nearestPace].label}档再预测
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <BudgetRing label="口播字数" used={budget.usedChars} max={budget.maxChars} unit="字" />
+        <BudgetRing label="停留配额" used={Number((workspace.forecastShots.reduce((sum, shot) => sum + shot.holdDuration, 0)).toFixed(1))} max={budget.holdSeconds} unit="s" />
+        <BudgetRing label="概念" used={budget.conceptUsed || (selected ? selected.conceptCount : 0)} max={budget.conceptMax} unit="个" />
+      </div>
+
+      <div className="text-[12px] text-zinc-400 flex items-center gap-2">
+        <Clock className="w-3.5 h-3.5 text-amber-400" />
+        口播 {formatSeconds(budget.speechSeconds)} · 停留 {formatSeconds(budget.holdSeconds)} · {estimate.min}–{estimate.max} 镜
+      </div>
+
+      <PrimaryButton id="btn-draft-from-budget" busy={busy} onClick={onDraft} disabled={!canDraft}>
+        按预算写稿
+      </PrimaryButton>
+    </div>
+  );
+}
+
+function BeatsStage({
+  workspace,
+  onChange,
+  onFillHook
+}: {
+  workspace: ScriptWorkspace;
+  onChange: (beats: ScriptWorkspace['beats']) => void;
+  onFillHook: (key: keyof ResearchNotes) => void;
+}) {
+  if (workspace.beats.length === 0) {
+    return (
+      <div className="space-y-3">
+        <SectionIntro title="节拍表" desc="先在时长页点「按预算写稿」，或在已有文案里诊断。" />
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      <SectionIntro title="节拍表" desc="改某一拍的口播，整段旁白和节奏带会一起重算。钩子行可以接调研笔记。" />
+      <HookDropZone onFillHook={onFillHook} />
+      <div className="space-y-2">
+        {workspace.beats.map((beat, index) => (
+          <div
+            key={beat.id}
+            onDragOver={(e) => {
+              if (beat.function === 'hook' && isResearchDragEvent(e)) e.preventDefault();
+            }}
+            onDrop={(e) => {
+              if (beat.function !== 'hook') return;
+              const key = readResearchDrag(e);
+              if (!key) return;
+              e.preventDefault();
+              onFillHook(key);
+            }}
+            className={`rounded-xl border p-3 grid grid-cols-1 lg:grid-cols-12 gap-2 ${
+              beat.function === 'hook' ? 'border-amber-500/35 bg-amber-500/5' : 'border-[#2b2b36] bg-[#18181f]'
+            }`}
+          >
+            <div className="lg:col-span-2 flex flex-col gap-1">
+              <span className="text-[11px] text-amber-400">{FUNCTION_LABEL[beat.function]}</span>
+              <span className="text-[10px] text-zinc-500">{ENERGY_LABEL[beat.energy]} · {beat.intent || beatIntentLabel(beat.function)}</span>
+            </div>
+            <textarea
+              value={beat.narration}
+              onChange={(e) => {
+                const beats = workspace.beats.map((item, itemIndex) => itemIndex === index ? { ...item, narration: e.target.value } : item);
+                onChange(beats);
+              }}
+              rows={2}
+              className="lg:col-span-6 bg-[#121217] border border-[#2b2b36] rounded-lg p-2 text-[12px] text-zinc-200 resize-none select-text"
+            />
+            <textarea
+              value={beat.visualIntent}
+              onChange={(e) => {
+                const beats = workspace.beats.map((item, itemIndex) => itemIndex === index ? { ...item, visualIntent: e.target.value } : item);
+                onChange(beats);
+              }}
+              rows={2}
+              placeholder="看得见的画面，不要写「很有氛围」"
+              className="lg:col-span-4 bg-[#121217] border border-[#2b2b36] rounded-lg p-2 text-[12px] text-zinc-300 resize-none select-text"
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CopyStage({
+  workspace,
+  onChange,
+  onDraft,
+  onDiagnose,
+  busy,
+  onHoldChange,
+  onFillHook
+}: {
+  workspace: ScriptWorkspace;
+  onChange: (value: string) => void;
+  onDraft: () => void;
+  onDiagnose: () => void;
+  busy: boolean;
+  onHoldChange: (shotId: string, holdDuration: number) => void;
+  onFillHook: (key: keyof ResearchNotes) => void;
+}) {
+  const budget = workspace.durationBudget;
+  const over = budget.usedChars > budget.maxChars;
+  return (
+    <div className="space-y-4 max-w-4xl">
+      <SectionIntro title="整段口播" desc="一条连续旁白。字数对着预算变色。切镜按画面动机，不按每句等长。节奏带右缘只能加停留。" />
+      <HookDropZone onFillHook={onFillHook} />
+      <div className="flex items-center justify-between text-[12px]">
+        <span className={over ? 'text-rose-300' : 'text-zinc-400'}>
+          {budget.usedChars} / {budget.maxChars} 字
+        </span>
+        {workspace.intent === 'have-script' ? (
+          <button type="button" onClick={onDiagnose} className="text-amber-400 text-[12px] cursor-pointer">重新诊断</button>
+        ) : (
+          <button type="button" onClick={onDraft} disabled={busy} className="text-amber-400 text-[12px] cursor-pointer disabled:opacity-50">按预算重写</button>
+        )}
+      </div>
+      <textarea
+        id="input-full-narration"
+        value={workspace.fullNarration}
+        onChange={(e) => onChange(e.target.value)}
+        rows={14}
+        placeholder="口播写在这里。刷新后还在。"
+        className={`w-full bg-[#18181f] border rounded-2xl p-4 text-[14px] leading-relaxed text-zinc-100 placeholder-zinc-600 focus:outline-none resize-none select-text ${
+          over ? 'border-rose-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
+        }`}
+      />
+      <RhythmTape shots={workspace.forecastShots} onHoldChange={onHoldChange} />
+    </div>
+  );
+}
+
+function RhythmStage({
+  workspace,
+  onHoldChange
+}: {
+  workspace: ScriptWorkspace;
+  onHoldChange: (shotId: string, holdDuration: number) => void;
+}) {
+  const shots = workspace.forecastShots;
+  return (
+    <div className="space-y-5">
+      <SectionIntro title="节奏带" desc="格子宽是秒数。拖每格右缘只加「念完后的停留」，不能短于口播。停过的格下次重算还会记住。" />
+      <RhythmTape shots={shots} onHoldChange={onHoldChange} />
+      {shots.length === 0 ? (
+        <p className="text-sm text-zinc-500">还没有预测镜。先写稿或诊断已有文案。</p>
+      ) : (
+        <div className="space-y-2">
+          {shots.map((shot) => (
+            <div key={shot.id} className="rounded-xl border border-[#2b2b36] bg-[#18181f] px-3 py-2.5 flex gap-3">
+              <div className="w-16 flex-shrink-0">
+                <div className="text-[11px] text-amber-400">镜 {shot.order}</div>
+                <div className="text-[10px] text-zinc-500">{(shot.speechDuration + shot.holdDuration).toFixed(1)}s</div>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] text-zinc-200 truncate">{shot.sliceText || shot.narration || '（无口播，纯画面停留）'}</div>
+                <div className="mt-1 text-[10px] text-zinc-500">
+                  {FUNCTION_LABEL[shot.function]} · {ENERGY_LABEL[shot.energy]} · 口播 {shot.speechDuration.toFixed(1)}s · 停留 {shot.holdDuration.toFixed(1)}s
+                  {shot.visualCount && shot.visualCount > 1 ? ` · 同一句图 ${(shot.visualIndex || 0) + 1}/${shot.visualCount}` : ''}
+                  {shot.holdPinned ? ' · 停留已钉' : ''}
+                </div>
+                <div className="mt-0.5 text-[10px] text-zinc-600 truncate">{shot.splitReason}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RhythmTape({
+  shots,
+  onHoldChange
+}: {
+  shots: ScriptWorkspace['forecastShots'];
+  onHoldChange?: (shotId: string, holdDuration: number) => void;
+}) {
+  const tapeRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ id: string; startX: number; startHold: number; pps: number } | null>(null);
+
+  if (shots.length === 0) {
+    return <div id="rhythm-tape" className="h-10 rounded-lg bg-[#18181f] border border-dashed border-[#2b2b36]" />;
+  }
+
+  const beginHoldDrag = (event: React.PointerEvent, shot: ScriptWorkspace['forecastShots'][number]) => {
+    if (!onHoldChange) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const total = shots.reduce((sum, item) => sum + item.speechDuration + item.holdDuration, 0);
+    const width = tapeRef.current?.clientWidth || 1;
+    dragRef.current = {
+      id: shot.id,
+      startX: event.clientX,
+      startHold: shot.holdDuration,
+      pps: total > 0 ? width / total : 40
+    };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  };
+
+  const moveHoldDrag = (event: React.PointerEvent) => {
+    const drag = dragRef.current;
+    if (!drag || !onHoldChange) return;
+    const delta = (event.clientX - drag.startX) / drag.pps;
+    const hold = Math.max(0, Math.min(8, Math.round((drag.startHold + delta) * 10) / 10));
+    onHoldChange(drag.id, hold);
+  };
+
+  const endHoldDrag = () => {
+    dragRef.current = null;
   };
 
   return (
     <div
-      id="script-tool-panel"
-      className="w-80 lg:w-84 flex-shrink-0 bg-[#131318] border border-[#23232c] rounded-2xl flex flex-col h-full overflow-hidden select-none z-20 shadow-xl shadow-black/40"
+      id="rhythm-tape"
+      ref={tapeRef}
+      className="flex h-12 rounded-lg overflow-hidden border border-[#2b2b36] select-none"
     >
-      <div className="grid grid-cols-2 gap-1 p-2.5 border-b border-[#23232c] bg-[#16161c]">
-        <button
-          id="subtab-one-click"
-          onClick={() => setSubTab('one-click')}
-          className={`py-1.5 px-1 text-center rounded-lg text-[11px] font-medium transition-all cursor-pointer truncate ${
-            subTab === 'one-click'
-              ? 'bg-[#2a2a32] text-amber-400 border border-amber-500/30'
-              : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#1f1f26]'
-          }`}
-        >
-          一键文案
-        </button>
-        <button
-          id="subtab-batch-topics"
-          onClick={() => setSubTab('batch-topics')}
-          className={`py-1.5 px-1 text-center rounded-lg text-[11px] font-medium transition-all cursor-pointer truncate ${
-            subTab === 'batch-topics'
-              ? 'bg-[#2a2a32] text-amber-400 border border-amber-500/30'
-              : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#1f1f26]'
-          }`}
-        >
-          批量选题
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs text-zinc-300 custom-scrollbar">
-        {subTab === 'one-click' && (
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-zinc-400 font-medium flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                输入短视频主题 / 提示词
-              </label>
-              <textarea
-                id="input-video-topic"
-                value={topic}
-                onChange={(e) => onTopicChange(e.target.value)}
-                placeholder="例如：人类探索深空的壮丽史诗、为什么太阳会发光、AI如何改变未来城市..."
-                rows={3}
-                className="w-full bg-[#1e1e24] border border-[#2b2b36] rounded-xl p-3 text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/40 resize-none text-xs leading-relaxed"
+      {shots.map((shot) => {
+        const duration = Math.max(0.4, shot.speechDuration + shot.holdDuration);
+        return (
+          <div
+            key={shot.id}
+            title={`镜${shot.order} 口播 ${shot.speechDuration.toFixed(1)}s · 停留 ${shot.holdDuration.toFixed(1)}s${shot.holdPinned ? '（已钉）' : ''}。拖右缘只加停留。`}
+            style={{ flex: duration }}
+            className={`${ENERGY_COLOR[shot.energy]} relative opacity-90 border-r border-black/30 last:border-0`}
+          >
+            <span className="absolute inset-0 flex items-center justify-center text-[9px] font-medium text-black/70 pointer-events-none">
+              {shot.order}
+            </span>
+            {onHoldChange && (
+              <span
+                id={`rhythm-hold-handle-${shot.id}`}
+                onPointerDown={(event) => beginHoldDrag(event, shot)}
+                onPointerMove={moveHoldDrag}
+                onPointerUp={endHoldDrag}
+                onPointerCancel={endHoldDrag}
+                className="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-black/25 hover:bg-black/45"
               />
-            </div>
-
-            <div className="space-y-1.5">
-              <span className="text-[11px] text-zinc-400 flex items-center gap-1">
-                <Lightbulb className="w-3 h-3 text-amber-400/80" />
-                灵感预设：
-              </span>
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  '人类探索深空的壮丽史诗',
-                  '未来AI重塑文明的一天',
-                  '深海一万米未知生物',
-                  '允许一切发生的治愈哲学'
-                ].map((preset) => (
-                  <button
-                    key={preset}
-                    onClick={() => onTopicChange(preset)}
-                    className="px-2.5 py-1 bg-[#1e1e24] hover:bg-[#282832] border border-[#2b2b36] text-[11px] text-zinc-300 rounded-lg transition-colors cursor-pointer text-left truncate max-w-full"
-                  >
-                    {preset}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-1.5 pt-1">
-              <label className="text-zinc-400 font-medium">视频基调 & 领域</label>
-              <div className="grid grid-cols-3 gap-1.5">
-                {genres.map((g) => (
-                  <button
-                    key={g}
-                    onClick={() => setGenre(g)}
-                    className={`py-1.5 rounded-lg text-center transition-all cursor-pointer text-[11px] ${
-                      genre === g
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 font-medium'
-                        : 'bg-[#1e1e24] text-zinc-400 border border-[#2b2b36] hover:bg-[#25252e]'
-                    }`}
-                  >
-                    {g}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div className="space-y-1">
-                <label className="text-zinc-400 font-medium flex items-center gap-1">
-                  <Clock className="w-3 h-3 text-amber-400" />
-                  目标时长
-                </label>
-                <select
-                  value={targetDuration}
-                  onChange={(e) => setTargetDuration(Number(e.target.value))}
-                  className="w-full bg-[#1e1e24] border border-[#2b2b36] rounded-lg px-2.5 py-1.5 text-zinc-200 text-xs focus:outline-none focus:border-amber-500/50 cursor-pointer"
-                >
-                  <option value={15}>15 秒 (快节奏)</option>
-                  <option value={30}>30 秒 (标准爆款)</option>
-                  <option value={45}>45 秒 (深度叙事)</option>
-                  <option value={60}>60 秒 (完整讲解)</option>
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-zinc-400 font-medium flex items-center gap-1">
-                  <Layers className="w-3 h-3 text-amber-400" />
-                  分镜数量
-                </label>
-                <select
-                  value={clipCount}
-                  onChange={(e) => setClipCount(Number(e.target.value))}
-                  className="w-full bg-[#1e1e24] border border-[#2b2b36] rounded-lg px-2.5 py-1.5 text-zinc-200 text-xs focus:outline-none focus:border-amber-500/50 cursor-pointer"
-                >
-                  <option value={3}>3 个镜头</option>
-                  <option value={4}>4 个镜头 (推荐)</option>
-                  <option value={5}>5 个镜头</option>
-                  <option value={6}>6 个镜头</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="space-y-1.5 pt-1">
-              <label className="text-zinc-400 font-medium flex items-center gap-1">
-                <Sliders className="w-3 h-3 text-amber-400" />
-                文案叙事语调
-              </label>
-              <div className="grid grid-cols-3 gap-1.5">
-                {[
-                  { id: 'punchy', label: '抓人爆款', desc: '强悬念·快节奏' },
-                  { id: 'emotional', label: '治愈深情', desc: '富有哲思共鸣' },
-                  { id: 'humorous', label: '生动通俗', desc: '幽默易懂科普' }
-                ].map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => setTone(t.id as typeof tone)}
-                    className={`p-1.5 rounded-lg text-center transition-all cursor-pointer text-[11px] ${
-                      tone === t.id
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 font-medium'
-                        : 'bg-[#1e1e24] text-zinc-400 border border-[#2b2b36] hover:bg-[#25252e]'
-                    }`}
-                  >
-                    <div className="font-medium">{t.label}</div>
-                    <div className="text-[9px] text-zinc-500">{t.desc}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button
-              id="btn-generate-script"
-              onClick={handleGenerateScript}
-              disabled={isGeneratingScript}
-              className="w-full py-3 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-semibold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition-all cursor-pointer active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed text-xs"
-            >
-              {isGeneratingScript ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                  AI 正在构思剧本与分镜...
-                </>
-              ) : (
-                <>
-                  <Wand2 className="w-4 h-4" />
-                  一键生成文案并自动分镜
-                </>
-              )}
-            </button>
-
-            <p className="text-[11px] text-zinc-500 leading-relaxed flex items-center gap-1">
-              生成完成后会自动进入
-              <button
-                type="button"
-                onClick={() => onOpenStoryboard?.()}
-                className="text-amber-400 hover:text-amber-300 inline-flex items-center gap-0.5 cursor-pointer"
-              >
-                分镜台
-                <ArrowRight className="w-3 h-3" />
-              </button>
-              继续拆镜与微调。
-            </p>
-
-            {statusMessage && (
-              <div className="p-2.5 bg-[#1f1f28] border border-[#2e2e3a] rounded-lg text-amber-300 text-[11px] flex items-center gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 text-amber-400" />
-                <span className="flex-1">{statusMessage}</span>
-              </div>
             )}
           </div>
-        )}
+        );
+      })}
+    </div>
+  );
+}
 
-        {subTab === 'batch-topics' && (
-          <div className="space-y-4">
-            <div className="p-3 bg-[#1e1e24] border border-[#2b2b36] rounded-xl space-y-1">
-              <span className="text-zinc-200 font-medium text-xs flex items-center gap-1.5">
-                <Lightbulb className="w-3.5 h-3.5 text-amber-400" />
-                全网热门爆款短视频选题库
-              </span>
-              <p className="text-zinc-400 text-[11px]">
-                点击任意主题即可填入一键文案生成器。
-              </p>
+function HookDropZone({ onFillHook }: { onFillHook: (key: keyof ResearchNotes) => void }) {
+  const [over, setOver] = useState(false);
+  return (
+    <div
+      id="hook-drop-zone"
+      onDragOver={(e) => {
+        if (!isResearchDragEvent(e)) return;
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        const key = readResearchDrag(e);
+        setOver(false);
+        if (!key) return;
+        e.preventDefault();
+        onFillHook(key);
+      }}
+      className={`rounded-xl border border-dashed px-3 py-2.5 text-[12px] ${
+        over
+          ? 'border-amber-400 bg-amber-500/15 text-amber-100'
+          : 'border-[#2b2b36] bg-[#18181f] text-zinc-500'
+      }`}
+    >
+      钩子槽 · 把调研卡拖到这里，或在调研页点「填进钩子」
+    </div>
+  );
+}
+
+function isResearchDragEvent(event: React.DragEvent) {
+  const types = Array.from(event.dataTransfer.types || []);
+  return types.includes(RESEARCH_DRAG_MIME) || types.includes('text/plain');
+}
+
+function writeResearchDrag(event: React.DragEvent, key: keyof ResearchNotes) {
+  event.dataTransfer.setData(RESEARCH_DRAG_MIME, key);
+  event.dataTransfer.setData('text/plain', `research-note:${key}`);
+  event.dataTransfer.effectAllowed = 'copy';
+}
+
+function readResearchDrag(event: React.DragEvent): keyof ResearchNotes | null {
+  const raw = event.dataTransfer.getData(RESEARCH_DRAG_MIME) || event.dataTransfer.getData('text/plain');
+  const key = raw.replace(/^research-note:/, '') as keyof ResearchNotes;
+  if (key === 'competitor' || key === 'audienceQuestion' || key === 'fact' || key === 'visualRef') return key;
+  return null;
+}
+
+function DirectorRail({ workspace, compact }: { workspace: ScriptWorkspace; compact?: boolean }) {
+  const budget = workspace.durationBudget;
+  const notes = workspace.directorNotes;
+  return (
+    <div className={`p-4 space-y-3 ${compact ? '' : 'overflow-y-auto custom-scrollbar h-full'}`}>
+      <div className="text-[12px] font-medium text-zinc-200">导演批注</div>
+      <div className={`grid gap-2 ${compact ? 'grid-cols-3' : 'grid-cols-1'}`}>
+        <MiniStat label="字数" value={`${budget.usedChars}/${budget.maxChars}`} warn={budget.usedChars > budget.maxChars} />
+        <MiniStat
+          label="时长"
+          value={`${budget.targetSeconds}s`}
+          warn={workspace.forecastShots.reduce((sum, shot) => sum + shot.speechDuration + shot.holdDuration, 0) > budget.targetSeconds + 0.4}
+        />
+        <MiniStat label="预测" value={forecastSummary(workspace).split('·')[0]} />
+      </div>
+      {notes.length === 0 ? (
+        <p className="text-[11px] text-zinc-500 leading-relaxed">还没有需要改的地方。字数超了、钩子太长、节奏太平，会出现在这里。</p>
+      ) : (
+        <div className="space-y-2">
+          {notes.map((note) => (
+            <div
+              key={note.id}
+              className={`rounded-lg px-2.5 py-2 text-[11px] leading-relaxed ${
+                note.level === 'block'
+                  ? 'bg-rose-500/10 text-rose-200 border border-rose-500/30'
+                  : note.level === 'warn'
+                    ? 'bg-amber-500/10 text-amber-200 border border-amber-500/25'
+                    : 'bg-zinc-800/80 text-zinc-400 border border-zinc-700/80'
+              }`}
+            >
+              {note.message}
             </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-            {TOPIC_IDEAS.map((cat, idx) => (
-              <div key={idx} className="space-y-1.5">
-                <span className="text-[11px] font-semibold text-amber-400/90 tracking-wide">
-                  {cat.category}
-                </span>
-                <div className="space-y-1.5">
-                  {cat.topics.map((t, tIdx) => (
-                    <button
-                      key={tIdx}
-                      onClick={() => {
-                        onTopicChange(t);
-                        setSubTab('one-click');
-                      }}
-                      className="w-full text-left p-2.5 bg-[#1a1a20] hover:bg-[#24242d] border border-[#262630] hover:border-amber-500/40 rounded-xl text-zinc-300 hover:text-amber-300 transition-all text-xs flex items-center justify-between group cursor-pointer"
-                    >
-                      <span className="line-clamp-2 leading-relaxed">{t}</span>
-                      <Wand2 className="w-3.5 h-3.5 text-zinc-500 group-hover:text-amber-400 flex-shrink-0 ml-2" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+function BudgetRing({ label, used, max, unit }: { label: string; used: number; max: number; unit: string }) {
+  const ratio = Math.min(1.2, usageRatio(used, max));
+  const over = used > max && max > 0;
+  return (
+    <div className="rounded-2xl border border-[#2b2b36] bg-[#18181f] p-4">
+      <div className="text-[11px] text-zinc-500">{label}</div>
+      <div className={`mt-1 text-lg font-semibold ${over ? 'text-rose-300' : 'text-zinc-100'}`}>
+        {used}{unit} <span className="text-[12px] font-normal text-zinc-500">/ {max}{unit}</span>
+      </div>
+      <div className="mt-3 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+        <div
+          className={`h-full ${over ? 'bg-rose-400' : 'bg-amber-400'}`}
+          style={{ width: `${Math.min(100, ratio * 100)}%` }}
+        />
       </div>
     </div>
   );
-};
+}
+
+function SectionIntro({ title, desc }: { title: string; desc: string }) {
+  return (
+    <div>
+      <h3 className="text-base font-semibold text-zinc-100">{title}</h3>
+      <p className="mt-1 text-[13px] text-zinc-500 leading-relaxed">{desc}</p>
+    </div>
+  );
+}
+
+function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-2.5 py-1 rounded-lg text-[11px] border cursor-pointer ${
+        active ? 'bg-amber-500/15 text-amber-200 border-amber-500/40' : 'bg-[#18181f] text-zinc-400 border-[#2b2b36] hover:text-zinc-200'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PrimaryButton({
+  id,
+  busy,
+  onClick,
+  disabled,
+  children
+}: {
+  id?: string;
+  busy?: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      id={id}
+      type="button"
+      onClick={onClick}
+      disabled={disabled || busy}
+      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-[13px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-black disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+    >
+      {busy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+      {children}
+    </button>
+  );
+}
+
+function MiniStat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <div className="rounded-lg bg-[#18181f] border border-[#2b2b36] px-2.5 py-2">
+      <div className="text-[10px] text-zinc-500">{label}</div>
+      <div className={`text-[12px] mt-0.5 ${warn ? 'text-rose-300' : 'text-zinc-200'}`}>{value}</div>
+    </div>
+  );
+}
+

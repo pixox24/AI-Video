@@ -1,7 +1,175 @@
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
-import { VideoProject, StoryboardClip } from '../types';
+import { VideoProject, StoryboardClip, CameraMotion, SubtitleConfig } from '../types';
 import { calculateSubtitleLayout } from './subtitleFormatter';
-import { BGM_TRACKS } from './presets';
+import { DEFAULT_BGM_TRACK_ID, bgmById, resolveBgmTrackId, resolveTtsApi } from './presets';
+import { clipShotNarration, detectSpeechBounds, isNarrationTrackFresh } from './narrationTrack';
+
+const TRANSITION_SECONDS = 0.4;
+
+interface ClipAtTime {
+  clip: StoryboardClip;
+  index: number;
+  clipTime: number;
+  clipDuration: number;
+}
+
+function getClipAtTime(clips: StoryboardClip[], time: number): ClipAtTime | null {
+  let acc = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const duration = clips[i].duration || 3.5;
+    if (time >= acc && time < acc + duration) {
+      return { clip: clips[i], index: i, clipTime: time - acc, clipDuration: duration };
+    }
+    acc += duration;
+  }
+  if (clips.length > 0) {
+    const lastIndex = clips.length - 1;
+    const lastDuration = clips[lastIndex].duration || 3.5;
+    return {
+      clip: clips[lastIndex],
+      index: lastIndex,
+      clipTime: lastDuration,
+      clipDuration: lastDuration
+    };
+  }
+  return null;
+}
+
+function cameraTransform(motion: CameraMotion | string, progress: number, width: number, height: number) {
+  let motionScale = 1.0;
+  let motionOffsetX = 0;
+  let motionOffsetY = 0;
+
+  if (motion === 'zoom-in') {
+    motionScale = 1.0 + progress * 0.15;
+  } else if (motion === 'zoom-out') {
+    motionScale = 1.15 - progress * 0.15;
+  } else if (motion === 'pan-left') {
+    motionScale = 1.1;
+    motionOffsetX = (progress - 0.5) * width * 0.08;
+  } else if (motion === 'pan-right') {
+    motionScale = 1.1;
+    motionOffsetX = (0.5 - progress) * width * 0.08;
+  } else if (motion === 'tilt-up') {
+    motionScale = 1.1;
+    motionOffsetY = (progress - 0.5) * height * 0.08;
+  } else if (motion === 'tilt-down') {
+    motionScale = 1.1;
+    motionOffsetY = (0.5 - progress) * height * 0.08;
+  } else if (motion === 'cinematic-orbit') {
+    motionScale = 1.08 + Math.sin(progress * Math.PI) * 0.05;
+    motionOffsetX = Math.cos(progress * Math.PI) * width * 0.03;
+    motionOffsetY = Math.sin(progress * Math.PI) * height * 0.02;
+  }
+
+  return { motionScale, motionOffsetX, motionOffsetY };
+}
+
+function drawKenBurnsImage(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  width: number,
+  height: number,
+  motion: CameraMotion | string,
+  progress: number,
+  extra?: { alpha?: number; offsetX?: number; extraScale?: number }
+) {
+  if (!img || img.naturalWidth <= 0) return;
+  const alpha = extra?.alpha ?? 1;
+  const offsetX = extra?.offsetX ?? 0;
+  const extraScale = extra?.extraScale ?? 1;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  const scaleX = width / img.naturalWidth;
+  const scaleY = height / img.naturalHeight;
+  const baseScale = Math.max(scaleX, scaleY);
+  const { motionScale, motionOffsetX, motionOffsetY } = cameraTransform(motion, progress, width, height);
+  const finalScale = baseScale * motionScale * extraScale;
+  const drawW = img.naturalWidth * finalScale;
+  const drawH = img.naturalHeight * finalScale;
+  const drawX = (width - drawW) / 2 + motionOffsetX + offsetX;
+  const drawY = (height - drawH) / 2 + motionOffsetY;
+  ctx.drawImage(img, drawX, drawY, drawW, drawH);
+  ctx.restore();
+}
+
+function mixNarrationFromTrack(
+  offlineCtx: OfflineAudioContext,
+  decodedBuffer: AudioBuffer,
+  project: VideoProject,
+  totalDuration: number,
+  voiceoverVolume: number
+): { start: number; end: number }[] {
+  const speechIntervals: { start: number; end: number }[] = [];
+  const track = project.audio?.narrationTrack;
+  const hasPinnedHold = project.clips.some(
+    (clip) => Boolean(clip.holdPinned) && (clip.holdDuration || 0) > 0.05
+  );
+
+  const connectSource = (when: number, offset: number, duration: number) => {
+    const bufferDuration = decodedBuffer.duration;
+    if (when >= totalDuration - 0.001) return false;
+    if (offset >= bufferDuration - 0.001) return false;
+    const playDuration = Math.min(duration, bufferDuration - offset, totalDuration - when);
+    if (playDuration <= 0.01) return false;
+    const source = offlineCtx.createBufferSource();
+    source.buffer = decodedBuffer;
+    const gain = offlineCtx.createGain();
+    gain.gain.value = voiceoverVolume;
+    source.connect(gain);
+    gain.connect(offlineCtx.destination);
+    source.start(Math.max(0, when), Math.max(0, offset), playDuration);
+    speechIntervals.push({
+      start: Math.max(0, when),
+      end: Math.min(totalDuration, when + playDuration)
+    });
+    return true;
+  };
+
+  // Preview plays one continuous file when holds are not pinned. Scheduling the
+  // whole buffer avoids 1-sample gaps from per-clip BufferSource slices.
+  if (!hasPinnedHold) {
+    if (track?.alignment?.version === 2) {
+      connectSource(0, 0, Math.min(decodedBuffer.duration, totalDuration));
+      return speechIntervals;
+    }
+    const bounds = typeof track?.speechStart === 'number'
+      ? { speechStart: track.speechStart, speechEnd: track.speechEnd ?? decodedBuffer.duration }
+      : detectSpeechBounds(decodedBuffer);
+    const offset = Math.max(0, bounds.speechStart || 0);
+    const end = Math.max(offset + 0.05, Math.min(decodedBuffer.duration, bounds.speechEnd || decodedBuffer.duration));
+    connectSource(0, offset, Math.min(end - offset, totalDuration));
+    return speechIntervals;
+  }
+
+  const byId = new Map((track?.clips || []).map((item) => [item.clipId, item]));
+  let timelineCursor = 0;
+  let lastAudioEnd = 0;
+
+  for (const clip of project.clips) {
+    const clipDuration = clip.duration || 3.5;
+    const timing = byId.get(clip.id);
+    const audioStart = timing?.audioStart ?? lastAudioEnd;
+    const timedSpeech = timing ? Math.max(0, timing.audioEnd - timing.audioStart) : 0;
+    const speechDuration =
+      timedSpeech > 0.02
+        ? timedSpeech
+        : clip.speechDuration ?? 0;
+    const holdDuration = clip.holdPinned ? Math.max(0, clip.holdDuration || 0) : 0;
+    const playDuration = Math.min(speechDuration, Math.max(0, clipDuration - holdDuration), clipDuration);
+
+    try {
+      connectSource(timelineCursor, audioStart, playDuration);
+    } catch (err) {
+      console.warn('[AudioExport] Clip narration slice skipped:', clip.id, err);
+    }
+
+    lastAudioEnd = timing?.audioEnd ?? audioStart + speechDuration;
+    timelineCursor += clipDuration;
+  }
+
+  return speechIntervals;
+}
 
 export interface ExportProgressCallback {
   (progress: number, stageText: string): void;
@@ -52,31 +220,62 @@ async function renderOfflineAudio(
     let accTime = 0;
 
     if (voiceoverEnabled) {
-      for (let i = 0; i < project.clips.length; i++) {
-        const clip = project.clips[i];
-        const clipStart = accTime;
-        const clipDur = clip.duration || 3.5;
-        accTime += clipDur;
+      const track = project.audio?.narrationTrack;
+      const trackFresh = isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi));
+      let mixedFullTrack = false;
 
-        if (clip.narration && clip.narration.trim()) {
+      // Prefer the same full VO file the preview plays, even if hash is slightly stale.
+      // Per-clip TTS skips continue shots (empty narration) and creates mid-video silence.
+      if (track?.audioUrl) {
+        onProgress?.(10, '正在铺整段旁白音轨...');
+        try {
+          const res = await fetch(track.audioUrl);
+          if (res.ok) {
+            const arrayBuf = await res.arrayBuffer();
+            const decodedBuffer = await decodeCtx.decodeAudioData(arrayBuf);
+            speechIntervals.push(
+              ...mixNarrationFromTrack(offlineCtx, decodedBuffer, project, totalDuration, voiceoverVolume)
+            );
+            mixedFullTrack = speechIntervals.length > 0;
+            if (!trackFresh) {
+              console.warn('[AudioExport] Narration track hash is stale; still mixed full VO to avoid export gaps.');
+            }
+          }
+        } catch (ttsErr) {
+          console.warn('[AudioExport] Full narration track mix failed:', ttsErr);
+        }
+      }
+
+      if (!mixedFullTrack) {
+        for (let i = 0; i < project.clips.length; i++) {
+          const clip = project.clips[i];
+          const clipStart = accTime;
+          const clipDur = clip.duration || 3.5;
+          accTime += clipDur;
+
+          const spokenText = (clip.narration || '').trim();
+          if (!spokenText) continue;
+
           try {
             const res = await fetch('/api/audio/tts', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                text: clip.narration.trim(),
+                text: spokenText,
                 character: voiceCharacter,
-                rate: speechRate
+                rate: speechRate,
+                ttsApi: resolveTtsApi(project.settings.customTtsApi)
               })
             });
 
             if (res.ok) {
               const data = await res.json();
               if (data?.audioUrl) {
-                const arrayBuf = base64ToArrayBuffer(data.audioUrl);
+                const arrayBuf = data.audioUrl.startsWith('data:')
+                  ? base64ToArrayBuffer(data.audioUrl)
+                  : await (await fetch(data.audioUrl)).arrayBuffer();
                 const decodedBuffer = await decodeCtx.decodeAudioData(arrayBuf);
 
-                // Schedule voice clip in offline context
                 const source = offlineCtx.createBufferSource();
                 source.buffer = decodedBuffer;
 
@@ -104,8 +303,8 @@ async function renderOfflineAudio(
     const bgmTrackId = project.audio?.bgmTrackId;
     if (bgmEnabled && bgmTrackId && bgmTrackId !== 'none') {
       onProgress?.(18, '正在加载背景音乐并配置人声闪避 (Ducking)...');
-      const trackDef = BGM_TRACKS.find(t => t.id === bgmTrackId);
-      const bgmUrl = project.audio?.customBgmUrl || (trackDef ? trackDef.url : '/audio/bgm/epic-cinematic.mp3');
+      const trackDef = bgmById(resolveBgmTrackId(bgmTrackId));
+      const bgmUrl = project.audio?.customBgmUrl || trackDef?.url || `/audio/bgm/${DEFAULT_BGM_TRACK_ID}.mp3`;
 
       let bgmArrayBuf: ArrayBuffer | null = null;
       try {
@@ -239,11 +438,20 @@ export async function exportProjectToMP4(
       project.clips.map((clip) => {
         if (!clip.imageUrl) return Promise.resolve(null);
         return new Promise<HTMLImageElement | null>((resolve) => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => resolve(img);
-          img.onerror = () => resolve(null);
-          img.src = clip.imageUrl;
+          const tryLoad = (src: string, allowProxyRetry: boolean) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => resolve(img);
+            img.onerror = () => {
+              if (allowProxyRetry && /^https?:\/\//i.test(src)) {
+                tryLoad(`/api/image-proxy?url=${encodeURIComponent(src)}`, false);
+              } else {
+                resolve(null);
+              }
+            };
+            img.src = src;
+          };
+          tryLoad(clip.imageUrl!, true);
         });
       })
     ),
@@ -415,7 +623,8 @@ export async function exportProjectToMP4(
 }
 
 /**
- * Render single video frame to Canvas
+ * Render single video frame to Canvas — keep camera, transitions and
+ * subtitles aligned with VideoPlayerStage preview.
  */
 function renderCanvasFrame(
   ctx: CanvasRenderingContext2D,
@@ -425,9 +634,8 @@ function renderCanvasFrame(
   loadedImages: (HTMLImageElement | null)[],
   currentTime: number
 ) {
-  // Find current active clip
-  let accumulatedTime = 0;
-  let activeClip: StoryboardClip = project.clips[0] || {
+  const currentInfo = getClipAtTime(project.clips, currentTime);
+  const fallbackClip: StoryboardClip = project.clips[0] || {
     id: 'default',
     order: 1,
     duration: 3.5,
@@ -436,74 +644,63 @@ function renderCanvasFrame(
     cameraMotion: 'zoom-in',
     transition: 'crossfade'
   };
-  let activeClipIndex = 0;
-  let clipStartTime = 0;
-  let clipDuration = 3.5;
+  const activeClip = currentInfo?.clip || fallbackClip;
+  const activeClipIndex = currentInfo?.index ?? 0;
+  const clipDuration = currentInfo?.clipDuration || activeClip.duration || 3.5;
+  const clipTime = currentInfo?.clipTime ?? 0;
+  const clipProgress = Math.min(1, Math.max(0, clipTime / Math.max(0.05, clipDuration)));
 
-  for (let i = 0; i < project.clips.length; i++) {
-    const d = project.clips[i].duration || 3.5;
-    if (currentTime >= accumulatedTime && currentTime < accumulatedTime + d) {
-      activeClip = project.clips[i];
-      activeClipIndex = i;
-      clipStartTime = accumulatedTime;
-      clipDuration = d;
-      break;
-    }
-    accumulatedTime += d;
-  }
-
-  const clipProgress = Math.min(1, Math.max(0, (currentTime - clipStartTime) / clipDuration));
-
-  // 1. Draw Background
   const bgType = project.settings.canvasBackground;
-  if (bgType === 'blur') {
-    ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(0, 0, width, height);
-  } else {
-    ctx.fillStyle = bgType || '#0a0a0c';
-    ctx.fillRect(0, 0, width, height);
-  }
+  ctx.fillStyle = bgType === 'blur' ? '#0a0a0f' : (bgType || '#0a0a0c');
+  ctx.fillRect(0, 0, width, height);
 
-  // 2. Draw Image with Dynamic Camera Motion
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, width, height);
+  ctx.clip();
+
   const img = loadedImages[activeClipIndex];
-  if (img && img.naturalWidth > 0) {
-    const scaleX = width / img.naturalWidth;
-    const scaleY = height / img.naturalHeight;
-    const baseScale = Math.max(scaleX, scaleY);
+  const prevImg = activeClipIndex > 0 ? loadedImages[activeClipIndex - 1] : null;
+  const prevClip = activeClipIndex > 0 ? project.clips[activeClipIndex - 1] : null;
+  const inTransition = clipTime < TRANSITION_SECONDS && activeClipIndex > 0;
+  const transProgress = inTransition ? Math.min(1, clipTime / TRANSITION_SECONDS) : 1;
+  const transition = activeClip.transition || 'none';
 
-    let motionScale = 1.0;
-    let motionOffsetX = 0;
-    let motionOffsetY = 0;
-
-    const motion = activeClip.cameraMotion || 'zoom-in';
-    if (motion === 'zoom-in') {
-      motionScale = 1.0 + clipProgress * 0.12;
-    } else if (motion === 'zoom-out') {
-      motionScale = 1.12 - clipProgress * 0.12;
-    } else if (motion === 'pan-left') {
-      motionScale = 1.08;
-      motionOffsetX = (clipProgress - 0.5) * width * 0.06;
-    } else if (motion === 'pan-right') {
-      motionScale = 1.08;
-      motionOffsetX = (0.5 - clipProgress) * width * 0.06;
+  if (inTransition && prevImg && prevClip) {
+    if (transition === 'crossfade') {
+      drawKenBurnsImage(ctx, prevImg, width, height, prevClip.cameraMotion || 'zoom-in', 1, {
+        alpha: 1 - transProgress
+      });
+      if (img) {
+        drawKenBurnsImage(ctx, img, width, height, activeClip.cameraMotion || 'zoom-in', clipProgress, {
+          alpha: transProgress
+        });
+      }
+    } else if (transition === 'slide-left') {
+      drawKenBurnsImage(ctx, prevImg, width, height, prevClip.cameraMotion || 'zoom-in', 1, {
+        offsetX: -width * transProgress
+      });
+      if (img) {
+        drawKenBurnsImage(ctx, img, width, height, activeClip.cameraMotion || 'zoom-in', clipProgress, {
+          offsetX: width * (1 - transProgress)
+        });
+      }
+    } else if (transition === 'zoom-in') {
+      drawKenBurnsImage(ctx, prevImg, width, height, prevClip.cameraMotion || 'zoom-in', 1, {
+        alpha: 1 - transProgress,
+        extraScale: 1 + transProgress * 0.12
+      });
+      if (img) {
+        drawKenBurnsImage(ctx, img, width, height, activeClip.cameraMotion || 'zoom-in', clipProgress, {
+          extraScale: 1.08 - transProgress * 0.08
+        });
+      }
+    } else if (img) {
+      drawKenBurnsImage(ctx, img, width, height, activeClip.cameraMotion || 'zoom-in', clipProgress);
     }
-
-    const finalScale = baseScale * motionScale;
-    const drawW = img.naturalWidth * finalScale;
-    const drawH = img.naturalHeight * finalScale;
-    const drawX = (width - drawW) / 2 + motionOffsetX;
-    const drawY = (height - drawH) / 2 + motionOffsetY;
-
-    ctx.drawImage(img, drawX, drawY, drawW, drawH);
-
-    // Subtle dark gradient vignette for better subtitle readability
-    const gradient = ctx.createLinearGradient(0, height * 0.55, 0, height);
-    gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
-    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.7)');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, height * 0.55, width, height * 0.45);
+  } else if (img && img.naturalWidth > 0) {
+    drawKenBurnsImage(ctx, img, width, height, activeClip.cameraMotion || 'zoom-in', clipProgress);
   } else {
-    // Placeholder background if image not yet loaded
     ctx.fillStyle = '#181822';
     ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = '#71717a';
@@ -512,83 +709,112 @@ function renderCanvasFrame(
     ctx.fillText(`分镜镜头 ${activeClip.order}`, width / 2, height / 2);
   }
 
-  // 3. Draw Subtitles with Smart Multi-line Anti-Overflow Layout
-  if (project.subtitles && project.subtitles.enabled && activeClip.narration) {
-    const baseFontSize = Math.round(project.subtitles.fontSize * (width / 950));
-    const posY = (height * project.subtitles.positionY) / 100;
-    const maxWidthRatio = project.subtitles.maxWidthRatio || 0.84;
-    const maxLines = project.subtitles.maxLines || 3;
-
-    const layout = calculateSubtitleLayout(
-      ctx,
-      activeClip.narration,
-      activeClip.secondaryText,
-      width,
-      baseFontSize,
-      project.subtitles.bilingual,
-      maxWidthRatio,
-      maxLines
-    );
-
-    if (layout.lines.length > 0) {
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      // Subtitle Background Box / Pill
-      if (project.subtitles.showBackground) {
-        ctx.fillStyle = project.subtitles.backgroundColor || 'rgba(0, 0, 0, 0.75)';
-        const radius = Math.min(layout.boxHeight * 0.35, layout.fontSize * 0.5);
-        ctx.beginPath();
-        ctx.roundRect(width / 2 - layout.boxWidth / 2, posY - layout.boxHeight / 2, layout.boxWidth, layout.boxHeight, radius);
-        ctx.fill();
-      }
-
-      const primaryBlockHeight = layout.lines.length * layout.lineHeight;
-      const startY = posY - layout.totalHeight / 2 + layout.lineHeight / 2;
-
-      // Primary Chinese Text
-      ctx.font = `bold ${layout.fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-
-      layout.lines.forEach((line, idx) => {
-        const lineY = startY + idx * layout.lineHeight;
-
-        // Stroke
-        if (project.subtitles.showStroke) {
-          ctx.strokeStyle = project.subtitles.strokeColor || '#000000';
-          ctx.lineWidth = Math.max(3, layout.fontSize * 0.16);
-          ctx.lineJoin = 'round';
-          ctx.strokeText(line, width / 2, lineY);
-        }
-
-        // Fill
-        ctx.fillStyle = project.subtitles.primaryColor || '#ffffff';
-        ctx.fillText(line, width / 2, lineY);
-      });
-
-      // Secondary Bilingual Text
-      if (project.subtitles.bilingual && layout.secondaryLines.length > 0) {
-        ctx.font = `500 ${layout.secondaryFontSize}px "PingFang SC", sans-serif`;
-        const secondaryStartY = posY - layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;
-
-        layout.secondaryLines.forEach((secLine, idx) => {
-          const secLineY = secondaryStartY + idx * layout.secondaryLineHeight;
-
-          if (project.subtitles.showStroke) {
-            ctx.strokeStyle = '#000000';
-            ctx.lineWidth = Math.max(2, layout.secondaryFontSize * 0.15);
-            ctx.lineJoin = 'round';
-            ctx.strokeText(secLine, width / 2, secLineY);
-          }
-
-          ctx.fillStyle = project.subtitles.highlightColor || '#facc15';
-          ctx.fillText(secLine, width / 2, secLineY);
-        });
-      }
-
-      ctx.restore();
-    }
+  if (inTransition && transition === 'fade-black') {
+    ctx.fillStyle = `rgba(0, 0, 0, ${1 - transProgress})`;
+    ctx.fillRect(0, 0, width, height);
+  } else if (inTransition && transition === 'crossfade' && !prevImg) {
+    ctx.fillStyle = `rgba(0, 0, 0, ${(1 - transProgress) * 0.4})`;
+    ctx.fillRect(0, 0, width, height);
   }
+
+  ctx.restore();
+
+  const vignette = ctx.createRadialGradient(
+    width / 2, height / 2, Math.min(width, height) * 0.35,
+    width / 2, height / 2, Math.max(width, height) * 0.75
+  );
+  vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vignette.addColorStop(1, 'rgba(0, 0, 0, 0.45)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, width, height);
+
+  const subtitleText = clipShotNarration(activeClip);
+  if (project.subtitles?.enabled && subtitleText) {
+    drawExportSubtitles(ctx, width, height, activeClip, project.subtitles, clipProgress, subtitleText);
+  }
+}
+
+function drawExportSubtitles(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  clip: StoryboardClip,
+  config: SubtitleConfig,
+  progress: number,
+  subtitleText: string
+) {
+  const baseFontSize = Math.round(config.fontSize * (width / 950));
+  const posY = (height * config.positionY) / 100;
+  const maxWidthRatio = config.maxWidthRatio || 0.84;
+  const maxLines = config.maxLines || 3;
+
+  const layout = calculateSubtitleLayout(
+    ctx,
+    subtitleText,
+    clip.secondaryText,
+    width,
+    baseFontSize,
+    config.bilingual,
+    maxWidthRatio,
+    maxLines
+  );
+
+  if (layout.lines.length === 0) return;
+
+  let scale = 1.0;
+  if (config.animation === 'pop') {
+    scale = progress < 0.15 ? 0.92 + (progress / 0.15) * 0.08 : 1.0;
+  }
+
+  ctx.save();
+  ctx.translate(width / 2, posY);
+  ctx.scale(scale, scale);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  if (config.showBackground) {
+    ctx.fillStyle = config.backgroundColor || 'rgba(0, 0, 0, 0.75)';
+    const radius = Math.min(layout.boxHeight * 0.35, layout.fontSize * 0.5);
+    ctx.beginPath();
+    ctx.roundRect(-layout.boxWidth / 2, -layout.boxHeight / 2, layout.boxWidth, layout.boxHeight, radius);
+    ctx.fill();
+  }
+
+  const primaryBlockHeight = layout.lines.length * layout.lineHeight;
+  const startY = -layout.totalHeight / 2 + layout.lineHeight / 2;
+
+  ctx.font = `bold ${layout.fontSize}px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+
+  layout.lines.forEach((line, idx) => {
+    const lineY = startY + idx * layout.lineHeight;
+    if (config.showStroke) {
+      ctx.strokeStyle = config.strokeColor || '#000000';
+      ctx.lineWidth = Math.max(3, layout.fontSize * 0.16);
+      ctx.lineJoin = 'round';
+      ctx.strokeText(line, 0, lineY);
+    }
+    ctx.fillStyle = config.primaryColor || '#ffffff';
+    ctx.fillText(line, 0, lineY);
+  });
+
+  if (config.bilingual && layout.secondaryLines.length > 0) {
+    ctx.font = `500 ${layout.secondaryFontSize}px system-ui, -apple-system, "PingFang SC", sans-serif`;
+    const secondaryStartY = -layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;
+
+    layout.secondaryLines.forEach((secLine, idx) => {
+      const secLineY = secondaryStartY + idx * layout.secondaryLineHeight;
+      if (config.showStroke) {
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = Math.max(2, layout.secondaryFontSize * 0.15);
+        ctx.lineJoin = 'round';
+        ctx.strokeText(secLine, 0, secLineY);
+      }
+      ctx.fillStyle = config.highlightColor || '#facc15';
+      ctx.fillText(secLine, 0, secLineY);
+    });
+  }
+
+  ctx.restore();
 }
 
 /**

@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   Play, 
   Pause, 
@@ -24,6 +25,7 @@ import {
   Hourglass
 } from 'lucide-react';
 import { StoryboardClip, TransitionType, CameraMotion } from '../types';
+import { clipShotNarration } from '../utils/narrationTrack';
 
 interface TimelineBarProps {
   clips: StoryboardClip[];
@@ -82,7 +84,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
 
   // Hover Scrubbing Preview State
   const [hoverTime, setHoverTime] = useState<number | null>(null);
-  const [hoverPosition, setHoverPosition] = useState<{ x: number; clientX: number } | null>(null);
+  const [hoverPosition, setHoverPosition] = useState<{ x: number; clientX: number; clientY: number } | null>(null);
 
   // Active Trimming State
   const [trimmingClipId, setTrimmingClipId] = useState<string | null>(null);
@@ -314,7 +316,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     const x = e.clientX - rect.left + scrollLeft - 16;
     const time = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
     setHoverTime(time);
-    setHoverPosition({ x: x + 16, clientX: e.clientX });
+    setHoverPosition({ x: x + 16, clientX: e.clientX, clientY: e.clientY });
   };
 
   const handleMouseLeave = () => {
@@ -338,12 +340,24 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     const handleTrimMove = (moveEvent: PointerEvent) => {
       const deltaPixels = moveEvent.clientX - startX;
       const deltaSec = deltaPixels / pixelsPerSecond;
-      const calculated = Math.max(0.8, Math.min(15.0, Math.round((initialDuration + deltaSec) * 10) / 10));
+      const targetClip = clips.find(c => c.id === clipId);
+      const speechDuration = targetClip?.speechDuration ?? 0;
+      const minDuration = speechDuration > 0 ? Math.max(0.5, Math.round(speechDuration * 10) / 10) : 0.8;
+      const maxDuration = speechDuration > 0 ? minDuration + 8 : 15;
+      const calculated = Math.max(minDuration, Math.min(maxDuration, Math.round((initialDuration + deltaSec) * 10) / 10));
 
       setTrimData({ originalDuration: initialDuration, newDuration: calculated });
 
-      const updated = clips.map(c => c.id === clipId ? { ...c, duration: calculated } : c);
-      onClipsChange(updated);
+      onClipsChange(clips.map(c => {
+        if (c.id !== clipId) return c;
+        const speech = c.speechDuration ?? 0;
+        return {
+          ...c,
+          duration: calculated,
+          holdDuration: Math.max(0, Math.round((calculated - speech) * 10) / 10),
+          holdPinned: true
+        };
+      }));
 
       checkAndRunAutoScroll(moveEvent.clientX, () => {
         // Keep updated while scrolling
@@ -807,7 +821,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                       </div>
 
                       <p className="text-[10px] text-zinc-400 truncate leading-snug">
-                        {clip.narration || clip.visualPrompt || '分镜片段'}
+                        {clipShotNarration(clip) || clip.visualPrompt || '分镜片段'}
                       </p>
                     </div>
 
@@ -825,7 +839,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                     <div
                       onPointerDown={(e) => handleTrimStart(e, clip.id, clip.duration || 3.5)}
                       className="absolute right-0 top-0 bottom-0 w-3.5 bg-gradient-to-l from-amber-500/40 via-amber-500/10 to-transparent hover:from-amber-500 hover:via-amber-400/40 cursor-ew-resize opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-10"
-                      title="按住向左右拖拽微调分镜时长"
+                      title={clip.speechDuration ? '拖拽只增加念完后的画面停留，不能短于旁白时长' : '按住向左右拖拽微调分镜时长'}
                     >
                       <div className="w-1 h-5 rounded-full bg-amber-300 flex flex-col justify-between py-0.5 shadow-sm">
                         <div className="w-0.5 h-0.5 rounded-full bg-black mx-auto" />
@@ -836,7 +850,14 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                     {/* Live Duration Trim Floating Tooltip */}
                     {isTrimmingThis && trimData && (
                       <div className="absolute top-1 right-2 px-2 py-0.5 bg-amber-500 text-black text-[10px] font-mono font-bold rounded-md shadow-lg shadow-black/60 z-30 animate-pulse">
-                        时长: {trimData.newDuration.toFixed(1)}s ({trimData.newDuration >= trimData.originalDuration ? '+' : ''}{(trimData.newDuration - trimData.originalDuration).toFixed(1)}s)
+                        {(() => {
+                          const speech = clips.find(c => c.id === clip.id)?.speechDuration || 0;
+                          if (speech > 0) {
+                            const hold = Math.max(0, trimData.newDuration - speech);
+                            return `语音 ${speech.toFixed(1)}s + 停留 ${hold.toFixed(1)}s`;
+                          }
+                          return `时长: ${trimData.newDuration.toFixed(1)}s (${trimData.newDuration >= trimData.originalDuration ? '+' : ''}${(trimData.newDuration - trimData.originalDuration).toFixed(1)}s)`;
+                        })()}
                       </div>
                     )}
                   </div>
@@ -946,9 +967,9 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                             ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300 font-medium ring-1 ring-emerald-500/30'
                             : 'bg-[#15151c] border-[#252530] text-zinc-400 hover:bg-[#1c1c24]'
                         }`}
-                        title={clip.narration}
+                        title={clipShotNarration(clip)}
                       >
-                        <span className="truncate">💬 {clip.narration || '（无字幕）'}</span>
+                        <span className="truncate">💬 {clipShotNarration(clip) || '（无字幕）'}</span>
                       </div>
                     );
                   })}
@@ -1006,59 +1027,20 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
             </div>
           )}
 
-          {/* 4. HOVER SCRUBBING INDICATOR & PREVIEW POPUP */}
           {hoverTime !== null && hoverPosition && !isDragging && (
-            <>
-              {/* Vertical White Guide Line */}
-              <div 
-                className="absolute top-0 bottom-0 w-[1px] bg-white/60 pointer-events-none z-20 shadow-[0_0_4px_rgba(255,255,255,0.8)]"
-                style={{ left: `${hoverPosition.x}px` }}
-              />
-
-              {/* Floating Tooltip with Timestamp & Clip Preview */}
-              <div
-                className="absolute bottom-20 pointer-events-none z-40 -translate-x-1/2 bg-[#1b1b24] border border-[#353545] rounded-xl p-2 shadow-2xl shadow-black/90 w-48 text-left space-y-1.5 animate-in fade-in zoom-in-95 duration-100"
-                style={{ 
-                  left: `${Math.max(100, Math.min(timelineContentWidth - 100, hoverPosition.x))}px` 
-                }}
-              >
-                <div className="flex items-center justify-between border-b border-zinc-800 pb-1">
-                  <span className="text-[10px] font-mono font-bold text-amber-400">
-                    {formatTimecode(hoverTime)}
-                  </span>
-                  {hoverClipInfo && (
-                    <span className="text-[9px] font-medium text-zinc-300">
-                      镜头 {hoverClipInfo.clip.order}
-                    </span>
-                  )}
-                </div>
-
-                {hoverClipInfo && (
-                  <div className="flex gap-2 items-center">
-                    {hoverClipInfo.clip.imageUrl && (
-                      <img 
-                        src={hoverClipInfo.clip.imageUrl} 
-                        alt="" 
-                        className="w-10 h-10 rounded-md object-cover flex-shrink-0 border border-zinc-700" 
-                      />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[9px] text-zinc-300 line-clamp-2 leading-tight">
-                        {hoverClipInfo.clip.narration || hoverClipInfo.clip.visualPrompt}
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </>
+            <div 
+              className="absolute top-0 bottom-0 w-[1px] bg-white/60 pointer-events-none z-20 shadow-[0_0_4px_rgba(255,255,255,0.8)]"
+              style={{ left: `${hoverPosition.x}px` }}
+            />
           )}
 
           {/* 5. DRAGGABLE PLAYHEAD NEEDLE & HANDLE */}
           <div
             id="timeline-playhead"
-            className="absolute top-0 bottom-0 pointer-events-none z-30"
+            className="absolute bottom-0 pointer-events-none z-30"
             style={{ 
               left: `${playheadX}px`, 
+              top: '4px',
               transform: 'translateX(-50%)' 
             }}
           >
@@ -1083,6 +1065,45 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
           </div>
         </div>
       </div>
+
+      {hoverTime !== null && hoverPosition && !isDragging && createPortal(
+        <div
+          id="timeline-hover-preview"
+          className="fixed z-[70] pointer-events-none w-48 -translate-x-1/2 -translate-y-full rounded-xl border border-white/12 bg-zinc-950/80 p-2 text-left shadow-[0_12px_40px_rgba(0,0,0,0.5)] backdrop-blur-xl space-y-1.5"
+          style={{
+            left: `${Math.max(104, Math.min((typeof window !== 'undefined' ? window.innerWidth : 800) - 104, hoverPosition.clientX))}px`,
+            top: `${Math.max(12, (scrollContainerRef.current?.getBoundingClientRect().top ?? hoverPosition.clientY) - 10)}px`
+          }}
+        >
+          <div className="flex items-center justify-between border-b border-white/10 pb-1">
+            <span className="text-[10px] font-mono font-bold text-amber-400">
+              {formatTimecode(hoverTime)}
+            </span>
+            {hoverClipInfo && (
+              <span className="text-[9px] font-medium text-zinc-300">
+                镜头 {hoverClipInfo.clip.order}
+              </span>
+            )}
+          </div>
+          {hoverClipInfo && (
+            <div className="flex gap-2 items-center">
+              {hoverClipInfo.clip.imageUrl && (
+                <img
+                  src={hoverClipInfo.clip.imageUrl}
+                  alt=""
+                  className="w-10 h-10 rounded-md object-cover flex-shrink-0 border border-zinc-700"
+                />
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[9px] text-zinc-300 line-clamp-2 leading-tight">
+                  {clipShotNarration(hoverClipInfo.clip) || hoverClipInfo.clip.visualPrompt}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>,
+        document.body
+      )}
 
       {/* Keyboard Shortcuts Helper Drawer / Overlay Modal */}
       {showShortcutHelp && (

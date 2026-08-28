@@ -2,22 +2,14 @@ import React, { useState, useRef } from 'react';
 import {
   Wand2,
   Plus,
-  Trash2,
+  Mic,
   RefreshCw,
   Sparkles,
-  ChevronUp,
-  ChevronDown,
-  Clock,
-  Upload,
-  Image as ImageIcon,
   CheckCircle2,
   FileText,
   Zap,
-  AlertTriangle,
   Square as StopSquare,
-  Hourglass,
   Loader2,
-  Check,
   Film
 } from 'lucide-react';
 import {
@@ -28,16 +20,20 @@ import {
   VisualStyle,
   AspectRatio,
   CustomImageApiConfig,
-  CustomLlmApiConfig
+  CustomLlmApiConfig,
+  ClipsChange
 } from '../types';
-import { STYLE_DEFINITIONS, resolveImageApi } from '../utils/presets';
+import { resolveImageApi } from '../utils/presets';
 import { generateProceduralArtwork } from '../utils/visualGenerator';
+import { buildVisualPrompt, presetStylePack } from '../utils/stylePack';
+import { ToolRail } from './ToolRail';
+import { StoryboardClipCard } from './StoryboardClipCard';
 
 interface StoryboardPanelProps {
   topic: string;
   onTopicChange: (topic: string) => void;
   clips: StoryboardClip[];
-  onClipsChange: (clips: StoryboardClip[]) => void;
+  onClipsChange: (clips: ClipsChange) => void;
   visualStyle: VisualStyle;
   aspectRatio?: AspectRatio;
   customImageApi?: CustomImageApiConfig;
@@ -49,6 +45,9 @@ interface StoryboardPanelProps {
   onGenerateSingleImage?: (clipId: string) => void;
   isGeneratingAll: boolean;
   batchProgress?: { completed: number; total: number; activeCount: number } | null;
+  onRegenerateNarration?: () => void;
+  isGeneratingNarration?: boolean;
+  narrationFresh?: boolean;
 }
 
 export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
@@ -66,7 +65,10 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
   onCancelGenerateAllImages,
   onGenerateSingleImage,
   isGeneratingAll,
-  batchProgress
+  batchProgress,
+  onRegenerateNarration,
+  isGeneratingNarration = false,
+  narrationFresh = false
 }) => {
   const [subTab, setSubTab] = useState<StoryboardSubTab>(clips.length > 0 ? 'shots' : 'split');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -107,14 +109,14 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           const newClips: StoryboardClip[] = data.shots.map((shot: any, index: number) => ({
             id: `clip-${Date.now()}-${index}`,
             order: index + 1,
-            duration: shot.duration || 3.5,
+            duration: typeof shot.duration === 'number' ? shot.duration : Number(shot.duration) || 3.5,
             narration: shot.narration,
             secondaryText: shot.secondaryText || `Scene ${index + 1}`,
             visualPrompt: shot.visualPrompt || `${cleanText.slice(0, 30)}, cinematic lighting`,
             chineseVisualPrompt: shot.chineseVisualPrompt || shot.narration,
             cameraMotion: (shot.cameraMotion as CameraMotion) || 'zoom-in',
             transition: (shot.transition as TransitionType) || 'crossfade',
-            imageUrl: generateProceduralArtwork(shot.narration || '', visualStyle, '16:9', index),
+            imageUrl: generateProceduralArtwork(shot.narration || '', visualStyle, aspectRatio, index),
             isGeneratingImage: false
           }));
 
@@ -161,11 +163,11 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           duration,
           narration: chunk,
           secondaryText: `Scene ${idx + 1}: ${chunk.slice(0, 35)}`,
-          visualPrompt: `High quality cinematic shot of ${chunk.slice(0, 45)}, ${STYLE_DEFINITIONS[visualStyle]?.promptSuffix || ''}`,
+          visualPrompt: buildVisualPrompt(`High quality shot of ${chunk.slice(0, 45)}`, presetStylePack(visualStyle)),
           chineseVisualPrompt: `画面表现：${chunk}`,
           cameraMotion: cameraMotions[idx % cameraMotions.length],
           transition: transitions[idx % transitions.length],
-          imageUrl: generateProceduralArtwork(chunk, visualStyle, '16:9', idx),
+          imageUrl: generateProceduralArtwork(chunk, visualStyle, aspectRatio, idx),
           isGeneratingImage: false
         };
       });
@@ -245,7 +247,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       const data = await res.json().catch(() => ({}));
 
       if (res.ok && data?.imageUrl) {
-        onClipsChange(clips.map(c => c.id === clipId ? {
+        onClipsChange(prev => prev.map(c => c.id === clipId ? {
           ...c,
           imageUrl: data.imageUrl,
           imageStatus: 'success',
@@ -254,7 +256,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
         } : c));
       } else {
         const errorMsg = data?.diagnosis || data?.error || `HTTP ${res.status}: 生图失败`;
-        onClipsChange(clips.map(c => c.id === clipId ? {
+        onClipsChange(prev => prev.map(c => c.id === clipId ? {
           ...c,
           imageStatus: 'failed',
           isGeneratingImage: false,
@@ -262,7 +264,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
         } : c));
       }
     } catch (err: any) {
-      onClipsChange(clips.map(c => c.id === clipId ? {
+      onClipsChange(prev => prev.map(c => c.id === clipId ? {
         ...c,
         imageStatus: 'failed',
         isGeneratingImage: false,
@@ -290,25 +292,28 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
   };
 
   const updateClip = (clipId: string, updates: Partial<StoryboardClip>) => {
-    onClipsChange(clips.map(c => c.id === clipId ? { ...c, ...updates } : c));
+    onClipsChange(prev => prev.map(c => c.id === clipId ? { ...c, ...updates } : c));
   };
 
   const handleAddClip = () => {
-    const newOrder = clips.length + 1;
-    const newClip: StoryboardClip = {
-      id: `clip-${Date.now()}`,
-      order: newOrder,
-      duration: 3.5,
-      narration: `镜头 ${newOrder}：请在此输入旁白与画面描述`,
-      secondaryText: `Scene ${newOrder}: Describe what unfolds on screen.`,
-      visualPrompt: `Cinematic shot for scene ${newOrder}, highly detailed, ${STYLE_DEFINITIONS[visualStyle]?.promptSuffix || ''}`,
-      chineseVisualPrompt: `第 ${newOrder} 幕画面`,
-      cameraMotion: 'zoom-in',
-      transition: 'crossfade',
-      imageUrl: generateProceduralArtwork(`镜头 ${newOrder}`, visualStyle, '16:9', newOrder)
-    };
-    onClipsChange([...clips, newClip]);
-    onSelectClip(newClip.id);
+    const newClipId = `clip-${Date.now()}`;
+    onClipsChange(prev => {
+      const newOrder = prev.length + 1;
+      const newClip: StoryboardClip = {
+        id: newClipId,
+        order: newOrder,
+        duration: 3.5,
+        narration: `镜头 ${newOrder}：请在此输入旁白与画面描述`,
+        secondaryText: `Scene ${newOrder}: Describe what unfolds on screen.`,
+        visualPrompt: buildVisualPrompt(`Shot for scene ${newOrder}`, presetStylePack(visualStyle)),
+        chineseVisualPrompt: `第 ${newOrder} 幕画面`,
+        cameraMotion: 'zoom-in',
+        transition: 'crossfade',
+        imageUrl: generateProceduralArtwork(`镜头 ${newOrder}`, visualStyle, aspectRatio, newOrder)
+      };
+      return [...prev, newClip];
+    });
+    onSelectClip(newClipId);
   };
 
   const handleDeleteClip = (clipId: string, e: React.MouseEvent) => {
@@ -317,9 +322,12 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       alert('视频至少需要保留一个分镜头');
       return;
     }
-    const updated = clips.filter(c => c.id !== clipId).map((c, i) => ({ ...c, order: i + 1 }));
-    onClipsChange(updated);
-    if (selectedClipId === clipId) onSelectClip(updated[0].id);
+    onClipsChange(prev => {
+      if (prev.length <= 1) return prev;
+      const updated = prev.filter(c => c.id !== clipId).map((c, i) => ({ ...c, order: i + 1 }));
+      if (selectedClipId === clipId && updated[0]) onSelectClip(updated[0].id);
+      return updated;
+    });
   };
 
   const moveClip = (index: number, direction: 'up' | 'down', e: React.MouseEvent) => {
@@ -327,18 +335,19 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
     if (direction === 'up' && index === 0) return;
     if (direction === 'down' && index === clips.length - 1) return;
     const targetIndex = direction === 'up' ? index - 1 : index + 1;
-    const newClips = [...clips];
-    const temp = newClips[index];
-    newClips[index] = newClips[targetIndex];
-    newClips[targetIndex] = temp;
-    onClipsChange(newClips.map((c, i) => ({ ...c, order: i + 1 })));
+    onClipsChange(prev => {
+      if (direction === 'up' && index === 0) return prev;
+      if (direction === 'down' && index === prev.length - 1) return prev;
+      const next = [...prev];
+      const temp = next[index];
+      next[index] = next[targetIndex];
+      next[targetIndex] = temp;
+      return next.map((c, i) => ({ ...c, order: i + 1 }));
+    });
   };
 
   return (
-    <div
-      id="storyboard-tool-panel"
-      className="w-80 lg:w-84 flex-shrink-0 bg-[#131318] border border-[#23232c] rounded-2xl flex flex-col h-full overflow-hidden select-none z-20 shadow-xl shadow-black/40"
-    >
+    <ToolRail id="storyboard-tool-panel">
       <div className="grid grid-cols-2 gap-1 p-2.5 border-b border-[#23232c] bg-[#16161c]">
         <button
           id="subtab-storyboard-split"
@@ -518,6 +527,22 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
                     全量生图
                   </button>
                 )}
+                {onRegenerateNarration && (
+                  <button
+                    type="button"
+                    onClick={onRegenerateNarration}
+                    disabled={isGeneratingNarration}
+                    title="单独重配音，并按新口播时长对齐各镜画面"
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer disabled:opacity-50 ${
+                      narrationFresh
+                        ? 'bg-[#25252e] hover:bg-[#2f2f3a] border border-[#353542] text-zinc-200'
+                        : 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300'
+                    }`}
+                  >
+                    <Mic className={`w-3 h-3 ${isGeneratingNarration ? 'animate-pulse' : ''}`} />
+                    {isGeneratingNarration ? '配音中' : narrationFresh ? '重新配音' : '重新配音并对齐'}
+                  </button>
+                )}
                 <button
                   onClick={handleAddClip}
                   className="px-2.5 py-1.5 bg-[#25252e] hover:bg-[#2f2f3a] border border-[#353542] text-zinc-200 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer"
@@ -528,257 +553,33 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
               </div>
             </div>
 
-            <div className="space-y-3">
-              {clips.map((clip, index) => {
-                const isSelected = selectedClipId === clip.id;
-                const isClipGenerating = clip.imageStatus === 'generating' || generatingClipId === clip.id;
-                const isClipQueued = clip.imageStatus === 'queued';
-                const isClipSuccess = clip.imageStatus === 'success';
-                const isClipFailed = clip.imageStatus === 'failed';
-
-                return (
-                  <div
-                    key={clip.id}
-                    id={`clip-card-${clip.id}`}
-                    onClick={() => onSelectClip(clip.id)}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                        handleUploadLocalImage(clip.id, e.dataTransfer.files[0]);
-                      }
-                    }}
-                    className={`rounded-xl border transition-all cursor-pointer p-3 space-y-2.5 relative ${
-                      isSelected
-                        ? 'bg-[#22222b] border-amber-500/60 ring-1 ring-amber-500/30'
-                        : 'bg-[#1b1b22] border-[#292934] hover:border-[#3a3a48]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-400 font-mono text-[11px] font-semibold border border-amber-500/30">
-                          镜头 {clip.order}
-                        </span>
-                        {isClipGenerating && (
-                          <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 text-[10px] border border-amber-500/40 flex items-center gap-1 animate-pulse">
-                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                            AI 绘制中...
-                          </span>
-                        )}
-                        {isClipQueued && (
-                          <span className="px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-400 text-[10px] border border-zinc-700 flex items-center gap-1">
-                            <Hourglass className="w-2.5 h-2.5" />
-                            排队中
-                          </span>
-                        )}
-                        {isClipSuccess && !isClipGenerating && (
-                          <span className="px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-400 text-[10px] border border-emerald-500/30 flex items-center gap-1">
-                            <Check className="w-2.5 h-2.5" />
-                            已生成
-                          </span>
-                        )}
-                        {isClipFailed && !isClipGenerating && (
-                          <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-400 text-[10px] border border-rose-500/30 flex items-center gap-1" title={clip.imageError}>
-                            <AlertTriangle className="w-2.5 h-2.5" />
-                            生成失败
-                          </span>
-                        )}
-                        <div className="flex items-center gap-1 text-[11px] text-zinc-400">
-                          <Clock className="w-3 h-3 text-zinc-500" />
-                          <input
-                            type="number"
-                            step="0.5"
-                            min="1.0"
-                            max="15.0"
-                            value={clip.duration}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) => updateClip(clip.id, { duration: Math.max(1, Number(e.target.value)) })}
-                            className="w-10 bg-[#141418] border border-[#2e2e3a] rounded px-1 text-center text-zinc-200 text-[11px]"
-                          />
-                          <span>秒</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-0.5">
-                        <button onClick={(e) => moveClip(index, 'up', e)} disabled={index === 0} className="p-1 hover:text-amber-400 disabled:opacity-20 text-zinc-400 cursor-pointer">
-                          <ChevronUp className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={(e) => moveClip(index, 'down', e)} disabled={index === clips.length - 1} className="p-1 hover:text-amber-400 disabled:opacity-20 text-zinc-400 cursor-pointer">
-                          <ChevronDown className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={(e) => handleDeleteClip(clip.id, e)} className="p-1 hover:text-rose-400 text-zinc-500 cursor-pointer">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="relative rounded-lg overflow-hidden border border-[#2e2e3c] bg-[#121218] group h-28 flex items-center justify-center">
-                      {clip.imageUrl ? (
-                        <img
-                          src={clip.imageUrl}
-                          alt={`镜头 ${clip.order}`}
-                          className={`w-full h-full object-cover ${isClipGenerating ? 'opacity-40 blur-[1px]' : 'opacity-100'}`}
-                        />
-                      ) : (
-                        <div className="text-zinc-500 text-[11px] flex items-center gap-1.5">
-                          <ImageIcon className="w-4 h-4" />
-                          暂无画面
-                        </div>
-                      )}
-                      {isClipGenerating && (
-                        <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-1.5">
-                          <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
-                          <span className="text-amber-300 text-[11px]">AI 正在渲染...</span>
-                        </div>
-                      )}
-                      {isClipQueued && !isClipGenerating && (
-                        <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-1">
-                          <Hourglass className="w-5 h-5 text-zinc-400 animate-pulse" />
-                          <span className="text-zinc-300 text-[10px]">排队等待...</span>
-                        </div>
-                      )}
-                      {isClipFailed && !isClipGenerating && clip.imageError && (
-                        <div className="absolute bottom-1.5 left-1.5 right-1.5 px-2 py-1 bg-rose-950/90 border border-rose-500/40 rounded text-rose-300 text-[10px] flex items-center justify-between z-10">
-                          <span className="truncate max-w-[170px]" title={clip.imageError}>{clip.imageError}</span>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (onGenerateSingleImage) onGenerateSingleImage(clip.id);
-                              else handleGenerateSingleImage(clip.id);
-                            }}
-                            className="text-amber-400 hover:underline font-medium text-[10px] ml-1 flex-shrink-0 cursor-pointer"
-                          >
-                            重试
-                          </button>
-                        </div>
-                      )}
-                      {!isClipGenerating && (
-                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 p-2">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (onGenerateSingleImage) onGenerateSingleImage(clip.id);
-                              else handleGenerateSingleImage(clip.id);
-                            }}
-                            className="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded-lg text-[10px] flex items-center gap-1 cursor-pointer"
-                          >
-                            <RefreshCw className="w-3 h-3" />
-                            AI重新生图
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              fileInputRefs.current[clip.id]?.click();
-                            }}
-                            className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-600 rounded-lg text-[10px] flex items-center gap-1 cursor-pointer"
-                          >
-                            <Upload className="w-3 h-3 text-amber-400" />
-                            上传本地图
-                          </button>
-                          <input
-                            ref={(el) => { fileInputRefs.current[clip.id] = el; }}
-                            type="file"
-                            accept="image/*"
-                            className="hidden"
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files[0]) {
-                                handleUploadLocalImage(clip.id, e.target.files[0]);
-                              }
-                            }}
-                          />
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <label className="text-[10px] text-zinc-400 font-medium">解说词 / 旁白字幕</label>
-                        <button
-                          onClick={(e) => handlePolishNarration(clip.id, e)}
-                          disabled={polishingClipId === clip.id || !clip.narration}
-                          className="text-amber-400 hover:text-amber-300 flex items-center gap-1 text-[10px] cursor-pointer disabled:opacity-40"
-                        >
-                          <Sparkles className={`w-2.5 h-2.5 ${polishingClipId === clip.id ? 'animate-spin' : ''}`} />
-                          {polishingClipId === clip.id ? '润色中...' : 'LLM润色'}
-                        </button>
-                      </div>
-                      <textarea
-                        value={clip.narration}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => updateClip(clip.id, { narration: e.target.value })}
-                        rows={2}
-                        placeholder="输入此镜头的解说词..."
-                        className="w-full bg-[#16161c] border border-[#2b2b36] rounded-lg p-2 text-zinc-200 text-xs focus:outline-none focus:border-amber-500/50 resize-none leading-relaxed"
-                      />
-                    </div>
-
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-zinc-400 font-medium flex items-center justify-between">
-                        <span>AI 画面提示词</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (onGenerateSingleImage) onGenerateSingleImage(clip.id);
-                            else handleGenerateSingleImage(clip.id);
-                          }}
-                          disabled={isClipGenerating}
-                          className="text-amber-400 hover:text-amber-300 flex items-center gap-1 text-[10px] cursor-pointer disabled:opacity-40"
-                        >
-                          <RefreshCw className={`w-2.5 h-2.5 ${isClipGenerating ? 'animate-spin' : ''}`} />
-                          {isClipGenerating ? '生图中...' : '重新生成画面'}
-                        </button>
-                      </label>
-                      <textarea
-                        value={clip.visualPrompt}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => updateClip(clip.id, { visualPrompt: e.target.value })}
-                        rows={2}
-                        placeholder="输入AI画图英文Prompt..."
-                        className="w-full bg-[#16161c] border border-[#2b2b36] rounded-lg p-2 text-zinc-300 text-[11px] focus:outline-none focus:border-amber-500/50 resize-none font-mono"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <div>
-                        <label className="text-[10px] text-zinc-400 block mb-1">运镜动效</label>
-                        <select
-                          value={clip.cameraMotion}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => updateClip(clip.id, { cameraMotion: e.target.value as CameraMotion })}
-                          className="w-full bg-[#16161c] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-300 text-[11px] cursor-pointer"
-                        >
-                          <option value="zoom-in">缓慢拉近</option>
-                          <option value="zoom-out">缓慢拉远</option>
-                          <option value="pan-left">向左平移</option>
-                          <option value="pan-right">向右平移</option>
-                          <option value="tilt-up">向上仰拍</option>
-                          <option value="tilt-down">向下俯拍</option>
-                          <option value="cinematic-orbit">环绕运镜</option>
-                          <option value="static">静止镜头</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-zinc-400 block mb-1">镜头转场</label>
-                        <select
-                          value={clip.transition}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => updateClip(clip.id, { transition: e.target.value as TransitionType })}
-                          className="w-full bg-[#16161c] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-300 text-[11px] cursor-pointer"
-                        >
-                          <option value="crossfade">交叉淡化</option>
-                          <option value="fade-black">淡入淡出黑场</option>
-                          <option value="slide-left">向左推入</option>
-                          <option value="zoom-in">快速缩放</option>
-                          <option value="none">直接硬切</option>
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="space-y-2">
+              {clips.map((clip, index) => (
+                <StoryboardClipCard
+                  key={clip.id}
+                  clip={clip}
+                  index={index}
+                  total={clips.length}
+                  selected={selectedClipId === clip.id}
+                  generating={clip.imageStatus === 'generating' || generatingClipId === clip.id}
+                  queued={clip.imageStatus === 'queued'}
+                  failed={clip.imageStatus === 'failed'}
+                  success={clip.imageStatus === 'success'}
+                  polishing={polishingClipId === clip.id}
+                  fileInputRef={(el) => { fileInputRefs.current[clip.id] = el; }}
+                  onSelect={() => onSelectClip(clip.id)}
+                  onUpdate={(updates) => updateClip(clip.id, updates)}
+                  onGenerate={() => { if (onGenerateSingleImage) onGenerateSingleImage(clip.id); else void handleGenerateSingleImage(clip.id); }}
+                  onUpload={(file) => handleUploadLocalImage(clip.id, file)}
+                  onPolish={(e) => { void handlePolishNarration(clip.id, e); }}
+                  onMove={(direction, e) => moveClip(index, direction, e)}
+                  onDelete={(e) => handleDeleteClip(clip.id, e)}
+                />
+              ))}
             </div>
           </div>
         )}
       </div>
-    </div>
+    </ToolRail>
   );
 };

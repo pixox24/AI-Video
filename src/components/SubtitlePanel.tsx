@@ -1,6 +1,7 @@
 import React from 'react';
 import { Subtitles, Sparkles, Type, AlignCenter, Eye, ShieldAlert } from 'lucide-react';
 import { SubtitleConfig, SubtitlePreset } from '../types';
+import { ToolRail } from './ToolRail';
 
 interface SubtitlePanelProps {
   config: SubtitleConfig;
@@ -94,10 +95,7 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange }
   };
 
   return (
-    <div
-      id="subtitle-tool-panel"
-      className="w-80 lg:w-84 flex-shrink-0 bg-[#131318] border border-[#23232c] rounded-2xl flex flex-col h-full overflow-hidden select-none z-20 shadow-xl shadow-black/40"
-    >
+    <ToolRail id="subtitle-tool-panel">
       {/* Header */}
       <div className="p-3.5 border-b border-[#23232c] bg-[#16161c] flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -294,6 +292,6 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange }
           </div>
         </div>
       </div>
-    </div>
+    </ToolRail>
   );
 };

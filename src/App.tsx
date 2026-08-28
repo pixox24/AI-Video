@@ -1,8 +1,36 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { VideoProject, ActiveTab, StoryboardClip } from './types';
-import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveImageApi } from './utils/presets';
-import { generateProceduralArtwork } from './utils/visualGenerator';
+import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry } from './types';
+import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, resolveLlmApi, resolveTtsApi } from './utils/presets';
+import { applyTtsSettingsToProject, applyVoiceToProject, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
+import { hydrateActiveStylePack, localRewriteClipPrompt, presetStylePack, renderLine } from './utils/stylePack';
+import {
+  catalogFromPack,
+  hydrateStyleShelf,
+  loadStyleLibrary,
+  loadStylePins,
+  removeStyleLibraryEntry,
+  saveStyleLibraryEntry,
+  STYLE_PIN_MAX,
+  toggleStylePin,
+  updateStyleLibraryEntry
+} from './utils/styleLibrary';
+import {
+  allocateSpeechTimings,
+  applyNarrationTimingsToClips,
+  isNarrationTrackFresh,
+  joinClipsForTts,
+  measureSpeechWindow,
+  narrationSourceHash,
+  rebindProjectNarration,
+  relinkNarrationTrack,
+  repairClipSlices,
+  utterancesFromClips
+} from './utils/narrationTrack';
+import { assembleAlignedNarration } from './utils/narrationAlignClient';
+import { audioEngine } from './utils/audioEngine';
+
 import { runConcurrencyPool } from './utils/concurrencyPool';
+import { forecastScriptHash, hydrateScriptWorkspace, stylePackFingerprint } from './utils/scriptWorkspace';
 import { SidebarNav } from './components/SidebarNav';
 import { ScriptPanel } from './components/ScriptPanel';
 import { StoryboardPanel } from './components/StoryboardPanel';
@@ -15,19 +43,35 @@ import { TopHeader } from './components/TopHeader';
 import { VideoPlayerStage } from './components/VideoPlayerStage';
 import { TimelineBar } from './components/TimelineBar';
 import { ExportModal } from './components/ExportModal';
+import { StatusToastHost } from './components/StatusToastHost';
+import { showStatusToast } from './utils/statusToast';
 
 function settleProjectImages(project: VideoProject): VideoProject {
-  return {
+  const settled: VideoProject = {
     ...project,
     clips: (project.clips || []).map((clip) => {
-      const stuck = clip.imageStatus === 'generating' || clip.imageStatus === 'queued' || clip.isGeneratingImage;
-      if (!stuck) return { ...clip, isGeneratingImage: false };
-      return {
-        ...clip,
-        isGeneratingImage: false,
-        imageStatus: clip.imageUrl ? 'success' : 'idle'
-      };
+      if (clip.imageStatus === 'generating' || clip.imageStatus === 'queued') {
+        return {
+          ...clip,
+          isGeneratingImage: false,
+          imageStatus: 'idle'
+        };
+      }
+      return { ...clip, isGeneratingImage: false };
     })
+  };
+  return {
+    ...settled,
+    audio: {
+      ...settled.audio,
+      bgmTrackId: resolveBgmTrackId(settled.audio?.bgmTrackId),
+      voiceCharacter: resolveTtsVoiceId(settled.audio?.voiceCharacter, resolveTtsApi(settled.settings?.customTtsApi))
+    },
+    scriptWorkspace: hydrateScriptWorkspace(settled),
+    settings: {
+      ...settled.settings,
+      activeStylePack: hydrateActiveStylePack(settled.settings)
+    }
   };
 }
 
@@ -37,7 +81,7 @@ export default function App() {
     const saved = localStorage.getItem('ai_video_current_project');
     if (saved) {
       try {
-        return settleProjectImages(JSON.parse(saved));
+        return rebindProjectNarration(settleProjectImages(JSON.parse(saved)));
       } catch {
         return SAMPLE_PROJECTS[0];
       }
@@ -70,12 +114,58 @@ export default function App() {
   } | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const [isGeneratingNarration, setIsGeneratingNarration] = useState(false);
+  const [narrationError, setNarrationError] = useState<string | null>(null);
+  const [styleLibrary, setStyleLibrary] = useState<StyleLibraryEntry[]>(() => loadStyleLibrary());
+  const [stylePins, setStylePins] = useState<string[]>(() => loadStylePins());
+
+  const isImmersiveTab = activeTab === 'settings' || activeTab === 'script';
 
   useEffect(() => {
-    if (activeTab === 'settings') {
+    if (isImmersiveTab) {
       setIsPlaying(false);
     }
-  }, [activeTab]);
+  }, [isImmersiveTab]);
+
+  // Sync the active TTS provider into the audio engine for preview & playback
+  useEffect(() => {
+    audioEngine.setTtsApi(resolveTtsApi(project.settings.customTtsApi));
+  }, [project.settings.customTtsApi]);
+
+  // Existing VO files have no stored speech window; trim leading/trailing silence once.
+  useEffect(() => {
+    const track = project.audio?.narrationTrack;
+    if (!track?.audioUrl || typeof track.speechStart === 'number' || track.alignment?.version === 2) return;
+    let cancelled = false;
+    const audioUrl = track.audioUrl;
+    void measureSpeechWindow(audioUrl).then((window) => {
+      if (cancelled) return;
+      setProject((prev) => {
+        const current = prev.audio?.narrationTrack;
+        if (!current || current.audioUrl !== audioUrl || typeof current.speechStart === 'number') return prev;
+        const repaired = repairClipSlices(prev.clips);
+        const timings = allocateSpeechTimings(repaired, window.duration, window);
+        return {
+          ...prev,
+          clips: applyNarrationTimingsToClips(repaired, timings),
+          audio: {
+            ...prev.audio,
+            narrationTrack: {
+              ...current,
+              duration: window.duration,
+              speechStart: window.speechStart,
+              speechEnd: window.speechEnd,
+              clips: timings
+            }
+          },
+          updatedAt: Date.now()
+        };
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.audio?.narrationTrack?.audioUrl, project.audio?.narrationTrack?.speechStart]);
 
   // Update project helper
   const updateProject = useCallback((updates: Partial<VideoProject>) => {
@@ -85,6 +175,118 @@ export default function App() {
       updatedAt: Date.now()
     }));
   }, []);
+
+  const applyClipsChange = useCallback((clipsOrUpdater: ClipsChange) => {
+    setProject(prev => ({
+      ...prev,
+      clips: typeof clipsOrUpdater === 'function' ? clipsOrUpdater(prev.clips) : clipsOrUpdater,
+      updatedAt: Date.now()
+    }));
+  }, []);
+
+  const handleGenerateFullNarration = useCallback(async (clipsOverride?: StoryboardClip[]) => {
+    const sourceClips = clipsOverride || project.clips;
+    if (!joinClipsForTts(sourceClips)) {
+      setNarrationError('请先在分镜里填写旁白文案');
+      return;
+    }
+
+    setIsPlaying(false);
+    setIsGeneratingNarration(true);
+    setNarrationError(null);
+    showStatusToast('正在按句合成旁白并对齐画面', { tone: 'progress', id: 'narration', durationMs: 0 });
+    audioEngine.stopFullNarration();
+    audioEngine.stopNarration();
+
+    try {
+      const repaired = repairClipSlices(sourceClips);
+      const utterances = utterancesFromClips(repaired);
+      const res = await fetch('/api/audio/tts-utterances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          utterances: utterances.map((item) => ({ text: item.text })),
+          clips: repaired.map((clip) => ({
+            id: clip.id,
+            narration: clip.narration,
+            voRole: clip.voRole,
+            voSlice: clip.voSlice
+          })),
+          character: project.audio.voiceCharacter,
+          rate: project.audio.speechRate,
+          ttsApi: resolveTtsApi(project.settings.customTtsApi)
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !Array.isArray(data?.segments) || data.segments.length === 0) {
+        throw new Error(data?.error || `按句旁白合成失败 (HTTP ${res.status})`);
+      }
+
+      const assembled = await assembleAlignedNarration(repaired, data.segments);
+      const storeRes = await fetch('/api/audio/store', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioUrl: assembled.wavDataUrl })
+      });
+      const stored = await storeRes.json().catch(() => ({}));
+      const audioUrl = stored?.audioUrl || assembled.wavDataUrl;
+
+      setProject((prev) => ({
+        ...prev,
+        clips: assembled.clips,
+        audio: {
+          ...prev.audio,
+          narrationTrack: {
+            audioUrl,
+            duration: assembled.duration,
+            speechStart: 0,
+            speechEnd: assembled.duration,
+            voiceCharacter: prev.audio.voiceCharacter,
+            speechRate: prev.audio.speechRate,
+            sourceHash: narrationSourceHash(
+              assembled.clips,
+              prev.audio.voiceCharacter,
+              prev.audio.speechRate,
+              ttsSourceKey(resolveTtsApi(prev.settings.customTtsApi), prev.audio.voiceCharacter)
+            ),
+            generatedAt: Date.now(),
+            clips: assembled.timings,
+            alignment: assembled.alignment
+          }
+        },
+        updatedAt: Date.now()
+      }));
+      setCurrentTime(0);
+      showStatusToast('旁白已更新，各镜已按真实开口对齐', { tone: 'ok', id: 'narration' });
+    } catch (err: any) {
+      const message = err?.message || '整段旁白合成失败';
+      setNarrationError(message);
+      showStatusToast(`旁白失败：${message}`, { tone: 'error', id: 'narration' });
+    } finally {
+      setIsGeneratingNarration(false);
+    }
+  }, [project.clips, project.audio.voiceCharacter, project.audio.speechRate, project.settings.customTtsApi]);
+
+  const handleApplyStoryboard = useCallback((clips: StoryboardClip[]) => {
+    const ttsApi = resolveTtsApi(project.settings.customTtsApi);
+    if (isNarrationTrackFresh(project.audio, clips, ttsApi)) {
+      const linked = relinkNarrationTrack(project.audio.narrationTrack, clips);
+      if (linked) {
+        setProject((prev) => ({
+          ...prev,
+          clips: linked.clips,
+          audio: { ...prev.audio, narrationTrack: linked.track },
+          updatedAt: Date.now()
+        }));
+        if (linked.clips[0]) setSelectedClipId(linked.clips[0].id);
+        showStatusToast('已写入分镜，旁白沿用', { tone: 'ok', id: 'narration' });
+        return;
+      }
+    }
+    applyClipsChange(clips);
+    if (clips[0]) setSelectedClipId(clips[0].id);
+    void handleGenerateFullNarration(clips);
+  }, [project.audio, project.settings.customTtsApi, applyClipsChange, handleGenerateFullNarration]);
 
   // Sync to local storage
   useEffect(() => {
@@ -110,6 +312,9 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't trigger if typing in input or textarea
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+      if (activeTab === 'settings' || activeTab === 'script') {
         return;
       }
 
@@ -185,7 +390,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [project.clips, selectedClipId, updateProject]);
+  }, [project.clips, selectedClipId, updateProject, activeTab]);
 
   // Cancel batch image generation
   const handleCancelGenerateAllImages = useCallback(() => {
@@ -227,6 +432,7 @@ export default function App() {
         body: JSON.stringify({
           prompt: targetClip.visualPrompt,
           visualStyle: project.settings.visualStyle,
+          styleRender: renderLine(hydrateActiveStylePack(project.settings)),
           aspectRatio: project.settings.aspectRatio,
           seed: targetClip.order * 1000 + Date.now(),
           customApi: resolveImageApi(project.settings.customImageApi)
@@ -272,8 +478,9 @@ export default function App() {
   }, [project.clips, project.settings]);
 
   // Generate AI images for all storyboard clips in parallel with concurrency pool and status transitions
-  const handleGenerateAllImages = async () => {
-    if (project.clips.length === 0) return;
+  const handleGenerateAllImages = async (clipsOverride?: StoryboardClip[]) => {
+    const sourceClips = Array.isArray(clipsOverride) ? clipsOverride : project.clips;
+    if (sourceClips.length === 0) return;
 
     // Create new abort controller
     if (abortControllerRef.current) {
@@ -283,7 +490,7 @@ export default function App() {
     abortControllerRef.current = controller;
 
     setIsGeneratingAllImages(true);
-    const totalClips = project.clips.length;
+    const totalClips = sourceClips.length;
     setBatchGenerationProgress({ completed: 0, total: totalClips, activeCount: 0 });
 
     // Set initial 'queued' status for all clips
@@ -305,7 +512,7 @@ export default function App() {
 
     try {
       await runConcurrencyPool<StoryboardClip, { clipId: string; imageUrl: string }>(
-        project.clips,
+        sourceClips,
         async (clip: StoryboardClip, index: number, signal?: AbortSignal) => {
           const timeoutController = new AbortController();
           const timeoutId = window.setTimeout(() => timeoutController.abort(), 360000);
@@ -320,6 +527,7 @@ export default function App() {
               body: JSON.stringify({
                 prompt: clip.visualPrompt,
                 visualStyle: project.settings.visualStyle,
+                styleRender: renderLine(hydrateActiveStylePack(project.settings)),
                 aspectRatio: project.settings.aspectRatio,
                 seed: index * 1000 + Date.now(),
                 customApi: resolveImageApi(project.settings.customImageApi)
@@ -409,23 +617,79 @@ export default function App() {
     }
   };
 
-  // Re-apply style to all clips
-  const handleApplyStyleToAllClips = async () => {
-    setIsGeneratingAllImages(true);
-    try {
-      const updatedClips = project.clips.map((clip, index) => ({
-        ...clip,
-        imageUrl: generateProceduralArtwork(
-          clip.narration || project.topic,
-          project.settings.visualStyle,
-          project.settings.aspectRatio,
-          index
-        )
-      }));
-      updateProject({ clips: updatedClips });
-    } finally {
-      setIsGeneratingAllImages(false);
+  // Re-apply style to all clips via the selected image provider
+  const handleApplyStyleToAllClips = (packOverride?: ReturnType<typeof hydrateActiveStylePack>) => {
+    if (project.clips.length === 0) {
+      showStatusToast('还没有分镜，请先写入分镜', { tone: 'warn', id: 'style-rewrite' });
+      return;
     }
+    const pack = packOverride || hydrateActiveStylePack(project.settings);
+    showStatusToast('正在写入分镜画面词…', { tone: 'progress', id: 'style-rewrite', durationMs: 0 });
+    void (async () => {
+      let rewritten = project.clips.map((clip) => {
+        const local = localRewriteClipPrompt(clip, pack);
+        return {
+          ...clip,
+          visualPrompt: local.visualPrompt,
+          chineseVisualPrompt: local.chineseVisualPrompt
+        };
+      });
+
+      try {
+        const res = await fetch('/api/style/rewrite-shots', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            stylePack: pack,
+            llmApi: resolveLlmApi(project.settings.customLlmApi),
+            clips: project.clips.map((clip) => ({
+              id: clip.id,
+              narration: clip.narration,
+              visualPrompt: clip.visualPrompt,
+              chineseVisualPrompt: clip.chineseVisualPrompt
+            }))
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && Array.isArray(data?.shots)) {
+          const byId = new Map<string, { visualPrompt?: string; chineseVisualPrompt?: string }>(
+            data.shots.map((item: { id: string; visualPrompt?: string; chineseVisualPrompt?: string }) => [item.id, item])
+          );
+          rewritten = rewritten.map((clip) => {
+            const hit = byId.get(clip.id);
+            if (!hit?.visualPrompt) return clip;
+            return {
+              ...clip,
+              visualPrompt: hit.visualPrompt,
+              chineseVisualPrompt: hit.chineseVisualPrompt || clip.chineseVisualPrompt
+            };
+          });
+        }
+      } catch {
+        // keep local rewrite
+      }
+
+      const workspace = project.scriptWorkspace;
+      updateProject({
+        clips: rewritten,
+        scriptWorkspace: workspace
+          ? {
+              ...workspace,
+              appliedAt: Date.now(),
+              appliedShotCount: workspace.appliedShotCount || rewritten.length,
+              appliedScriptHash: workspace.appliedScriptHash || forecastScriptHash(workspace.forecastShots),
+              appliedStyleFingerprint: stylePackFingerprint(pack)
+            }
+          : workspace
+      });
+      showStatusToast('画面词已写入分镜，尚未生图', {
+        tone: 'ok',
+        id: 'style-rewrite',
+        durationMs: 8000,
+        actionLabel: '去分镜表',
+        onAction: () => setActiveTab('storyboard')
+      });
+    })();
   };
 
   // Save current project copy
@@ -440,7 +704,7 @@ export default function App() {
     const updated = [newProject, ...savedProjects];
     setSavedProjects(updated);
     localStorage.setItem('ai_video_saved_projects', JSON.stringify(updated));
-    alert('已成功保存为新工程草稿！');
+    showStatusToast('已保存为新工程草稿', { tone: 'ok' });
   };
 
   // Delete project
@@ -452,35 +716,23 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-[#0a0a0d] text-zinc-100 p-2.5 sm:p-3 gap-2.5 sm:gap-3 overflow-hidden font-sans select-none">
+      <StatusToastHost />
       {/* 1. Left Primary Vertical Navigation (Sidebar Card) */}
       <SidebarNav
         activeTab={activeTab}
         onTabChange={setActiveTab}
       />
 
-      {/* 2. Left Secondary Tool Drawer / Panel Card */}
-      {activeTab === 'script' && (
-        <ScriptPanel
-          topic={project.topic}
-          onTopicChange={(topic) => updateProject({ topic, title: topic ? topic.slice(0, 20) : project.title })}
-          onClipsChange={(clips) => updateProject({ clips })}
-          visualStyle={project.settings.visualStyle}
-          customLlmApi={project.settings.customLlmApi}
-          onSelectClip={setSelectedClipId}
-          onOpenStoryboard={() => setActiveTab('storyboard')}
-        />
-      )}
-
       {activeTab === 'storyboard' && (
         <StoryboardPanel
           topic={project.topic}
           onTopicChange={(topic) => updateProject({ topic, title: topic ? topic.slice(0, 20) : project.title })}
           clips={project.clips}
-          onClipsChange={(clips) => updateProject({ clips })}
+          onClipsChange={applyClipsChange}
           visualStyle={project.settings.visualStyle}
           aspectRatio={project.settings.aspectRatio}
           customImageApi={project.settings.customImageApi}
-          customLlmApi={project.settings.customLlmApi}
+          customLlmApi={resolveLlmApi(project.settings.customLlmApi)}
           selectedClipId={selectedClipId}
           onSelectClip={setSelectedClipId}
           onGenerateAllImages={handleGenerateAllImages}
@@ -488,15 +740,125 @@ export default function App() {
           onGenerateSingleImage={handleGenerateSingleClipImage}
           isGeneratingAll={isGeneratingAllImages}
           batchProgress={batchGenerationProgress}
+          onRegenerateNarration={() => { void handleGenerateFullNarration(); }}
+          isGeneratingNarration={isGeneratingNarration}
+          narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
         />
       )}
 
       {activeTab === 'style' && (
         <StylePanel
           currentStyle={project.settings.visualStyle}
-          onStyleChange={(style) => updateProject({ settings: { ...project.settings, visualStyle: style } })}
+          activePack={hydrateActiveStylePack(project.settings)}
+          library={styleLibrary}
+          pinnedIds={stylePins}
+          hiddenPresetIds={hydrateStyleShelf(project.settings.styleShelf).hiddenPresetIds}
+          appliedToStoryboard={Boolean(
+            project.clips.length >= 2
+            && project.scriptWorkspace?.appliedStyleFingerprint
+            && project.scriptWorkspace.appliedStyleFingerprint === stylePackFingerprint(hydrateActiveStylePack(project.settings))
+          )}
+          currentInLibrary={styleLibrary.some((item) => item.id === hydrateActiveStylePack(project.settings).id)}
+          onSelectPreset={(style) => updateProject({
+            settings: {
+              ...project.settings,
+              visualStyle: style,
+              activeStylePack: presetStylePack(style)
+            }
+          })}
+          onSelectLibrary={(entry) => updateProject({
+            settings: {
+              ...project.settings,
+              visualStyle: entry.nearestVisualStyle,
+              activeStylePack: entry.pack
+            }
+          })}
+          onDeleteLibrary={(id) => {
+            const next = removeStyleLibraryEntry(id);
+            setStyleLibrary(next);
+            setStylePins(loadStylePins());
+            if (project.settings.activeStylePack?.id === id) {
+              updateProject({
+                settings: {
+                  ...project.settings,
+                  visualStyle: 'cinematic',
+                  activeStylePack: presetStylePack('cinematic')
+                }
+              });
+            }
+            showStatusToast('已从风格栏移除', { tone: 'ok', id: 'style-library' });
+          }}
+          onRenameLibrary={(id, title) => {
+            const next = updateStyleLibraryEntry(id, { title });
+            setStyleLibrary(next);
+            const hit = next.find((item) => item.id === id);
+            if (hit && project.settings.activeStylePack?.id === id) {
+              updateProject({
+                settings: {
+                  ...project.settings,
+                  activeStylePack: hit.pack
+                }
+              });
+            }
+          }}
+          onTogglePin={(id) => {
+            const result = toggleStylePin(id);
+            setStylePins(result.pins);
+            if (!result.ok) {
+              showStatusToast(`最多钉 ${STYLE_PIN_MAX} 张常用世界`, { tone: 'warn', id: 'style-shelf' });
+            }
+          }}
+          onToggleHiddenPreset={(id) => {
+            const shelf = hydrateStyleShelf(project.settings.styleShelf);
+            const hidden = shelf.hiddenPresetIds.includes(id)
+              ? shelf.hiddenPresetIds.filter((item) => item !== id)
+              : [...shelf.hiddenPresetIds, id];
+            updateProject({
+              settings: {
+                ...project.settings,
+                styleShelf: { hiddenPresetIds: hidden }
+              }
+            });
+          }}
+          onSaveCurrentToLibrary={() => {
+            const pack = hydrateActiveStylePack(project.settings);
+            if (styleLibrary.some((item) => item.id === pack.id)) {
+              showStatusToast('已在我的世界', { tone: 'ok', id: 'style-library' });
+              return;
+            }
+            const catalog = catalogFromPack(pack);
+            const result = saveStyleLibraryEntry({
+              pack,
+              title: catalog.title,
+              tags: catalog.tags,
+              blurb: catalog.blurb,
+              thumbDataUrl: pack.reference?.thumbDataUrl,
+              imageHash: pack.reference?.imageId,
+              nearestVisualStyle: project.settings.visualStyle,
+              forceNew: pack.source === 'preset' || !pack.reference?.imageId
+            });
+            if (result.ok === false) {
+              if (result.reason === 'full') {
+                showStatusToast('风格栏已满，请先删一张', { tone: 'warn', id: 'style-library' });
+              } else {
+                showStatusToast(`这张图已入库为「${result.existing.title}」`, { tone: 'warn', id: 'style-library' });
+              }
+              return;
+            }
+            setStyleLibrary(loadStyleLibrary());
+            updateProject({
+              settings: {
+                ...project.settings,
+                visualStyle: result.entry.nearestVisualStyle,
+                activeStylePack: result.entry.pack
+              }
+            });
+            showStatusToast(`已另存到我的世界：${result.entry.title}`, { tone: 'ok', id: 'style-library' });
+          }}
           onApplyStyleToAllClips={handleApplyStyleToAllClips}
           isApplying={isGeneratingAllImages}
+          hasClips={project.clips.length >= 2}
+          onOpenSettings={() => setActiveTab('settings')}
         />
       )}
 
@@ -512,6 +874,15 @@ export default function App() {
           config={project.audio}
           onChange={(audio) => updateProject({ audio })}
           sampleNarrationText={project.clips[0]?.narration || project.topic}
+          narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
+          isGeneratingNarration={isGeneratingNarration}
+          narrationError={narrationError}
+          onGenerateFullNarration={handleGenerateFullNarration}
+          recommendedGenre={project.scriptWorkspace?.genrePackId || null}
+          timelinePlaying={isPlaying}
+          ttsApi={resolveTtsApi(project.settings.customTtsApi)}
+          onVoiceChange={(voiceId) => updateProject(applyVoiceToProject(project, voiceId))}
+          onOpenSettings={() => setActiveTab('settings')}
         />
       )}
 
@@ -519,10 +890,11 @@ export default function App() {
         <ProjectsPanel
           currentProject={project}
           onLoadProject={(loaded) => {
-            setProject(loaded);
+            const next = settleProjectImages(loaded);
+            setProject(next);
             setCurrentTime(0);
             setIsPlaying(false);
-            if (loaded.clips?.length > 0) setSelectedClipId(loaded.clips[0].id);
+            if (next.clips?.length > 0) setSelectedClipId(next.clips[0].id);
           }}
           savedProjects={savedProjects}
           onSaveCurrentProject={handleSaveCurrentProject}
@@ -533,7 +905,41 @@ export default function App() {
       {activeTab === 'settings' ? (
         <SettingsPanel
           settings={project.settings}
-          onChange={(settings) => updateProject({ settings })}
+          onChange={(settings) => updateProject(applyTtsSettingsToProject(project, settings))}
+          hasStoryboardClips={project.clips.length >= 2}
+          onApplyStyleToExistingClips={handleApplyStyleToAllClips}
+          onLibraryChange={setStyleLibrary}
+          onOpenStylePanel={() => setActiveTab('style')}
+        />
+      ) : activeTab === 'script' ? (
+        <ScriptPanel
+          workspace={project.scriptWorkspace || hydrateScriptWorkspace(project)}
+          onChange={(scriptWorkspace) => updateProject({ scriptWorkspace })}
+          onTopicChange={(topic) => updateProject({ topic, title: topic ? topic.slice(0, 20) : project.title })}
+          onClipsChange={applyClipsChange}
+          existingClips={project.clips}
+          visualStyle={project.settings.visualStyle}
+          stylePack={hydrateActiveStylePack(project.settings)}
+          aspectRatio={project.settings.aspectRatio}
+          customLlmApi={resolveLlmApi(project.settings.customLlmApi)}
+          customTtsApi={resolveTtsApi(project.settings.customTtsApi)}
+          voiceCharacter={project.audio.voiceCharacter}
+          speechRate={project.audio.speechRate}
+          onSelectClip={setSelectedClipId}
+          onOpenStoryboard={() => setActiveTab('storyboard')}
+          onNeedFullNarration={handleApplyStoryboard}
+          onApplyStyleOnly={handleApplyStyleToAllClips}
+          isApplyingStyle={isGeneratingAllImages}
+          isGeneratingNarration={isGeneratingNarration}
+          narrationError={narrationError}
+          narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
+          onRecommendBgm={(trackId) => {
+            updateProject({
+              audio: project.audio.bgmTrackId === 'custom-uploaded'
+                ? project.audio
+                : { ...project.audio, bgmEnabled: true, bgmTrackId: trackId }
+            });
+          }}
         />
       ) : (
         <main className="flex-1 flex flex-col h-full min-w-0 gap-2.5 sm:gap-3 overflow-hidden">
@@ -563,11 +969,13 @@ export default function App() {
             onTogglePlay={() => setIsPlaying(prev => !prev)}
             selectedClipId={selectedClipId}
             onSelectClip={setSelectedClipId}
+            isGeneratingNarration={isGeneratingNarration}
+            narrationError={narrationError}
           />
 
           <TimelineBar
             clips={project.clips}
-            onClipsChange={(clips) => updateProject({ clips })}
+            onClipsChange={applyClipsChange}
             currentTime={currentTime}
             onTimeUpdate={setCurrentTime}
             isPlaying={isPlaying}

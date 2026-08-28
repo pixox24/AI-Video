@@ -1,6 +1,35 @@
 @import "tailwindcss";
 
+.tool-rail {
+  container-type: inline-size;
+}
+
+.style-shelf-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.625rem;
+}
+
+@container (min-width: 400px) {
+  .style-shelf-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+textarea.prompt-resize {
+  resize: vertical;
+  min-height: 72px;
+  max-height: 240px;
+  height: 120px;
+  overflow: auto;
+}
+
 /* Sleek dark studio scrollbars */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) rgba(18, 18, 24, 0.55);
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
   height: 6px;

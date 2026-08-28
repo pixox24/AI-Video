@@ -5,6 +5,24 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
+import {
+  PRESET_STYLE_PACKS,
+  STYLE_DIRECTOR_SYSTEM,
+  STYLE_INFER_SYSTEM,
+  STYLE_INFER_USER,
+  localRewriteClipPrompt,
+  normalizeInferredPack,
+  styleContractForPrompt
+} from "./src/utils/stylePack";
+import type { StylePack } from "./src/types";
+import { joinClipsForTts as joinClipsForTtsShared, utterancesFromClips } from "./src/utils/narrationTrack";
+
+function incomingStyleContract(raw: unknown): string {
+  if (raw && typeof raw === "object" && (raw as StylePack).world && (raw as StylePack).render) {
+    return styleContractForPrompt(raw as StylePack);
+  }
+  return styleContractForPrompt(PRESET_STYLE_PACKS.cinematic);
+}
 
 dotenv.config();
 
@@ -19,6 +37,45 @@ try {
 
 app.use(express.json({ limit: "50mb" }));
 app.use("/generated", express.static(generatedDir));
+
+function materializeClientAudioUrl(audioUrl: string): string {
+  if (!audioUrl || typeof audioUrl !== "string") return audioUrl;
+  const trimmed = audioUrl.trim();
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("/")) {
+    return trimmed;
+  }
+  const dataMatch = trimmed.match(/^data:([^;]+);base64,([\s\S]+)$/);
+  if (!dataMatch) return trimmed;
+  const mime = dataMatch[1] || "audio/mpeg";
+  const ext = mime.includes("wav") ? "wav" : mime.includes("ogg") ? "ogg" : "mp3";
+  const filename = `narration-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  try {
+    const buffer = Buffer.from(dataMatch[2], "base64");
+    fs.writeFileSync(path.join(generatedDir, filename), buffer);
+    console.log(`[Audio Store] Saved ${filename} (${Math.round(buffer.length / 1024)} KB)`);
+    return `/generated/${filename}`;
+  } catch (err: any) {
+    console.warn("[Audio Store] Failed to persist narration audio:", err?.message);
+    return trimmed;
+  }
+}
+
+function withSentenceEnd(text: string): string {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return "";
+  return /[。！？.!?…]$/.test(trimmed) ? trimmed : `${trimmed}。`;
+}
+
+function joinClipNarrations(clips: any[]): string {
+  return (Array.isArray(clips) ? clips : [])
+    .map((clip) => withSentenceEnd(clip?.narration || ""))
+    .filter(Boolean)
+    .join("");
+}
+
+function joinClipsForTts(clips: any[]): string {
+  return joinClipsForTtsShared(Array.isArray(clips) ? clips : []);
+}
 
 function materializeClientImageUrl(imageUrl: string): string {
   if (!imageUrl || typeof imageUrl !== "string") return imageUrl;
@@ -52,15 +109,23 @@ function materializeClientImageUrl(imageUrl: string): string {
   }
 }
 
+function isConfiguredSecret(value?: string | null): boolean {
+  const v = String(value || "").trim().replace(/^["']|["']$/g, "");
+  if (!v) return false;
+  if (/^(MY_|YOUR_|placeholder|changeme|xxx)/i.test(v)) return false;
+  if (v.includes("<") || v.includes(">")) return false;
+  return true;
+}
+
 // Lazy init Gemini SDK safely
 function getGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!isConfiguredSecret(apiKey)) {
     console.warn("[Gemini API] GEMINI_API_KEY is not set in environment");
     return null;
   }
   return new GoogleGenAI({
-    apiKey,
+    apiKey: apiKey as string,
     httpOptions: {
       headers: {
         "User-Agent": "aistudio-build",
@@ -141,10 +206,9 @@ function sanitizeBearerKey(raw: string): string {
 }
 
 function isUsableLlmApi(llmApi: any): llmApi is ClientLlmApi {
+  if (!llmApi || llmApi.provider === "builtin" || llmApi.enabled === false) return false;
   return Boolean(
-    llmApi &&
-      llmApi.enabled &&
-      typeof llmApi.apiKey === "string" &&
+    typeof llmApi.apiKey === "string" &&
       llmApi.apiKey.trim().length > 0 &&
       typeof llmApi.endpoint === "string" &&
       llmApi.endpoint.trim().length > 0
@@ -244,6 +308,157 @@ async function callOpenAiCompatibleChat(opts: {
 
         if (typeof text === "string" && text.trim()) {
           return { ok: true, text: text.trim(), model, error: undefined, status: undefined };
+        }
+        lastError = "模型未返回有效文本";
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        lastError = err?.name === "AbortError" ? "请求超时" : err?.message || "网络异常";
+      }
+    }
+  }
+
+  return { ok: false, error: lastError, status: lastStatus };
+}
+
+const styleInferCache = new Map<string, { pack: StylePack; at: number }>();
+
+/** 32×32 PNG — DashScope VL requires width/height ≥ 10px. A 1×1 probe is rejected. */
+const STYLE_VISION_PROBE_PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGM40q1HU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAMG19EwoycpYAAAAAElFTkSuQmCC";
+
+function resolveStyleVisionEndpoint(endpoint: string): string {
+  const raw = sanitizeHttpUrl(endpoint);
+  if (!raw) return "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  if (/multimodal-generation|\/api\/v1\/services\//i.test(raw)) {
+    return /dashscope-intl/i.test(raw)
+      ? "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      : "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  }
+  return raw;
+}
+
+function extractChatMessageText(data: any): string {
+  const message = data?.choices?.[0]?.message;
+  const content =
+    (typeof message?.content === "string" && message.content) ||
+    (Array.isArray(message?.content)
+      ? message.content.map((part: any) => part?.text || "").join("")
+      : "") ||
+    data?.choices?.[0]?.text ||
+    data?.output_text ||
+    "";
+  const reasoning = typeof message?.reasoning_content === "string" ? message.reasoning_content : "";
+  const text = String(content || "").trim() || String(reasoning || "").trim();
+  return text;
+}
+
+function mapBailianVisionError(status?: number, raw?: string): string {
+  const msg = String(raw || "");
+  const lower = msg.toLowerCase();
+  if (status === 401 || /invalidapikey|invalid api.?key|unauthorized|incorrect api key/.test(lower)) {
+    return "Key 无效，请确认是百炼控制台（北京地域）复制的 sk- Key";
+  }
+  if (/arrearage|out_of_service|good standing|insufficient/.test(lower)) {
+    return "百炼账号欠费或余额不足，请先在费用中心充值";
+  }
+  if (/product is not activated|not activated/.test(lower)) {
+    return "尚未在百炼模型市场开通该模型，请开通 qwen3.7-plus 后再测";
+  }
+  if (/model not exist|does not exist/.test(lower)) {
+    return "模型名无效：请用 qwen3.7-plus，并确认已在百炼模型市场开通";
+  }
+  if (/image length and width|too small|do not meet the model restrictions|image size is not supported/.test(lower)) {
+    return "图片尺寸不符合百炼要求（宽高需 ≥ 10 像素）";
+  }
+  if (/enable_thinking must be set to false|only support stream/.test(lower)) {
+    return "该模型非流式调用必须关闭思考模式";
+  }
+  if (status === 403) {
+    return "无该模型权限，请在百炼控制台开通 qwen3.7-plus";
+  }
+  return msg || "连通性测试失败";
+}
+
+async function callBailianVisionJson(opts: {
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  system: string;
+  text: string;
+  imageDataUrl?: string;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; text?: string; error?: string; status?: number }> {
+  const urls = resolveChatCompletionUrls(resolveStyleVisionEndpoint(opts.endpoint));
+  const apiKey = sanitizeBearerKey(opts.apiKey);
+  const model = (opts.model || "").trim() || "qwen3.7-plus";
+  const imageDataUrl = String(opts.imageDataUrl || "").trim();
+  let lastError = "请求失败";
+  let lastStatus: number | undefined;
+
+  const userContent: unknown = imageDataUrl
+    ? [
+        { type: "image_url", image_url: { url: imageDataUrl } },
+        { type: "text", text: opts.text }
+      ]
+    : opts.text;
+
+  const baseMessages = [
+    { role: "system", content: opts.system },
+    { role: "user", content: userContent }
+  ];
+
+  for (const url of urls) {
+    const bodies: Record<string, unknown>[] = [
+      {
+        model,
+        temperature: 0.2,
+        stream: false,
+        enable_thinking: false,
+        response_format: { type: "json_object" },
+        messages: baseMessages
+      },
+      {
+        model,
+        temperature: 0.2,
+        stream: false,
+        enable_thinking: false,
+        messages: baseMessages
+      }
+    ];
+
+    for (const body of bodies) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), opts.timeoutMs || 90000);
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        const rawText = await response.text();
+        let data: any = null;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = null;
+        }
+        if (!response.ok) {
+          lastStatus = response.status;
+          lastError =
+            data?.error?.message ||
+            data?.message ||
+            rawText.slice(0, 400) ||
+            `HTTP ${response.status}`;
+          continue;
+        }
+        const text = extractChatMessageText(data);
+        if (text) {
+          return { ok: true, text, status: response.status };
         }
         lastError = "模型未返回有效文本";
       } catch (err: any) {
@@ -487,7 +702,7 @@ function generateIntelligentShots(
 
 // 1. Health check
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", hasApiKey: !!process.env.GEMINI_API_KEY });
+  res.json({ status: "ok", hasApiKey: isConfiguredSecret(process.env.GEMINI_API_KEY) });
 });
 
 // 2. Generate video script and automatic storyboard breakdown with real LLM
@@ -653,6 +868,632 @@ app.post("/api/script/generate", async (req, res) => {
     console.warn("[Script Generation] LLM exception encountered, gracefully deploying storyboard engine:", error?.message || error);
     return res.json(fallbackResult());
   }
+});
+
+function fallbackTopicCardsServer(seed: string, intent: string) {
+  const topic = String(seed || "").trim() || "一个值得拍的短视频主题";
+  const short = topic.slice(0, 12);
+  return [
+    {
+      id: `topic-fb-1-${Date.now()}`,
+      title: topic.slice(0, 18),
+      hook: `${topic.replace(/[。！？!?]$/, "")}，但大多数人搞反了顺序。`,
+      insight: "先拆一个常见误解，再给一个能带走的机制。",
+      genre: intent === "product" ? "带货" : "反常识",
+      whyNow: "评论区和搜索里反复出现同一句「为什么」，正缺一条把机制讲清的片子。",
+      durationHint: 30,
+      paceHint: "medium",
+      conceptCount: 1,
+      risk: "如果只骂误解不给机制，会变成抬杠。",
+      completionFit: "钩子是翻转认知，3 秒内要抛出反差。",
+      hookType: "misconception"
+    },
+    {
+      id: `topic-fb-2-${Date.now()}`,
+      title: `跟着走一遍：${short}`,
+      hook: `从现在起 ${short} 只做三步。`,
+      insight: "把主题收成可执行步骤，而不是观点清单。",
+      genre: "教程",
+      whyNow: "同类内容停在概念层，步骤向的讲解仍是缺口。",
+      durationHint: 30,
+      paceHint: "fast",
+      conceptCount: 1,
+      risk: "步骤超过 3 个，15–30 秒会装不下。",
+      completionFit: "快节奏，每步一镜。",
+      hookType: "outcome"
+    },
+    {
+      id: `topic-fb-3-${Date.now()}`,
+      title: `${short}的那 3 秒`,
+      hook: "真正决定结果的，不是开头，是中间那 3 秒。",
+      insight: "用一个具体瞬间当故事容器，主题变成可看见的场面。",
+      genre: intent === "blank" ? "情绪" : "故事",
+      whyNow: "对标片多在讲结论，少有人用一个场面把结论演出来。",
+      durationHint: 45,
+      paceHint: "slow",
+      conceptCount: 1,
+      risk: "场面选得太虚，下游生图会对不准。",
+      completionFit: "慢节奏，金句后要敢停。",
+      hookType: "mystery"
+    }
+  ];
+}
+
+function fallbackDraftServer(topic: string, hook: string, maxChars: number) {
+  const safeTopic = topic.trim() || "这件事";
+  const sentences = [
+    hook || `你以为你懂${safeTopic}，其实关键不在那儿。`,
+    "先把最常见的误会拿掉：它不是看起来那样运作的。",
+    "真正起作用的，是中间那一下你没注意到的变化。",
+    "看清这一点之后，后面的选择会简单很多。",
+    `记住这一句就够：把注意力放回${safeTopic}本身。`
+  ];
+  let fullNarration = "";
+  for (const sentence of sentences) {
+    const next = fullNarration ? `${fullNarration}${sentence}` : sentence;
+    const chars = next.replace(/\s+/g, "").length;
+    if (chars > maxChars && fullNarration) break;
+    fullNarration = next;
+  }
+  const beats = [
+    { id: "beat-1", order: 1, function: "hook", intent: "前 3 秒制造缺口", narration: sentences[0], targetSeconds: 3, energy: "fast", visualIntent: "特写一张被打断的日常画面，主体正看向镜头外", needsHold: false },
+    { id: "beat-2", order: 2, function: "setup", intent: "为什么要看下去", narration: sentences[1], targetSeconds: 6, energy: "medium", visualIntent: "把误解画成一个简单对比：左边常见做法，右边被划掉", needsHold: false },
+    { id: "beat-3", order: 3, function: "turn", intent: "转折", narration: sentences[2], targetSeconds: 8, energy: "fast", visualIntent: "镜头推进到被忽略的细节，光线刚好落在变化发生的位置", needsHold: false },
+    { id: "beat-4", order: 4, function: "reveal", intent: "关键一句", narration: sentences[3], targetSeconds: 7, energy: "slow", visualIntent: "细节展开后的全貌，主体停住，环境安静", needsHold: true },
+    { id: "beat-5", order: 5, function: "cta", intent: "收束", narration: sentences[4], targetSeconds: 6, energy: "hold", visualIntent: "回到开场同一构图，只改一处细节作为回收", needsHold: true }
+  ];
+  return { title: safeTopic.slice(0, 20), fullNarration, beats };
+}
+
+function countChars(text: string) {
+  return String(text || "").replace(/\s+/g, "").length;
+}
+
+async function fetchWithTimeout(url: string, ms = 8000): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, {
+      signal: ctrl.signal,
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; AI-VideoResearch/1.0)",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+      }
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function stripHtml(raw: string) {
+  return String(raw || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractPageBrief(html: string) {
+  const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || "").replace(/\s+/g, " ").trim();
+  const ogTitle = html.match(/property=["']og:title["']\s+content=["']([^"']+)/i)?.[1]
+    || html.match(/content=["']([^"']+)["']\s+property=["']og:title["']/i)?.[1]
+    || "";
+  const desc = html.match(/property=["']og:description["']\s+content=["']([^"']+)/i)?.[1]
+    || html.match(/name=["']description["']\s+content=["']([^"']+)/i)?.[1]
+    || "";
+  return {
+    title: stripHtml(ogTitle || title).slice(0, 120),
+    snippet: stripHtml(desc || stripHtml(html).slice(0, 400)).slice(0, 280)
+  };
+}
+
+async function searchWikipedia(query: string) {
+  const url = `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=3&utf8=1&format=json`;
+  try {
+    const res = await fetchWithTimeout(url, 7000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const hits = Array.isArray(data?.query?.search) ? data.query.search : [];
+    return hits.map((hit: any) => ({
+      title: String(hit.title || ""),
+      snippet: stripHtml(String(hit.snippet || "")),
+      url: `https://zh.wikipedia.org/wiki/${encodeURIComponent(String(hit.title || ""))}`
+    })).filter((item: any) => item.title);
+  } catch {
+    return [];
+  }
+}
+
+async function searchDuckDuckGo(query: string) {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  try {
+    const res = await fetchWithTimeout(url, 7000);
+    if (!res.ok) return [];
+    const html = await res.text();
+    const findings: { title: string; snippet: string; url: string }[] = [];
+    const blockRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|td|div)>)/gi;
+    let match: RegExpExecArray | null;
+    while ((match = blockRe.exec(html)) && findings.length < 4) {
+      const href = String(match[1] || "");
+      const uddg = href.match(/uddg=([^&]+)/);
+      const resolved = uddg ? decodeURIComponent(uddg[1]) : href;
+      if (!/^https?:/i.test(resolved)) continue;
+      findings.push({
+        title: stripHtml(match[2] || "").slice(0, 80),
+        snippet: stripHtml(match[3] || "").slice(0, 180),
+        url: resolved
+      });
+    }
+    return findings;
+  } catch {
+    return [];
+  }
+}
+
+async function searchWeb(query: string) {
+  const [wiki, ddg] = await Promise.all([searchWikipedia(query), searchDuckDuckGo(query)]);
+  const seen = new Set<string>();
+  const merged: { title: string; snippet: string; url: string }[] = [];
+  [...wiki, ...ddg].forEach((item) => {
+    const key = item.url || item.title;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+  return merged.slice(0, 4);
+}
+
+async function fetchPageFinding(rawUrl: string) {
+  try {
+    const url = new URL(rawUrl);
+    if (!/^https?:$/i.test(url.protocol)) return null;
+    if (/(youtube\.com|youtu\.be)/i.test(url.hostname)) {
+      const oembed = await fetchWithTimeout(`https://www.youtube.com/oembed?url=${encodeURIComponent(url.toString())}&format=json`, 7000);
+      if (oembed.ok) {
+        const data = await oembed.json();
+        return {
+          title: String(data.title || url.toString()),
+          snippet: `对标视频 · ${data.author_name || ""}`.trim(),
+          url: url.toString()
+        };
+      }
+    }
+    const res = await fetchWithTimeout(url.toString(), 8000);
+    if (!res.ok) return null;
+    const html = await res.text();
+    const brief = extractPageBrief(html);
+    return {
+      title: brief.title || url.hostname,
+      snippet: brief.snippet || "已抓到页面标题，正文摘要有限。",
+      url: url.toString()
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function runScriptLlmJson(opts: {
+  llmApi: any;
+  system: string;
+  user: string;
+  temperature?: number;
+}): Promise<any | null> {
+  if (isUsableLlmApi(opts.llmApi)) {
+    const llmResult = await callOpenAiCompatibleChat({
+      endpoint: String(opts.llmApi.endpoint),
+      apiKey: String(opts.llmApi.apiKey),
+      model: String(opts.llmApi.model || "deepseek-v4-flash"),
+      provider: opts.llmApi.provider,
+      system: opts.system,
+      user: opts.user,
+      temperature: opts.temperature ?? 0.6,
+      json: true
+    });
+    if (llmResult.ok && llmResult.text) {
+      return cleanAndParseJSON<any>(llmResult.text);
+    }
+  }
+  const ai = getGeminiClient();
+  if (ai) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.7-flash",
+        contents: opts.user,
+        config: { systemInstruction: opts.system, temperature: opts.temperature ?? 0.6, responseMimeType: "application/json" }
+      });
+      return cleanAndParseJSON<any>(response.text);
+    } catch (err: any) {
+      console.warn("[Script LLM] gemini failed:", err?.message || err);
+    }
+  }
+  return null;
+}
+
+app.post("/api/script/topics", async (req, res) => {
+  const {
+    intent = "blank",
+    intentNotes = "",
+    platform = "douyin",
+    pace = "medium",
+    researchNotes,
+    researchBrief,
+    genrePackId,
+    llmApi
+  } = req.body || {};
+  const seed = String(intentNotes || "").trim();
+  const fallback = () => ({ cards: fallbackTopicCardsServer(seed, String(intent || "blank")) });
+
+  const prompt = `你是短视频选题导演。根据用户入口、备注和调研，给出恰好 3 张选题卡。
+规则：
+- 三张卡的 insight 必须不同，钩子结构必须不同（分别用 misconception / outcome / mystery 或 stakes）
+- whyNow 必须具体，禁止写「这个话题很火」「很有意义」
+- hook 不超过 22 个汉字
+- title 不超过 18 个汉字
+- genre 只能是：科普、反常识、故事、教程、带货、情绪、热点解读、口播金句
+- paceHint 只能是：ultrafast、fast、medium、slow、cinematic
+- durationHint 只能是 15、21、30、45、60、90 之一
+- conceptCount 为 1 或 2
+- structure 只能是 myth_busting / problem_solution / story / tutorial / contrast / reveal，三张必须不同
+- whyThisWorks 一句话，必须引用调研里的具体点（若有）
+
+【入口】${intent}
+【平台】${platform}
+【节奏意向】${pace}
+【体裁包】${genrePackId || "未选"}
+【用户备注】${seed || "（空白，请在该领域给出可拍选题）"}
+【调研笔记】${JSON.stringify(researchNotes || {})}
+【调研摘要】${researchBrief?.summary || ""}
+
+只输出 JSON：{"cards":[{id,title,hook,insight,genre,whyNow,durationHint,paceHint,conceptCount,risk,completionFit,hookType,structure,whyThisWorks}]}`;
+
+  try {
+    const system = "你只输出合法 JSON，不要解释。";
+    if (isUsableLlmApi(llmApi)) {
+      const llmResult = await callOpenAiCompatibleChat({
+        endpoint: String(llmApi.endpoint),
+        apiKey: String(llmApi.apiKey),
+        model: String(llmApi.model || "deepseek-v4-flash"),
+        provider: llmApi.provider,
+        system,
+        user: prompt,
+        temperature: 0.8,
+        json: true
+      });
+      if (llmResult.ok && llmResult.text) {
+        const parsed = cleanAndParseJSON<any>(llmResult.text);
+        if (Array.isArray(parsed?.cards) && parsed.cards.length >= 3) {
+          return res.json({
+            cards: parsed.cards.slice(0, 3).map((card: any, index: number) => ({
+              id: card.id || `topic-${index + 1}-${Date.now()}`,
+              title: String(card.title || "").slice(0, 24) || `选题 ${index + 1}`,
+              hook: String(card.hook || ""),
+              insight: String(card.insight || ""),
+              genre: card.genre || "科普",
+              whyNow: String(card.whyNow || ""),
+              durationHint: Number(card.durationHint) || 30,
+              paceHint: card.paceHint || "medium",
+              conceptCount: Number(card.conceptCount) || 1,
+              risk: String(card.risk || ""),
+              completionFit: String(card.completionFit || ""),
+              hookType: String(card.hookType || "question")
+            }))
+          });
+        }
+      }
+    }
+
+    const ai = getGeminiClient();
+    if (ai) {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.7-flash",
+        contents: prompt,
+        config: { systemInstruction: system, temperature: 0.8, responseMimeType: "application/json" }
+      });
+      const parsed = cleanAndParseJSON<any>(response.text);
+      if (Array.isArray(parsed?.cards) && parsed.cards.length >= 3) {
+        return res.json({ cards: parsed.cards.slice(0, 3) });
+      }
+    }
+    return res.json(fallback());
+  } catch (error: any) {
+    console.warn("[Script Topics] fallback:", error?.message || error);
+    return res.json(fallback());
+  }
+});
+
+app.post("/api/script/draft", async (req, res) => {
+  const {
+    topic,
+    topicCard,
+    intent,
+    intentNotes,
+    researchNotes,
+    budget,
+    genrePack,
+    llmApi,
+    stylePack
+  } = req.body || {};
+  const title = String(topicCard?.title || topic || intentNotes || "这件事").trim();
+  const maxChars = Math.max(24, Number(budget?.maxChars) || 110);
+  const targetSeconds = Number(budget?.targetSeconds) || 30;
+  const pace = budget?.pace || "medium";
+  const fallback = () => fallbackDraftServer(title, String(topicCard?.hook || ""), maxChars);
+  const beatPlan = Array.isArray(genrePack?.beatPlan) ? genrePack.beatPlan.join(" → ") : "";
+
+  const styleContract = incomingStyleContract(stylePack);
+
+  const prompt = `你是短视频口播导演。按字数预算写一整段连续口播，并拆成节拍。秒数不要你估，只写字。
+硬约束：
+- fullNarration 去掉空白后的汉字数 ≤ ${maxChars}
+- 第一拍 function 必须是 hook
+- 最后一拍 function 必须是 cta 或 reveal
+- visualIntent 必须写看得见的因果，禁止「很有氛围」「电影感」
+- visualIntent 必须服从下面的美术世界契约（服饰、道具、建筑、时代）
+- 不要改口播去迁就风格
+- beats 4 到 8 个，优先按体裁包节拍：${beatPlan || "hook → setup → turn → proof → cta"}
+- energy 只能是 fast / medium / slow / hold
+- function 只能是 hook / setup / turn / proof / reveal / cta
+
+${styleContract}
+
+【题目】${title}
+【钩子】${topicCard?.hook || ""}
+【洞察】${topicCard?.insight || ""}
+【结构】${topicCard?.structure || genrePack?.structure || ""}
+【体裁包】${genrePack?.id || topicCard?.genre || ""} ${genrePack?.draftHint || ""}
+【入口】${intent || ""}
+【备注】${intentNotes || ""}
+【调研】对标:${researchNotes?.competitor || ""}；问题:${researchNotes?.audienceQuestion || ""}；事实:${researchNotes?.fact || ""}；画面:${researchNotes?.visualRef || ""}
+【目标时长】${targetSeconds}s 【节奏】${pace} 【字数上限】${maxChars}
+
+只输出 JSON：{"title":string,"fullNarration":string,"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
+
+  try {
+    const system = STYLE_DIRECTOR_SYSTEM;
+    if (isUsableLlmApi(llmApi)) {
+      const llmResult = await callOpenAiCompatibleChat({
+        endpoint: String(llmApi.endpoint),
+        apiKey: String(llmApi.apiKey),
+        model: String(llmApi.model || "deepseek-v4-flash"),
+        provider: llmApi.provider,
+        system,
+        user: prompt,
+        temperature: 0.7,
+        json: true
+      });
+      if (llmResult.ok && llmResult.text) {
+        const parsed = cleanAndParseJSON<any>(llmResult.text);
+        if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
+          if (countChars(parsed.fullNarration) > maxChars * 1.15) {
+            parsed.fullNarration = String(parsed.fullNarration).replace(/\s+/g, "").slice(0, maxChars);
+          }
+          return res.json(parsed);
+        }
+      }
+    }
+
+    const ai = getGeminiClient();
+    if (ai) {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.7-flash",
+        contents: prompt,
+        config: { systemInstruction: system, temperature: 0.7, responseMimeType: "application/json" }
+      });
+      const parsed = cleanAndParseJSON<any>(response.text);
+      if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
+        return res.json(parsed);
+      }
+    }
+    return res.json(fallback());
+  } catch (error: any) {
+    console.warn("[Script Draft] fallback:", error?.message || error);
+    return res.json(fallback());
+  }
+});
+
+app.post("/api/script/research", async (req, res) => {
+  const {
+    topic,
+    intentNotes = "",
+    referenceUrl = "",
+    platform = "douyin",
+    llmApi
+  } = req.body || {};
+  const seed = String(topic || intentNotes || "").trim() || "短视频选题";
+  const bladesMeta = [
+    { id: "competitor", label: "对标", query: `${seed} 短视频 讲解 OR 抖音` },
+    { id: "audience", label: "受众", query: `${seed} 为什么 搞不懂 OR 误区` },
+    { id: "fact", label: "事实", query: `${seed} 数据 OR 研究 OR 报告` },
+    { id: "visual", label: "画面", query: `${seed} 图解 OR 可视化 OR 动画` }
+  ];
+
+  try {
+    const pageFinding = referenceUrl ? await fetchPageFinding(String(referenceUrl)) : null;
+    const blades = await Promise.all(bladesMeta.map(async (meta) => {
+      const findings = await searchWeb(meta.query);
+      if (meta.id === "competitor" && pageFinding) {
+        findings.unshift(pageFinding);
+      }
+      return { ...meta, findings: findings.slice(0, 4) };
+    }));
+    const webHits = blades.reduce((sum, blade) => sum + blade.findings.length, 0);
+
+  const prompt = `你是短视频调研导演。根据检索结果，提炼四条可写进口播的笔记。禁止编造 URL。找不到就明说缺口。
+【主题】${seed}
+【平台】${platform}
+【检索】${JSON.stringify(blades.map((b) => ({ id: b.id, query: b.query, findings: b.findings })))}
+
+只输出 JSON：{"summary":string,"notes":{"competitor":string,"audienceQuestion":string,"fact":string,"visualRef":string}}
+notes 每条 ≤ 40 字，要具体。`;
+
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你只输出合法 JSON。笔记必须能对应到检索结果，不要写「这个话题很火」。",
+      user: prompt,
+      temperature: 0.4
+    });
+
+    const notes = {
+      competitor: String(parsed?.notes?.competitor || blades[0].findings[0]?.snippet || `对标还薄，先记下「${seed}」常见讲法。`).slice(0, 80),
+      audienceQuestion: String(parsed?.notes?.audienceQuestion || blades[1].findings[0]?.title || `观众在问：${seed}到底是怎么回事？`).slice(0, 80),
+      fact: String(parsed?.notes?.fact || blades[2].findings[0]?.snippet || "").slice(0, 80),
+      visualRef: String(parsed?.notes?.visualRef || blades[3].findings[0]?.title || "避免空镜堆砌，给一个能看懂的对比画面。").slice(0, 80)
+    };
+
+    return res.json({
+      summary: String(parsed?.summary || `围绕「${seed}」做了四刀浅调研，${webHits > 0 ? "有网页结果" : "网页没搜到，用了模型归纳"}。`),
+      blades,
+      notes,
+      source: webHits > 0 ? (parsed ? "mixed" : "web") : "model",
+      fetchedAt: Date.now()
+    });
+  } catch (error: any) {
+    console.warn("[Script Research] fallback:", error?.message || error);
+    return res.json({
+      summary: `「${seed}」浅调研失败，先用手写笔记。`,
+      blades: bladesMeta.map((meta) => ({ ...meta, findings: [] })),
+      notes: { competitor: "", audienceQuestion: "", fact: "", visualRef: "" },
+      source: "model",
+      fetchedAt: Date.now()
+    });
+  }
+});
+
+app.post("/api/script/reference", async (req, res) => {
+  const { url, topic, intentNotes, llmApi } = req.body || {};
+  const rawUrl = String(url || "").trim();
+  if (!rawUrl) {
+    return res.status(400).json({ error: "请先粘贴对标链接" });
+  }
+
+  try {
+    const finding = await fetchPageFinding(rawUrl);
+    const title = finding?.title || rawUrl;
+    const snippet = finding?.snippet || "";
+    const prompt = `你在反拆一条对标内容，给 3 个「保留节奏、换角度」的概念。禁止碳拷贝金句。
+【链接】${rawUrl}
+【标题】${title}
+【摘要】${snippet}
+【我们的主题】${topic || intentNotes || ""}
+
+只输出 JSON：{
+  "title": string,
+  "keep": string[],
+  "change": string[],
+  "whyBetter": string,
+  "hookStyle": string,
+  "pacingNote": string,
+  "cards": [{id,title,hook,insight,genre,whyNow,durationHint,paceHint,conceptCount,risk,completionFit,hookType,structure,whyThisWorks}]
+}
+cards 恰好 3 张，structure 必须互不相同。keep / change 各 2-4 条短句。`;
+
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你只输出合法 JSON。必须同时写保留什么和改什么。",
+      user: prompt,
+      temperature: 0.7
+    });
+
+    const cards = Array.isArray(parsed?.cards) && parsed.cards.length >= 3
+      ? parsed.cards.slice(0, 3)
+      : fallbackTopicCardsServer(String(topic || title), "reference");
+
+    return res.json({
+      url: rawUrl,
+      title: String(parsed?.title || title),
+      keep: Array.isArray(parsed?.keep) ? parsed.keep.slice(0, 4) : ["保留它的开场钩子形态", "保留信息更新密度"],
+      change: Array.isArray(parsed?.change) ? parsed.change.slice(0, 4) : ["换成我们的题材", "论据用更新的事实"],
+      whyBetter: String(parsed?.whyBetter || "同一套节奏，换一个别人没讲透的角度。"),
+      hookStyle: String(parsed?.hookStyle || "misconception"),
+      pacingNote: String(parsed?.pacingNote || "对标偏快切，我们按自己的节奏档走。"),
+      cards
+    });
+  } catch (error: any) {
+    console.warn("[Script Reference] fallback:", error?.message || error);
+    return res.json({
+      url: rawUrl,
+      title: rawUrl,
+      keep: ["保留钩子形态"],
+      change: ["换成自己的主题"],
+      whyBetter: "同一节奏，不同洞察。",
+      hookStyle: "misconception",
+      pacingNote: "按当前节奏档预测镜数。",
+      cards: fallbackTopicCardsServer(String(topic || ""), "reference")
+    });
+  }
+});
+
+app.post("/api/script/concepts", async (req, res) => {
+  const { topic, intentNotes, researchNotes, researchBrief, genrePackId, llmApi } = req.body || {};
+  const seed = String(topic || intentNotes || "").trim() || "这个主题";
+  const prompt = `根据调研产出恰好 3 个概念。结构、钩子类型、洞察必须都不同。
+【主题】${seed}
+【体裁包】${genrePackId || "未选"}
+【调研】${JSON.stringify(researchNotes || {})}
+【摘要】${researchBrief?.summary || ""}
+【检索】${JSON.stringify((researchBrief?.blades || []).map((b: any) => ({ id: b.id, hits: (b.findings || []).slice(0, 2) })))}
+
+只输出 JSON：{"cards":[{id,title,hook,insight,genre,whyNow,durationHint,paceHint,conceptCount,risk,completionFit,hookType,structure,whyThisWorks}]}
+whyThisWorks 必须点名调研里的一条。`;
+
+  try {
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你只输出合法 JSON。三张卡不能是同一个意思换标题。",
+      user: prompt,
+      temperature: 0.8
+    });
+    const cards = Array.isArray(parsed?.cards) && parsed.cards.length >= 3
+      ? parsed.cards.slice(0, 3)
+      : fallbackTopicCardsServer(seed, "direction");
+    return res.json({ cards });
+  } catch (error: any) {
+    console.warn("[Script Concepts] fallback:", error?.message || error);
+    return res.json({ cards: fallbackTopicCardsServer(seed, "direction") });
+  }
+});
+
+app.post("/api/script/split-spans", async (req, res) => {
+  const { narration, llmApi } = req.body || {};
+  const text = String(narration || "").trim();
+  if (!text) {
+    return res.status(400).json({ error: "narration is required" });
+  }
+
+  const prompt = `把口播拆成「整句口播段 + 句内画面」。
+硬规则：
+- 口播段必须是完整一句，以。！？结束。禁止在逗号处断开旁白。
+- 「不是A，而是B」「不是A，其实是B」「虽然A，但是B」「与其A，不如B」必须同一口播段；画面在翻转词处切成 2 张。
+- 一句默认 1 张图；只有新主体/对照翻转才 2 张；最多 3 张。
+- startRatio/endRatio 覆盖 0 到 1，sliceText 必须是互不重复的前后两截，合起来等于该句。禁止两张图都写成后半句。
+- visualIntent 写看得见的画面，不要写情绪形容词。
+
+【口播】
+${text}
+
+只输出 JSON：{"spans":[{"id","text","function","energy","needsHold","visuals":[{"startRatio","endRatio","sliceText","visualIntent","splitReason"}]}]}
+function 只能是 hook/setup/turn/proof/reveal/cta。energy 只能是 fast/medium/slow/hold。`;
+
+  try {
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你只输出合法 JSON。旁白以整句为单位，画面可以在一句里切。",
+      user: prompt,
+      temperature: 0.3
+    });
+    if (Array.isArray(parsed?.spans) && parsed.spans.length > 0) {
+      return res.json({ spans: parsed.spans });
+    }
+  } catch (error: any) {
+    console.warn("[Split Spans] LLM failed:", error?.message || error);
+  }
+  return res.json({ spans: [] });
 });
 
 // 2.1 Polish, Rewrite, or Expand single narration/prompt with LLM
@@ -826,10 +1667,13 @@ ${cleanText}
         json: true
       });
       if (llmResult.ok && llmResult.text) {
-        const parsed = cleanAndParseJSON<any>(llmResult.text);
-        if (parsed && Array.isArray(parsed.shots) && parsed.shots.length > 0) {
-          return res.json(parsed);
-        }
+        const validated = validateGeneratedShots(
+          cleanAndParseJSON<any>(llmResult.text),
+          cleanText.slice(0, 18),
+          visualStyle,
+          0
+        );
+        if (validated) return res.json(validated);
       } else {
         console.warn("[Split Text] Custom LLM failed:", llmResult.error);
       }
@@ -882,10 +1726,13 @@ ${cleanText}
       }
     }
 
-    const parsed = cleanAndParseJSON<any>(responseText);
-    if (parsed && Array.isArray(parsed.shots) && parsed.shots.length > 0) {
-      return res.json(parsed);
-    }
+    const parsed = validateGeneratedShots(
+      cleanAndParseJSON<any>(responseText),
+      cleanText.slice(0, 18),
+      visualStyle,
+      0
+    );
+    if (parsed) return res.json(parsed);
     return res.json(splitFallback());
   } catch (error: any) {
     console.warn("[Split Text] LLM error, returning rule-based split:", error?.message);
@@ -894,9 +1741,179 @@ ${cleanText}
 });
 
 // 3. Generate individual visual frame using AI Image Generation Engine (Custom Provider API / Pollinations FLUX.1 / Procedural Fallback)
+app.post("/api/style/vision-test", async (req, res) => {
+  const visionApi = req.body?.visionApi || {};
+  const endpoint = String(visionApi.endpoint || "").trim();
+  const apiKey = String(visionApi.apiKey || "").trim();
+  const model = String(visionApi.model || "qwen3.7-plus").trim();
+  if (!apiKey) {
+    return res.status(400).json({ ok: false, error: "请先填写百炼 API Key" });
+  }
+  const started = Date.now();
+
+  // 1) Text ping first: tells Key / 欠费 / 未开通 apart from vision-specific errors.
+  const textResult = await callBailianVisionJson({
+    endpoint,
+    apiKey,
+    model,
+    system: "只输出合法 JSON。",
+    text: '只回复 JSON：{"ok":true}',
+    timeoutMs: 25000
+  });
+  if (!textResult.ok) {
+    const status = textResult.status && textResult.status >= 400 ? textResult.status : 502;
+    const error = mapBailianVisionError(textResult.status, textResult.error);
+    console.warn(`[Style Vision Test] text fail model=${model} status=${textResult.status || "-"}`);
+    return res.status(status).json({ ok: false, error, stage: "text", latencyMs: Date.now() - started });
+  }
+
+  // 2) Vision ping with a legal-size probe (wide/height 32px). 1×1 is rejected by DashScope.
+  const visionResult = await callBailianVisionJson({
+    endpoint,
+    apiKey,
+    model,
+    system: "只输出合法 JSON。",
+    text: '看图后只回复 JSON：{"ok":true}',
+    imageDataUrl: STYLE_VISION_PROBE_PNG,
+    timeoutMs: 30000
+  });
+  if (!visionResult.ok) {
+    const status = visionResult.status && visionResult.status >= 400 ? visionResult.status : 502;
+    const mapped = mapBailianVisionError(visionResult.status, visionResult.error);
+    const error = `Key 可用，但看图失败：${mapped}`;
+    console.warn(`[Style Vision Test] vision fail model=${model} status=${visionResult.status || "-"}`);
+    return res.status(status).json({ ok: false, error, stage: "vision", latencyMs: Date.now() - started });
+  }
+
+  return res.json({ ok: true, model, latencyMs: Date.now() - started });
+});
+
+app.post("/api/style/infer", async (req, res) => {
+  const { imageDataUrl, imageHash, visionApi } = req.body || {};
+  const endpoint = String(visionApi?.endpoint || "").trim();
+  const apiKey = String(visionApi?.apiKey || "").trim();
+  const model = String(visionApi?.model || "qwen3.7-plus").trim();
+  const dataUrl = String(imageDataUrl || "").trim();
+  const hash = String(imageHash || "").trim();
+
+  if (!apiKey) {
+    return res.status(400).json({ ok: false, error: "请先填写百炼 API Key" });
+  }
+  if (!dataUrl.startsWith("data:image/")) {
+    return res.status(400).json({ ok: false, error: "请上传图片" });
+  }
+
+  const cached = hash ? styleInferCache.get(hash) : undefined;
+  if (cached?.pack) {
+    console.log(`[Style Infer] cache hit ${hash.slice(0, 8)} model=${model}`);
+    return res.json({ ok: true, pack: cached.pack, cached: true });
+  }
+
+  const started = Date.now();
+  const result = await callBailianVisionJson({
+    endpoint,
+    apiKey,
+    model,
+    system: STYLE_INFER_SYSTEM,
+    text: STYLE_INFER_USER,
+    imageDataUrl: dataUrl,
+    timeoutMs: 90000
+  });
+
+  if (!result.ok || !result.text) {
+    const status = result.status && result.status >= 400 ? result.status : 502;
+    const error = mapBailianVisionError(result.status, result.error || "风格反推失败");
+    console.warn(`[Style Infer] fail model=${model} ${Date.now() - started}ms`);
+    return res.status(status).json({ ok: false, error });
+  }
+
+  const parsed = cleanAndParseJSON<any>(result.text);
+  const pack = normalizeInferredPack(parsed, hash || `tmp${Date.now()}`);
+  if (!pack) {
+    return res.status(422).json({ ok: false, error: "反推结果不完整，请换图或重试" });
+  }
+
+  if (hash) styleInferCache.set(hash, { pack, at: Date.now() });
+  console.log(`[Style Infer] ok model=${model} ${Date.now() - started}ms`);
+  return res.json({ ok: true, pack, cached: false });
+});
+
+app.post("/api/style/rewrite-shots", async (req, res) => {
+  const { clips, stylePack, llmApi } = req.body || {};
+  const pack = stylePack && typeof stylePack === "object" ? (stylePack as StylePack) : PRESET_STYLE_PACKS.cinematic;
+  const list = Array.isArray(clips) ? clips : [];
+  if (list.length === 0) {
+    return res.status(400).json({ ok: false, error: "没有可重写的分镜" });
+  }
+
+  const fallback = () =>
+    list.map((clip: any) => {
+      const rewritten = localRewriteClipPrompt(clip, pack);
+      return {
+        id: String(clip.id),
+        chineseVisualPrompt: rewritten.chineseVisualPrompt,
+        visualPrompt: rewritten.visualPrompt
+      };
+    });
+
+  const shotLines = list
+    .map((clip: any, index: number) => {
+      return `${index + 1}. id=${clip.id}\n口播：${clip.narration || ""}\n现有画面：${clip.chineseVisualPrompt || clip.visualPrompt || ""}`;
+    })
+    .join("\n\n");
+
+  const prompt = `${styleContractForPrompt(pack)}
+
+请把下面每一镜的画面改写：保留口播因果和该镜自己的主体。若上文是风格基因，只迁移视觉系统，不要把剥掉的内容写进任何一镜。若上文是美术世界，则服从世界契约。不要改口播。
+${shotLines}
+
+只输出 JSON：{"shots":[{"id":string,"chineseVisualPrompt":string,"visualPrompt":string}]}`;
+
+  try {
+    if (isUsableLlmApi(llmApi)) {
+      const llmResult = await callOpenAiCompatibleChat({
+        endpoint: String(llmApi.endpoint),
+        apiKey: String(llmApi.apiKey),
+        model: String(llmApi.model || "deepseek-v4-flash"),
+        provider: llmApi.provider,
+        system: STYLE_DIRECTOR_SYSTEM,
+        user: prompt,
+        temperature: 0.4,
+        json: true,
+        timeoutMs: 90000
+      });
+      if (llmResult.ok && llmResult.text) {
+        const parsed = cleanAndParseJSON<any>(llmResult.text);
+        if (Array.isArray(parsed?.shots) && parsed.shots.length > 0) {
+          const byId = new Map<string, any>(parsed.shots.map((item: any) => [String(item.id), item]));
+          return res.json({
+            ok: true,
+            shots: list.map((clip: any) => {
+              const hit = byId.get(String(clip.id));
+              if (hit?.visualPrompt) {
+                return {
+                  id: String(clip.id),
+                  chineseVisualPrompt: String(hit.chineseVisualPrompt || hit.visualIntent || clip.chineseVisualPrompt || ""),
+                  visualPrompt: String(hit.visualPrompt)
+                };
+              }
+              const rewritten = localRewriteClipPrompt(clip, pack);
+              return { id: String(clip.id), ...rewritten };
+            })
+          });
+        }
+      }
+    }
+  } catch (error: any) {
+    console.warn("[Style Rewrite] fallback:", error?.message || error);
+  }
+
+  return res.json({ ok: true, shots: fallback(), fallback: true });
+});
+
 app.post("/api/visual/generate", async (req, res) => {
   try {
-    const { prompt, visualStyle = "cinematic", aspectRatio = "16:9", seed, customApi } = req.body || {};
+    const { prompt, visualStyle = "cinematic", aspectRatio = "16:9", seed, customApi, styleRender } = req.body || {};
 
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
@@ -936,9 +1953,19 @@ app.post("/api/visual/generate", async (req, res) => {
       "vector-art": "modern vector illustration, clean lines, minimalist flat art, elegant color palette, high contrast"
     };
 
-    const styleAddition = styleEnhancers[visualStyle] || "high quality, ultra detailed, cinematic composition";
     const cleanedPrompt = String(prompt).replace(/[^\w\s\u4e00-\u9fa5,.-]/g, ' ').trim();
-    const finalPrompt = `${cleanedPrompt}, ${styleAddition}`;
+    const requestedRender = typeof styleRender === "string" ? styleRender.trim() : "";
+    const fallbackRender = styleEnhancers[visualStyle] || "";
+    const extras = (requestedRender || fallbackRender)
+      .split(",")
+      .map((item: string) => item.trim())
+      .filter((item: string) => {
+        if (!item) return false;
+        const needle = item.toLowerCase().slice(0, 18);
+        return needle.length > 0 && !cleanedPrompt.toLowerCase().includes(needle);
+      })
+      .slice(0, 2);
+    const finalPrompt = extras.length ? `${cleanedPrompt}, ${extras.join(", ")}` : cleanedPrompt;
 
     // =========================================================================
     // PRIORITY 1: User-configured Custom Image Generation Provider API
@@ -2012,64 +3039,468 @@ app.post("/api/topics/suggest", async (req, res) => {
   }
 });
 
-// 5. Microsoft Edge Neural Voice TTS Synthesis (100% Free, Studio-grade Audio)
+// 5. Alibaba Cloud Bailian (DashScope) Qwen-TTS synthesis helper
+type ClientTtsApi = {
+  enabled?: boolean;
+  provider?: string;
+  endpoint?: string;
+  apiKey?: string;
+  model?: string;
+  voice?: string;
+};
+
+function isUsableBailianTts(ttsApi: any): ttsApi is ClientTtsApi {
+  if (!ttsApi || ttsApi.provider !== "bailian" || ttsApi.enabled === false) return false;
+  return Boolean(typeof ttsApi.apiKey === "string" && ttsApi.apiKey.trim().length > 0);
+}
+
+async function callBailianTts(opts: {
+  endpoint: string;
+  apiKey: string;
+  model?: string;
+  voice?: string;
+  text: string;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; audioUrl?: string; error?: string; status?: number }> {
+  const endpoint = String(
+    opts.endpoint || "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+  ).trim();
+  const apiKey = sanitizeBearerKey(opts.apiKey);
+  const model = (opts.model || "").trim() || "qwen3-tts-flash";
+  const voice = (opts.voice || "").trim() || "Cherry";
+  const text = String(opts.text || "").trim();
+
+  // Recommend explicit language for better pronunciation; fall back to Auto
+  const languageType = /[\u4e00-\u9fa5]/.test(text) ? "Chinese" : "Auto";
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), opts.timeoutMs || 60000);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        input: { text, voice, language_type: languageType }
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const rawText = await response.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: data?.message || data?.code || rawText.slice(0, 400) || `HTTP ${response.status}`
+      };
+    }
+
+    const audio = data?.output?.audio;
+
+    // 1. Base64 audio data (some responses embed it directly)
+    if (audio?.data && typeof audio.data === "string" && audio.data.length > 200) {
+      return { ok: true, audioUrl: `data:audio/wav;base64,${audio.data}` };
+    }
+
+    // 2. OSS URL (non-stream result): download & convert to base64 data URI
+    const audioUrl = typeof audio?.url === "string" ? audio.url : "";
+    if (audioUrl) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 30000);
+        const audioRes = await fetch(audioUrl, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (audioRes.ok) {
+          const arrayBuffer = await audioRes.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          const contentType = audioRes.headers.get("content-type") || "audio/wav";
+          return { ok: true, audioUrl: `data:${contentType};base64,${buffer.toString("base64")}` };
+        }
+      } catch (downloadErr: any) {
+        console.warn("[Bailian TTS] Audio download failed:", downloadErr?.message);
+      }
+    }
+
+    return { ok: false, status: response.status, error: "未在响应中解析到音频" };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    return {
+      ok: false,
+      error: err?.name === "AbortError" ? "请求超时" : err?.message || "网络异常"
+    };
+  }
+}
+
+const EDGE_VOICE_MAP: Record<string, string> = {
+  "magnetic-male": "zh-CN-YunxiNeural",
+  "warm-female": "zh-CN-XiaoxiaoNeural",
+  "tech-anchor": "zh-CN-YunyangNeural",
+  "documentary-male": "zh-CN-YunjianNeural",
+  "mystery-noir": "zh-CN-YunxiNeural",
+  "vibrant-creator": "zh-CN-XiaoyiNeural",
+  "bilingual-en": "en-US-ChristopherNeural",
+  "bilingual-female": "en-US-JennyNeural"
+};
+
+const BAILIAN_VOICE_IDS = new Set(["Cherry", "Serena", "Ethan", "Chelsie", "Jasper"]);
+const EDGE_TO_BAILIAN: Record<string, string> = {
+  "magnetic-male": "Ethan",
+  "warm-female": "Serena",
+  "tech-anchor": "Chelsie",
+  "documentary-male": "Ethan",
+  "mystery-noir": "Ethan",
+  "vibrant-creator": "Cherry",
+  "bilingual-en": "Cherry",
+  "bilingual-female": "Serena"
+};
+
+function resolveBailianVoice(character?: string, fallback?: string): string {
+  const selected = String(character || "").trim();
+  if (BAILIAN_VOICE_IDS.has(selected)) return selected;
+  if (EDGE_TO_BAILIAN[selected]) return EDGE_TO_BAILIAN[selected];
+  const fromSettings = String(fallback || "").trim();
+  if (BAILIAN_VOICE_IDS.has(fromSettings)) return fromSettings;
+  if (fromSettings && !EDGE_VOICE_MAP[fromSettings]) return fromSettings;
+  return "Cherry";
+}
+
+type EdgeWordMark = { text: string; start: number; end: number };
+
+function parseEdgeWordMarks(raw: string): EdgeWordMark[] {
+  const words: EdgeWordMark[] = [];
+  const ingest = (payload: any) => {
+    const metas = payload?.Metadata || payload?.metadata || [];
+    if (!Array.isArray(metas)) return;
+    for (const meta of metas) {
+      if (meta?.Type !== "WordBoundary" || !meta.Data) continue;
+      const offset = Number(meta.Data.Offset) / 10_000_000;
+      const duration = Number(meta.Data.Duration) / 10_000_000;
+      const text = String(meta.Data.text?.Text || meta.Data.Text || "").trim();
+      if (!text || !Number.isFinite(offset)) continue;
+      words.push({
+        text,
+        start: Math.max(0, offset),
+        end: Math.max(offset, offset + (Number.isFinite(duration) ? duration : 0))
+      });
+    }
+  };
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return words;
+  try {
+    ingest(JSON.parse(trimmed));
+  } catch {
+    const blobs = trimmed.match(/\{[\s\S]*?\}(?=\{|$)/g) || [];
+    for (const blob of blobs) {
+      try {
+        ingest(JSON.parse(blob));
+      } catch {
+        // ignore malformed metadata chunk
+      }
+    }
+  }
+  return words;
+}
+
+function synthesizeEdgeTts(
+  text: string,
+  character: string,
+  rate: number
+): Promise<{ audioUrl: string; words: EdgeWordMark[] }> {
+  return new Promise(async (resolve, reject) => {
+    let settled = false;
+    const finish = (err: Error | null, payload?: { audioUrl: string; words: EdgeWordMark[] }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(payload as { audioUrl: string; words: EdgeWordMark[] });
+    };
+    const timer = setTimeout(() => finish(new Error("Edge TTS 超时")), 120000);
+
+    try {
+      const targetVoice = EDGE_VOICE_MAP[character] || "zh-CN-YunxiNeural";
+      const ratePercent = Math.round((rate - 1.0) * 100);
+      const rateStr = `${ratePercent >= 0 ? "+" : ""}${ratePercent}%`;
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(targetVoice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3, {
+        wordBoundaryEnabled: true,
+        sentenceBoundaryEnabled: true
+      });
+      const { audioStream, metadataStream } = tts.toStream(text, {
+        rate: rateStr,
+        pitch: character === "mystery-noir" ? "-5Hz" : "+0Hz"
+      });
+      const chunks: Buffer[] = [];
+      const metaChunks: Buffer[] = [];
+      let audioDone = false;
+      let metaDone = !metadataStream;
+      const maybeFinish = () => {
+        if (!audioDone || !metaDone) return;
+        const audioBuffer = Buffer.concat(chunks);
+        const words = parseEdgeWordMarks(Buffer.concat(metaChunks).toString("utf8"));
+        finish(null, {
+          audioUrl: `data:audio/mp3;base64,${audioBuffer.toString("base64")}`,
+          words
+        });
+      };
+      audioStream.on("data", (chunk: Buffer) => chunks.push(chunk));
+      metadataStream?.on("data", (chunk: Buffer | string) => {
+        metaChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      });
+      metadataStream?.on("end", () => {
+        metaDone = true;
+        maybeFinish();
+      });
+      metadataStream?.on("close", () => {
+        metaDone = true;
+        maybeFinish();
+      });
+      audioStream.on("end", () => {
+        audioDone = true;
+        if (!metaDone) {
+          setTimeout(() => {
+            metaDone = true;
+            maybeFinish();
+          }, 800);
+        }
+        maybeFinish();
+      });
+      audioStream.on("error", (streamErr: any) => {
+        finish(new Error(streamErr?.message || "Edge TTS synthesis stream failed"));
+      });
+    } catch (err: any) {
+      finish(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
+
+async function synthesizeNarrationAudio(opts: {
+  text: string;
+  character?: string;
+  rate?: number;
+  ttsApi?: any;
+}): Promise<
+  | { ok: true; audioUrl: string; voice: string; format: string; provider: string; words?: EdgeWordMark[] }
+  | { ok: false; error: string; status?: number }
+> {
+  const text = opts.text.trim();
+  const character = opts.character || "magnetic-male";
+  const rate = typeof opts.rate === "number" ? opts.rate : 1.0;
+
+  if (isUsableBailianTts(opts.ttsApi)) {
+    const voice = resolveBailianVoice(character, opts.ttsApi.voice);
+    const result = await callBailianTts({
+      endpoint: String(opts.ttsApi.endpoint),
+      apiKey: String(opts.ttsApi.apiKey),
+      model: String(opts.ttsApi.model || "qwen3-tts-flash"),
+      voice,
+      text
+    });
+    if (result.ok && result.audioUrl) {
+      return {
+        ok: true,
+        audioUrl: result.audioUrl,
+        voice,
+        format: "wav",
+        provider: "bailian"
+      };
+    }
+    return { ok: false, error: result.error || "百炼 TTS 合成失败", status: result.status };
+  }
+
+  try {
+    const edge = await synthesizeEdgeTts(text, character, rate);
+    return {
+      ok: true,
+      audioUrl: edge.audioUrl,
+      voice: EDGE_VOICE_MAP[character] || "zh-CN-YunxiNeural",
+      format: "mp3",
+      provider: "edge",
+      words: edge.words
+    };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || "Edge TTS 合成失败" };
+  }
+}
+
+// 6. Microsoft Edge Neural Voice TTS Synthesis (100% Free, Studio-grade Audio)
 app.post("/api/audio/tts", async (req, res) => {
   try {
-    const { text, character = "magnetic-male", rate = 1.0 } = req.body || {};
+    const { text, character = "magnetic-male", rate = 1.0, ttsApi } = req.body || {};
 
     if (!text || typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ error: "Text is required" });
     }
 
-    // Voice mapping for popular Edge Neural voices
-    const voiceMap: Record<string, string> = {
-      "magnetic-male": "zh-CN-YunxiNeural",       // 磁性影视解说男声 (云希)
-      "warm-female": "zh-CN-XiaoxiaoNeural",      // 温柔生活情感女声 (晓晓)
-      "tech-anchor": "zh-CN-YunyangNeural",       // 专业科技商业男声 (云扬)
-      "documentary-male": "zh-CN-YunjianNeural",  // 纪录片深沉男声 (云健)
-      "mystery-noir": "zh-CN-YunxiNeural",        // 悬疑低沉男声 (云希)
-      "vibrant-creator": "zh-CN-XiaoyiNeural",    // 活力自然女声 (晓伊)
-      "bilingual-en": "en-US-ChristopherNeural",   // 美语自然男主播
-      "bilingual-female": "en-US-JennyNeural"     // 美语自然女主播
-    };
-
-    const targetVoice = voiceMap[character] || "zh-CN-YunxiNeural";
-
-    // Rate calculation e.g. "+10%", "-5%"
-    const ratePercent = Math.round((rate - 1.0) * 100);
-    const rateStr = `${ratePercent >= 0 ? "+" : ""}${ratePercent}%`;
-
-    const tts = new MsEdgeTTS();
-    await tts.setMetadata(targetVoice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-
-    const { audioStream } = tts.toStream(text.trim(), { 
-      rate: rateStr,
-      pitch: character === "mystery-noir" ? "-5Hz" : "+0Hz"
+    const result = await synthesizeNarrationAudio({
+      text: text.trim(),
+      character,
+      rate,
+      ttsApi
     });
 
-    const chunks: Buffer[] = [];
-    audioStream.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-
-    audioStream.on("end", () => {
-      const audioBuffer = Buffer.concat(chunks);
-      const base64Audio = `data:audio/mp3;base64,${audioBuffer.toString("base64")}`;
-      res.json({
-        audioUrl: base64Audio,
-        voice: targetVoice,
-        format: "mp3",
-        character
+    if (result.ok !== true) {
+      return res.status(result.status && result.status >= 400 ? result.status : 500).json({
+        error: result.error,
+        provider: isUsableBailianTts(ttsApi) ? "bailian" : "edge"
       });
-    });
+    }
 
-    audioStream.on("error", (streamErr) => {
-      console.warn("Edge TTS stream error:", streamErr);
-      res.status(500).json({ error: "Edge TTS synthesis stream failed" });
+    return res.json({
+      audioUrl: materializeClientAudioUrl(result.audioUrl),
+      voice: result.voice,
+      format: result.format,
+      character,
+      provider: result.provider
     });
   } catch (err: any) {
     console.error("TTS endpoint error:", err);
     res.status(500).json({ error: err.message || "Failed to generate TTS audio" });
+  }
+});
+
+app.post("/api/audio/tts-full", async (req, res) => {
+  try {
+    const { clips, character = "magnetic-male", rate = 1.0, ttsApi } = req.body || {};
+    const joined = String(req.body?.text || "").trim() || joinClipsForTts(clips) || joinClipNarrations(clips);
+    if (!joined) {
+      return res.status(400).json({ error: "没有可合成的旁白文案" });
+    }
+
+    const result = await synthesizeNarrationAudio({
+      text: joined,
+      character,
+      rate,
+      ttsApi
+    });
+
+    if (result.ok !== true) {
+      return res.status(result.status && result.status >= 400 ? result.status : 500).json({
+        error: result.error || "整段旁白合成失败"
+      });
+    }
+
+    return res.json({
+      audioUrl: materializeClientAudioUrl(result.audioUrl),
+      voice: result.voice,
+      format: result.format,
+      character,
+      provider: result.provider,
+      textLength: joined.length
+    });
+  } catch (err: any) {
+    console.error("Full narration TTS error:", err);
+    res.status(500).json({ error: err.message || "整段旁白合成失败" });
+  }
+});
+
+app.post("/api/audio/store", (req, res) => {
+  const audioUrl = materializeClientAudioUrl(String(req.body?.audioUrl || ""));
+  if (!audioUrl) {
+    return res.status(400).json({ error: "没有可保存的音频" });
+  }
+  return res.json({ audioUrl });
+});
+
+app.post("/api/audio/tts-utterances", async (req, res) => {
+  try {
+    const { character = "magnetic-male", rate = 1.0, ttsApi, clips } = req.body || {};
+    const rawUtterances = Array.isArray(req.body?.utterances) ? req.body.utterances : [];
+    const texts: string[] = rawUtterances
+      .map((item: any) => String(item?.text || item || "").trim())
+      .filter(Boolean);
+    const fromClips = texts.length > 0
+      ? texts
+      : utterancesFromClips(Array.isArray(clips) ? clips : []).map((item) => item.text);
+    if (fromClips.length === 0) {
+      return res.status(400).json({ error: "没有可合成的旁白文案" });
+    }
+
+    const segments: { text: string; audioUrl: string; words: EdgeWordMark[] }[] = [];
+    for (const text of fromClips) {
+      const result = await synthesizeNarrationAudio({
+        text,
+        character,
+        rate,
+        ttsApi
+      });
+      if (result.ok !== true) {
+        return res.status(result.status && result.status >= 400 ? result.status : 500).json({
+          error: result.error || `旁白句合成失败：${text.slice(0, 18)}`
+        });
+      }
+      segments.push({
+        text,
+        audioUrl: materializeClientAudioUrl(result.audioUrl),
+        words: Array.isArray(result.words) ? result.words : []
+      });
+    }
+
+    return res.json({
+      segments,
+      character,
+      provider: isUsableBailianTts(ttsApi) ? "bailian" : "edge",
+      count: segments.length
+    });
+  } catch (err: any) {
+    console.error("Utterance TTS error:", err);
+    res.status(500).json({ error: err.message || "按句旁白合成失败" });
+  }
+});
+
+// 6.1 Test Custom TTS provider (Bailian Qwen-TTS)
+app.post("/api/audio/tts/test", async (req, res) => {
+  const startTime = Date.now();
+  const { endpoint, apiKey, model = "qwen3-tts-flash", voice = "Cherry" } = req.body || {};
+
+  if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+    return res.status(400).json({ ok: false, error: "请输入 API Key" });
+  }
+
+  try {
+    const result = await callBailianTts({
+      endpoint: String(endpoint || ""),
+      apiKey: String(apiKey),
+      model: String(model || "qwen3-tts-flash"),
+      voice: String(voice || "Cherry"),
+      text: "这是阿里云百炼语音合成的测试音色，正在为你实时试听。"
+    });
+    const latencyMs = Date.now() - startTime;
+
+    if (result.ok && result.audioUrl) {
+      return res.json({
+        ok: true,
+        latencyMs,
+        model: String(model || "qwen3-tts-flash"),
+        voice: String(voice || "Cherry"),
+        audioUrl: result.audioUrl
+      });
+    }
+
+    return res.status(result.status && result.status >= 400 ? result.status : 400).json({
+      ok: false,
+      latencyMs,
+      error: result.error
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      latencyMs: Date.now() - startTime,
+      error: err?.message || "百炼 TTS 测试请求失败"
+    });
   }
 });
 

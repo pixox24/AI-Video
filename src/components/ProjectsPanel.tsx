@@ -2,6 +2,7 @@ import React from 'react';
 import { FolderGit2, Plus, Download, Upload, Copy, Trash2, Sparkles, Clock, Check } from 'lucide-react';
 import { VideoProject } from '../types';
 import { SAMPLE_PROJECTS } from '../utils/presets';
+import { ToolRail } from './ToolRail';
 
 interface ProjectsPanelProps {
   currentProject: VideoProject;
@@ -53,10 +54,7 @@ export const ProjectsPanel: React.FC<ProjectsPanelProps> = ({
   };
 
   return (
-    <div
-      id="projects-tool-panel"
-      className="w-80 lg:w-84 flex-shrink-0 bg-[#131318] border border-[#23232c] rounded-2xl flex flex-col h-full overflow-hidden select-none z-20 shadow-xl shadow-black/40"
-    >
+    <ToolRail id="projects-tool-panel">
       {/* Header */}
       <div className="p-3.5 border-b border-[#23232c] bg-[#16161c] flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -137,6 +135,6 @@ export const ProjectsPanel: React.FC<ProjectsPanelProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </ToolRail>
   );
 };

@@ -15,6 +15,9 @@ import {
 import { StoryboardClip, SubtitleConfig, AudioConfig, ProjectSettings } from '../types';
 import { audioEngine } from '../utils/audioEngine';
 import { calculateSubtitleLayout } from '../utils/subtitleFormatter';
+import { clipShotNarration, isNarrationTrackFresh, mapNarrationToTimeline, mapTimelineToNarration } from '../utils/narrationTrack';
+import { resolveTtsApi } from '../utils/presets';
+import { showStatusToast } from '../utils/statusToast';
 
 interface VideoPlayerStageProps {
   clips: StoryboardClip[];
@@ -27,6 +30,8 @@ interface VideoPlayerStageProps {
   onTogglePlay: () => void;
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
+  isGeneratingNarration?: boolean;
+  narrationError?: string | null;
 }
 
 export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
@@ -40,6 +45,8 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   onTogglePlay,
   selectedClipId,
   onSelectClip,
+  isGeneratingNarration = false,
+  narrationError = null,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -48,7 +55,10 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   const loadedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const animationFrameRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(performance.now());
-  const activeClipIndexRef = useRef<number>(0);
+  const activeClipIndexRef = useRef<number>(-1);
+  const timeRef = useRef<number>(currentTime);
+  const lastUiPushRef = useRef<number>(0);
+  const wasPlayingRef = useRef<boolean>(isPlaying);
 
   // Total duration
   const totalDuration = clips.reduce((acc, c) => acc + (c.duration || 3.5), 0) || 10;
@@ -83,18 +93,41 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   useEffect(() => {
     if (isPlaying) {
       if (audio.bgmEnabled && !isMuted) {
-        audioEngine.startBgm(audio.bgmTrackId, audio.bgmVolume);
+        audioEngine.startBgm(audio.bgmTrackId, audio.bgmVolume, audio.customBgmUrl);
+      } else {
+        audioEngine.stopBgm();
       }
     } else {
       audioEngine.stopBgm();
-      audioEngine.stopNarration();
     }
 
     return () => {
       audioEngine.stopBgm();
-      audioEngine.stopNarration();
     };
-  }, [isPlaying, audio.bgmEnabled, audio.bgmTrackId, audio.bgmVolume, isMuted]);
+  }, [isPlaying, audio.bgmEnabled, audio.bgmTrackId, audio.bgmVolume, audio.customBgmUrl, isMuted]);
+
+  const narrationFresh = isNarrationTrackFresh(audio, clips, resolveTtsApi(settings.customTtsApi));
+
+  useEffect(() => {
+    if (narrationFresh && audio.narrationTrack?.audioUrl) {
+      audioEngine.ensureFullNarration(audio.narrationTrack.audioUrl, audio.voiceoverVolume ?? 0.95);
+    } else {
+      audioEngine.stopFullNarration();
+    }
+  }, [narrationFresh, audio.narrationTrack?.audioUrl, audio.voiceoverVolume]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      audioEngine.stopNarration();
+      activeClipIndexRef.current = -1;
+    }
+  }, [isPlaying]);
+
+  useEffect(() => {
+    return () => {
+      audioEngine.stopFullNarration();
+    };
+  }, []);
 
   // Determine active clip given a time
   const getClipAtTime = useCallback((time: number) => {
@@ -115,8 +148,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     return null;
   }, [clips]);
 
-  // Main 60 FPS Render Loop
-  const renderCanvas = useCallback(() => {
+  const renderCanvas = useCallback((time: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -136,23 +168,11 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     }
     ctx.fillRect(0, 0, width, height);
 
-    const currentInfo = getClipAtTime(currentTime);
+    const currentInfo = getClipAtTime(time);
     if (!currentInfo || !currentInfo.clip) return;
 
     const { clip, index, clipTime, clipDuration } = currentInfo;
     const progress = Math.min(1, Math.max(0, clipTime / clipDuration));
-
-    // Handle voiceover triggering at start of clip during playback
-    if (isPlaying && activeClipIndexRef.current !== index) {
-      activeClipIndexRef.current = index;
-      if (audio.voiceoverEnabled && !isMuted && clip.narration) {
-        audioEngine.speakNarration(
-          clip.narration,
-          audio.voiceCharacter,
-          audio.speechRate
-        );
-      }
-    }
 
     // Draw image with Ken Burns Camera Motion
     const img = clip.imageUrl ? loadedImagesRef.current.get(clip.imageUrl) : null;
@@ -245,7 +265,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     ctx.fillRect(0, 0, width, height);
 
     // Draw Subtitles on Canvas
-    if (subtitles.enabled && clip.narration) {
+    if (subtitles.enabled && clipShotNarration(clip)) {
       drawSubtitles(ctx, width, height, clip, subtitles, progress);
     }
 
@@ -254,7 +274,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
       drawSafeZones(ctx, width, height);
     }
 
-  }, [clips, subtitles, audio, settings, currentTime, isPlaying, isMuted, getClipAtTime]);
+  }, [clips, subtitles, settings, getClipAtTime]);
 
   // Subtitle drawing function with smart multi-line anti-overflow layout
   const drawSubtitles = (
@@ -273,7 +293,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     // Calculate smart multi-line layout
     const layout = calculateSubtitleLayout(
       ctx,
-      clip.narration,
+      clipShotNarration(clip),
       clip.secondaryText,
       w,
       baseFontSize,
@@ -373,30 +393,104 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     ctx.restore();
   };
 
-  // Animation Frame Loop
   useEffect(() => {
-    let animId: number;
+    if (isPlaying) {
+      if (Math.abs(currentTime - timeRef.current) > 0.35) {
+        timeRef.current = currentTime;
+        audioEngine.requestNarrationSeek();
+      }
+      return;
+    }
+    timeRef.current = currentTime;
+    audioEngine.requestNarrationSeek();
+  }, [currentTime, isPlaying]);
 
+  useEffect(() => {
+    if (wasPlayingRef.current && !isPlaying) {
+      onTimeUpdate(timeRef.current);
+    }
+    if (!wasPlayingRef.current && isPlaying) {
+      lastTimeRef.current = performance.now();
+      audioEngine.requestNarrationSeek();
+    }
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying, onTimeUpdate]);
+
+  const syncNarrationAt = useCallback((time: number, playing: boolean) => {
+    if (isMuted || !audio.voiceoverEnabled) {
+      audioEngine.syncFullNarration(0, false, true, 0);
+      return;
+    }
+    if (narrationFresh && audio.narrationTrack) {
+      const mapped = mapTimelineToNarration(time, clips, audio.narrationTrack);
+      audioEngine.syncFullNarration(
+        mapped.audioTime,
+        playing,
+        mapped.frozen,
+        audio.voiceoverVolume ?? 0.95
+      );
+      return;
+    }
+    const hasLinkedVoiceover = clips.some((item) => item.voRole === 'continue');
+    if (hasLinkedVoiceover) {
+      audioEngine.stopNarration();
+      return;
+    }
+    const info = getClipAtTime(time);
+    if (playing && info && activeClipIndexRef.current !== info.index) {
+      activeClipIndexRef.current = info.index;
+      if (info.clip.narration) {
+        audioEngine.speakNarration(info.clip.narration, audio.voiceCharacter, audio.speechRate);
+      }
+    }
+  }, [audio, clips, getClipAtTime, isMuted, narrationFresh]);
+
+  useEffect(() => {
+    lastTimeRef.current = performance.now();
     const tick = (now: number) => {
-      const delta = (now - lastTimeRef.current) / 1000;
+      const delta = Math.min(0.08, Math.max(0, (now - lastTimeRef.current) / 1000));
       lastTimeRef.current = now;
 
       if (isPlaying) {
-        onTimeUpdate(Math.min(totalDuration, currentTime + delta));
-        if (currentTime >= totalDuration) {
-          // Loop or stop
-          onTimeUpdate(0);
-          activeClipIndexRef.current = -1;
+        let next = timeRef.current + delta;
+        if (narrationFresh && audio.narrationTrack && audio.voiceoverEnabled && !isMuted) {
+          const mapped = mapTimelineToNarration(timeRef.current, clips, audio.narrationTrack);
+          audioEngine.syncFullNarration(
+            mapped.audioTime,
+            !mapped.frozen,
+            mapped.frozen,
+            audio.voiceoverVolume ?? 0.95
+          );
+          const audioTime = audioEngine.getFullNarrationTime();
+          if (!mapped.frozen && audioTime != null && !audioEngine.isFullNarrationPaused()) {
+            next = mapNarrationToTimeline(audioTime, clips, audio.narrationTrack);
+          }
+        } else {
+          syncNarrationAt(next, true);
         }
+        if (next >= totalDuration) {
+          next = 0;
+          activeClipIndexRef.current = -1;
+          audioEngine.requestNarrationSeek();
+        }
+        timeRef.current = next;
+        if (now - lastUiPushRef.current >= 50) {
+          lastUiPushRef.current = now;
+          onTimeUpdate(next);
+        }
+      } else {
+        syncNarrationAt(timeRef.current, false);
       }
 
-      renderCanvas();
-      animId = requestAnimationFrame(tick);
+      renderCanvas(timeRef.current);
+      animationFrameRef.current = requestAnimationFrame(tick);
     };
 
-    animId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animId);
-  }, [isPlaying, currentTime, totalDuration, onTimeUpdate, renderCanvas]);
+    animationFrameRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    };
+  }, [isPlaying, totalDuration, onTimeUpdate, renderCanvas, syncNarrationAt, narrationFresh, audio, clips, isMuted]);
 
   // Format Time (00:00:00 \ 00:08:00)
   const formatTimecode = (sec: number) => {
@@ -420,6 +514,24 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   };
 
   const aspect = getAspectDimensions();
+
+  const handlePreviewPlayToggle = () => {
+    if (!isPlaying) {
+      if (isGeneratingNarration) {
+        showStatusToast('旁白还在合成，画面可以先看', { tone: 'warn', id: 'narration-play' });
+      } else if (!narrationFresh) {
+        showStatusToast(
+          narrationError
+            ? `旁白失败：${narrationError}`
+            : audio.narrationTrack
+              ? '旁白需重生成，预览暂无声'
+              : '还没配音，预览暂无声',
+          { tone: narrationError ? 'error' : 'warn', id: 'narration-play' }
+        );
+      }
+    }
+    onTogglePlay();
+  };
 
   // Fullscreen handler
   const toggleFullscreen = () => {
@@ -447,7 +559,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
           ref={canvasRef}
           width={aspect.width}
           height={aspect.height}
-          onClick={onTogglePlay}
+          onClick={handlePreviewPlayToggle}
           className="w-full h-full object-contain cursor-pointer"
         />
 
@@ -455,7 +567,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
         {!isPlaying && (
           <button
             id="btn-stage-play"
-            onClick={onTogglePlay}
+            onClick={handlePreviewPlayToggle}
             className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-black/60 hover:bg-amber-500/90 text-white hover:text-black border border-white/20 flex items-center justify-center shadow-2xl backdrop-blur-md transition-all cursor-pointer transform hover:scale-110 active:scale-95"
           >
             <Play className="w-7 h-7 fill-current ml-1" />
@@ -466,7 +578,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
         <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between px-3.5 py-2 rounded-xl bg-black/70 backdrop-blur-md border border-white/10 text-white text-xs opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity duration-300">
           <div className="flex items-center gap-3">
             <button
-              onClick={onTogglePlay}
+              onClick={handlePreviewPlayToggle}
               className="p-1 hover:text-amber-400 cursor-pointer transition-colors"
             >
               {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current" />}

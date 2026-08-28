@@ -1,4 +1,7 @@
-import { BGM_TRACKS } from './presets';
+import { CustomTtsApiConfig } from '../types';
+import { DEFAULT_BGM_TRACK_ID, bgmById, resolveBgmTrackId } from './presets';
+import { ttsSourceKey } from './ttsCatalog';
+import { getTtsPreviewUrl, makeVoicePreviewKey, setTtsPreviewUrl } from './ttsPreviewCache';
 
 export type AudioPreviewListener = (previewTrackId: string | null) => void;
 
@@ -26,6 +29,10 @@ class AudioEngine {
   private ttsCache: Map<string, string> = new Map();
   private audioDuckingEnabled: boolean = true;
   private duckingAnimFrame: number | null = null;
+  private ttsApi: unknown = null;
+  private fullNarrationAudio: HTMLAudioElement | null = null;
+  private fullNarrationUrl: string | null = null;
+  private narrationForceSeek = false;
 
   private previewListeners: Set<AudioPreviewListener> = new Set();
 
@@ -74,6 +81,10 @@ class AudioEngine {
     if (!enabled && this.isDucking) {
       this.applyDucking(false);
     }
+  }
+
+  public setTtsApi(api: unknown) {
+    this.ttsApi = api;
   }
 
   public setBgmVolume(volume: number) {
@@ -126,17 +137,17 @@ class AudioEngine {
    * Start or resume BGM for video timeline playback
    */
   public startBgm(trackId: string, volume: number = 0.10, customUrl?: string) {
-    const session = ++this.bgmSessionToken;
-
-    // When starting video timeline playback, make sure standalone preview is stopped
+    // Stop old BGM/preview first. stopBgm() bumps the session so in-flight
+    // play() callbacks from the previous track cannot resurrect it.
     this.stopPreviewBgm();
     this.stopBgm();
+    const session = this.bgmSessionToken;
 
     this.currentTrackId = trackId;
     this.currentBgmVolume = Math.max(0, Math.min(1, volume));
 
-    const trackDef = BGM_TRACKS.find(t => t.id === trackId);
-    const audioSrc = customUrl || (trackDef ? trackDef.url : '/audio/bgm/epic-cinematic.mp3');
+    const trackDef = bgmById(resolveBgmTrackId(trackId));
+    const audioSrc = customUrl || trackDef?.url || `/audio/bgm/${DEFAULT_BGM_TRACK_ID}.mp3`;
 
     try {
       const audio = new Audio();
@@ -200,10 +211,11 @@ class AudioEngine {
     customUrl?: string, 
     onEnd?: () => void
   ) {
-    const session = ++this.previewSessionToken;
-
-    // 1. Instantly tear down any previous preview and narration
+    // Tear down any previous preview first, then adopt that session.
+    // Incrementing *before* stopPreviewBgm() made onended/error handlers
+    // treat the brand-new preview as stale.
     this.stopPreviewBgm();
+    const session = this.previewSessionToken;
     this.stopNarration();
 
     // 2. Also pause timeline BGM while previewing so there is zero audio cacophony
@@ -216,8 +228,8 @@ class AudioEngine {
     }
 
     this.notifyPreviewState(trackId);
-    const trackDef = BGM_TRACKS.find(t => t.id === trackId);
-    const audioSrc = customUrl || (trackDef ? trackDef.url : '/audio/bgm/epic-cinematic.mp3');
+    const trackDef = bgmById(resolveBgmTrackId(trackId));
+    const audioSrc = customUrl || trackDef?.url || `/audio/bgm/${DEFAULT_BGM_TRACK_ID}.mp3`;
 
     try {
       const audio = new Audio();
@@ -319,13 +331,15 @@ class AudioEngine {
     text: string, 
     character: string = 'magnetic-male', 
     rate: number = 1.0, 
-    onEnd?: () => void
-  ) {
-    const session = ++this.voiceSessionToken;
+    onEnd?: () => void,
+    opts?: { persistPreview?: boolean }
+  ): Promise<{ fromCache: boolean }> {
+    this.stopFullNarration();
     this.stopNarration();
+    const session = this.voiceSessionToken;
     if (!text || !text.trim()) {
       if (onEnd) onEnd();
-      return;
+      return { fromCache: false };
     }
 
     // Apply audio ducking on BGM
@@ -337,10 +351,16 @@ class AudioEngine {
       if (onEnd) onEnd();
     };
 
-    const cacheKey = `${character}_${rate}_${text.trim()}`;
+    const persistPreview = Boolean(opts?.persistPreview);
+    const sourceKey = ttsSourceKey(this.ttsApi as CustomTtsApiConfig | undefined, character);
+    const previewKey = makeVoicePreviewKey(sourceKey, persistPreview ? 1 : rate);
+    const cacheKey = persistPreview ? previewKey : `${sourceKey}|${rate}|${text.trim()}`;
     let audioUrl = this.ttsCache.get(cacheKey);
+    if (!audioUrl && persistPreview) {
+      audioUrl = getTtsPreviewUrl(previewKey) || undefined;
+    }
+    const fromCache = Boolean(audioUrl);
 
-    // Try fetching from Edge Neural TTS API
     if (!audioUrl) {
       try {
         const res = await fetch('/api/audio/tts', {
@@ -349,25 +369,27 @@ class AudioEngine {
           body: JSON.stringify({
             text: text.trim(),
             character,
-            rate
+            rate: persistPreview ? 1 : rate,
+            ttsApi: this.ttsApi
           })
         });
 
-        if (this.voiceSessionToken !== session) return;
+        if (this.voiceSessionToken !== session) return { fromCache: false };
 
         if (res.ok) {
           const data = await res.json();
           if (data && data.audioUrl) {
             audioUrl = data.audioUrl;
             this.ttsCache.set(cacheKey, audioUrl);
+            if (persistPreview) setTtsPreviewUrl(previewKey, audioUrl);
           }
         }
       } catch (err) {
-        console.warn('Edge TTS request failed, fallback to WebSpeech:', err);
+        console.warn('TTS request failed, fallback to WebSpeech:', err);
       }
     }
 
-    if (this.voiceSessionToken !== session) return;
+    if (this.voiceSessionToken !== session) return { fromCache: false };
 
     // Play high-quality neural voice if retrieved
     if (audioUrl) {
@@ -391,17 +413,18 @@ class AudioEngine {
         };
 
         await audio.play();
-        return;
+        return { fromCache };
       } catch (playErr) {
-        if (this.voiceSessionToken !== session) return;
+        if (this.voiceSessionToken !== session) return { fromCache: false };
         console.warn('Audio element play failed, falling back:', playErr);
       }
     }
 
-    if (this.voiceSessionToken !== session) return;
+    if (this.voiceSessionToken !== session) return { fromCache: false };
 
     // Fallback: Web Speech API
     this.fallbackWebSpeech(text, character, rate, handleVoiceEnd);
+    return { fromCache: false };
   }
 
   private fallbackWebSpeech(
@@ -473,6 +496,73 @@ class AudioEngine {
         // ignore
       }
     }
+  }
+
+  public ensureFullNarration(url: string, volume: number) {
+    if (this.fullNarrationUrl === url && this.fullNarrationAudio) {
+      this.fullNarrationAudio.volume = Math.max(0, Math.min(1, volume));
+      return;
+    }
+    this.stopFullNarration();
+    const audio = new Audio();
+    audio.preload = 'auto';
+    audio.src = url;
+    audio.volume = Math.max(0, Math.min(1, volume));
+    this.fullNarrationAudio = audio;
+    this.fullNarrationUrl = url;
+    this.narrationForceSeek = true;
+  }
+
+  public requestNarrationSeek() {
+    this.narrationForceSeek = true;
+  }
+
+  public getFullNarrationTime(): number | null {
+    const audio = this.fullNarrationAudio;
+    if (!audio || !Number.isFinite(audio.currentTime)) return null;
+    return audio.currentTime;
+  }
+
+  public isFullNarrationPaused(): boolean {
+    return !this.fullNarrationAudio || this.fullNarrationAudio.paused;
+  }
+
+  public syncFullNarration(audioTime: number, playing: boolean, frozen: boolean, volume: number) {
+    const audio = this.fullNarrationAudio;
+    if (!audio) return;
+
+    audio.volume = Math.max(0, Math.min(1, volume));
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Math.max(audioTime, 0.01);
+    const safeTime = Math.max(0, Math.min(duration, audioTime));
+    const drift = Math.abs((audio.currentTime || 0) - safeTime);
+    const forceSeek = this.narrationForceSeek;
+    this.narrationForceSeek = false;
+
+    if (!playing || frozen) {
+      if (!audio.paused) {
+        try { audio.pause(); } catch { /* ignore */ }
+      }
+      if (forceSeek || drift > 0.22) {
+        try { audio.currentTime = safeTime; } catch { /* ignore seek errors */ }
+      }
+      this.applyDucking(false);
+      return;
+    }
+
+    this.applyDucking(this.audioDuckingEnabled);
+    if (forceSeek || audio.paused || drift > 0.6) {
+      try { audio.currentTime = safeTime; } catch { /* ignore seek errors */ }
+    }
+    if (audio.paused) {
+      audio.play().catch(() => {});
+    }
+  }
+
+  public stopFullNarration() {
+    this.applyDucking(false);
+    this.teardownAudio(this.fullNarrationAudio);
+    this.fullNarrationAudio = null;
+    this.fullNarrationUrl = null;
   }
 }
 
