@@ -26,6 +26,7 @@ import {
 import { resolveImageApi } from '../utils/presets';
 import { generateProceduralArtwork } from '../utils/visualGenerator';
 import { buildVisualPrompt, presetStylePack } from '../utils/stylePack';
+import { newClipId } from '../utils/narrationTrack';
 import { ToolRail } from './ToolRail';
 import { StoryboardClipCard } from './StoryboardClipCard';
 
@@ -106,8 +107,9 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
 
         const data = await res.json().catch(() => ({}));
         if (data?.shots && Array.isArray(data.shots) && data.shots.length > 0) {
+          const usedIds = new Set<string>();
           const newClips: StoryboardClip[] = data.shots.map((shot: any, index: number) => ({
-            id: `clip-${Date.now()}-${index}`,
+            id: newClipId(index, usedIds),
             order: index + 1,
             duration: typeof shot.duration === 'number' ? shot.duration : Number(shot.duration) || 3.5,
             narration: shot.narration,
@@ -154,11 +156,12 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       const cameraMotions: CameraMotion[] = ['zoom-in', 'pan-left', 'zoom-out', 'pan-right', 'tilt-up', 'cinematic-orbit'];
       const transitions: TransitionType[] = ['crossfade', 'slide-left', 'crossfade', 'fade-black', 'zoom-in'];
 
+      const usedIds = new Set<string>();
       const newClips: StoryboardClip[] = safeChunks.map((chunk, idx) => {
         const charCount = chunk.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').length;
         const duration = Math.max(2.5, Math.min(7.0, Math.round((charCount / 4.2) * 10) / 10 || 3.5));
         return {
-          id: `clip-${Date.now()}-${idx}`,
+          id: newClipId(idx, usedIds),
           order: idx + 1,
           duration,
           narration: chunk,
@@ -296,11 +299,11 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
   };
 
   const handleAddClip = () => {
-    const newClipId = `clip-${Date.now()}`;
+    const addedId = newClipId(clips.length);
     onClipsChange(prev => {
       const newOrder = prev.length + 1;
       const newClip: StoryboardClip = {
-        id: newClipId,
+        id: addedId,
         order: newOrder,
         duration: 3.5,
         narration: `镜头 ${newOrder}：请在此输入旁白与画面描述`,
@@ -313,7 +316,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       };
       return [...prev, newClip];
     });
-    onSelectClip(newClipId);
+    onSelectClip(addedId);
   };
 
   const handleDeleteClip = (clipId: string, e: React.MouseEvent) => {
@@ -556,7 +559,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
             <div className="space-y-2">
               {clips.map((clip, index) => (
                 <StoryboardClipCard
-                  key={clip.id}
+                  key={`${clip.id}-${index}`}
                   clip={clip}
                   index={index}
                   total={clips.length}

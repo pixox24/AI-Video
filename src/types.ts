@@ -94,12 +94,16 @@ export interface StoryboardClip {
   voRole?: 'start' | 'continue';
   voSlice?: string;
   holdPinned?: boolean;
+  characterIds?: string[];
+  locationId?: string;
+  continuity?: VisualContinuity;
 }
 
 export interface SubtitleConfig {
   enabled: boolean;
   preset: SubtitlePreset;
   fontSize: number; // 18 - 48
+  fontId?: string;
   fontFamily: string;
   positionY: number; // percentage from top, e.g., 82%
   primaryColor: string;
@@ -280,6 +284,61 @@ export type BeatFunction = 'hook' | 'setup' | 'turn' | 'proof' | 'reveal' | 'cta
 export type ShotEnergy = 'fast' | 'medium' | 'slow' | 'hold';
 export type DirectorNoteLevel = 'info' | 'warn' | 'block';
 export type ScriptGate = 'fast' | 'deep';
+export type VisualBibleMode = 'story' | 'expository';
+export type VisualContinuity = 'same-space' | 'same-subject' | 'contrast' | 'callback' | 'new-info';
+export type VisualCharacterRole = 'lead' | 'support' | 'extra';
+export type VisualCharacterRefKind = 'none' | 'sheet' | 'face' | 'turnaround';
+
+export interface VisualCharacterRef {
+  imageId: string;
+  imageUrl?: string;
+  thumbDataUrl?: string;
+  kind: VisualCharacterRefKind;
+  notes?: string;
+}
+
+export interface VisualCharacter {
+  id: string;
+  name: string;
+  role: VisualCharacterRole;
+  ageBand: string;
+  look: string;
+  wardrobe: string;
+  signature?: string;
+  locked: boolean;
+  refs: VisualCharacterRef[];
+  seedHint?: string;
+}
+
+export interface VisualLocation {
+  id: string;
+  name: string;
+  look: string;
+  timeOfDay: string;
+  locked: boolean;
+  refs: VisualCharacterRef[];
+}
+
+export interface VisualMotif {
+  id: string;
+  name: string;
+  look: string;
+  appearsIn: Array<'hook' | 'reveal' | 'cta' | 'any'>;
+}
+
+export interface VisualBible {
+  version: 1;
+  mode: VisualBibleMode;
+  logline: string;
+  paletteLock: string;
+  characters: VisualCharacter[];
+  locations: VisualLocation[];
+  motif: VisualMotif | null;
+  continuityRule: string;
+  sourceHash: string;
+  pinned?: boolean;
+  generatedAt: number;
+}
 
 export type NarrativeStructure = 'myth_busting' | 'problem_solution' | 'story' | 'tutorial' | 'contrast' | 'reveal';
 export type ResearchBladeId = 'competitor' | 'audience' | 'fact' | 'visual';
@@ -398,6 +457,9 @@ export interface ForecastShot {
   visualCount?: number;
   voRole?: 'start' | 'continue';
   sliceText?: string;
+  characterIds?: string[];
+  locationId?: string;
+  continuity?: VisualContinuity;
 }
 
 export interface DirectorNote {
@@ -438,6 +500,7 @@ export interface ScriptWorkspace {
   conceptMix: ConceptMix;
   genrePackId: ScriptGenre | null;
   hookPreviewUrl?: string;
+  visualBible?: VisualBible | null;
 }
 
 export interface VideoProject {

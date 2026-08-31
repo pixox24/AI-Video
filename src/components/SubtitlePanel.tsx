@@ -1,14 +1,135 @@
-import React from 'react';
-import { Subtitles, Sparkles, Type, AlignCenter, Eye, ShieldAlert } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Subtitles, Sparkles, Type, ChevronDown } from 'lucide-react';
 import { SubtitleConfig, SubtitlePreset } from '../types';
 import { ToolRail } from './ToolRail';
+import { showStatusToast } from '../utils/statusToast';
+import {
+  STUDIO_FONTS,
+  StudioFont,
+  fontFamilyStack,
+  isStudioFontReady,
+  loadStudioFont,
+  resolveSubtitleFontId,
+  studioFontById,
+  subscribeStudioFonts
+} from '../utils/subtitleFonts';
 
 interface SubtitlePanelProps {
   config: SubtitleConfig;
   onChange: (config: SubtitleConfig) => void;
 }
 
+const FONT_PREVIEW_TEXT = '这是当前字幕字体';
+
+function FontSpecimenCard({
+  font,
+  active = false,
+  pickerOpen = false,
+  onClick,
+  ariaExpanded,
+  ariaControls
+}: {
+  font: StudioFont;
+  active?: boolean;
+  pickerOpen?: boolean;
+  onClick: () => void;
+  ariaExpanded?: boolean;
+  ariaControls?: string;
+}) {
+  const ready = isStudioFontReady(font.id);
+  return (
+    <button
+      id={`subtitle-font-${font.id}`}
+      type="button"
+      onClick={onClick}
+      aria-expanded={ariaExpanded}
+      aria-controls={ariaControls}
+      className={`w-full text-left rounded-xl border overflow-hidden cursor-pointer transition-all ${
+        active
+          ? 'bg-[#252530] border-amber-500 ring-1 ring-amber-500/40'
+          : 'bg-[#1b1b22] border-[#292934] hover:border-[#3d3d4e] hover:bg-[#1f1f28]'
+      }`}
+    >
+      <div className="px-2.5 pt-2 pb-1.5 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-medium text-zinc-200 truncate">{font.name}</span>
+            {active && (
+              <span className="flex-shrink-0 px-1.5 py-0.2 text-[9px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded">
+                当前使用
+              </span>
+            )}
+          </div>
+          <p className="text-[10px] text-zinc-500 truncate mt-0.5">{font.desc}</p>
+        </div>
+        {active && (
+          <span className="flex-shrink-0 flex items-center gap-1 text-[10px] text-amber-300 pt-0.5">
+            {pickerOpen ? '收起' : '更换'}
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${pickerOpen ? 'rotate-180' : ''}`} />
+          </span>
+        )}
+      </div>
+      <div className="mx-2 mb-2 rounded-lg bg-black/40 border border-white/5 px-3 py-3">
+        <p
+          className={`text-zinc-50 leading-relaxed ${active ? 'text-[22px]' : 'text-[20px]'}`}
+          style={ready ? { fontFamily: fontFamilyStack(font) } : undefined}
+        >
+          {ready ? FONT_PREVIEW_TEXT : '正在载入字体…'}
+        </p>
+      </div>
+    </button>
+  );
+}
+
 export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange }) => {
+  const [, setFontTick] = useState(0);
+  const [fontPickerOpen, setFontPickerOpen] = useState(false);
+  const selectedFontId = resolveSubtitleFontId(config);
+  const selectedFont = studioFontById(selectedFontId);
+  const otherFonts = STUDIO_FONTS.filter((font) => font.id !== selectedFontId);
+
+  useEffect(() => {
+    const unsubscribe = subscribeStudioFonts(() => setFontTick((tick) => tick + 1));
+    void loadStudioFont(selectedFontId);
+    return unsubscribe;
+  }, [selectedFontId]);
+
+  useEffect(() => {
+    if (!fontPickerOpen) return;
+    STUDIO_FONTS.forEach((font) => {
+      if (font.id === selectedFontId) return;
+      void loadStudioFont(font.id);
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setFontPickerOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [fontPickerOpen, selectedFontId]);
+
+  const handleSelectFont = (fontId: string) => {
+    const font = studioFontById(fontId);
+    setFontPickerOpen(false);
+    if (font.id === selectedFontId) return;
+    onChange({
+      ...config,
+      fontId: font.id,
+      fontFamily: fontFamilyStack(font)
+    });
+    if (!font.url || isStudioFontReady(font.id)) {
+      showStatusToast(`已切换字幕字体：${font.name}`, { tone: 'ok', id: 'subtitle-font' });
+      return;
+    }
+    showStatusToast('正在载入字幕字体…', { tone: 'progress', id: 'subtitle-font', durationMs: 0 });
+    void loadStudioFont(font.id).then((ok) => {
+      if (ok) {
+        showStatusToast(`已切换字幕字体：${font.name}`, { tone: 'ok', id: 'subtitle-font' });
+      } else {
+        showStatusToast(`字体载入失败：${font.name}，预览暂用系统字体`, { tone: 'error', id: 'subtitle-font' });
+      }
+    });
+  };
+
   const presets: { id: SubtitlePreset; name: string; desc: string; sampleColor: string }[] = [
     { id: 'viral-yellow', name: '抖音爆款黄白', desc: '白字搭配明黄重点，高停留率', sampleColor: 'text-amber-400' },
     { id: 'cinematic-bilingual', name: '电影双语大片', desc: '中英双语优雅排版，高级院线感', sampleColor: 'text-sky-400' },
@@ -139,6 +260,47 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange }
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-zinc-400 font-medium flex items-center gap-1.5">
+              <Type className="w-3.5 h-3.5 text-amber-400" />
+              字幕字体
+            </label>
+            <span className="text-[10px] text-zinc-500">{STUDIO_FONTS.length} 款</span>
+          </div>
+
+          <FontSpecimenCard
+            font={selectedFont}
+            active
+            pickerOpen={fontPickerOpen}
+            onClick={() => setFontPickerOpen((open) => !open)}
+            ariaExpanded={fontPickerOpen}
+            ariaControls="subtitle-font-picker"
+          />
+
+          <div
+            id="subtitle-font-picker"
+            className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+              fontPickerOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+            }`}
+          >
+            <div className="overflow-hidden" aria-hidden={!fontPickerOpen} inert={!fontPickerOpen}>
+              <div className="space-y-1.5 pt-0.5">
+                <p className="text-[10px] text-zinc-500 px-0.5">点选即用，选完自动收起</p>
+                <div className="max-h-72 overflow-y-auto space-y-2 pr-0.5 custom-scrollbar">
+                  {otherFonts.map((font) => (
+                    <FontSpecimenCard
+                      key={font.id}
+                      font={font}
+                      onClick={() => handleSelectFont(font.id)}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

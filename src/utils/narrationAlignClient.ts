@@ -3,6 +3,7 @@ import { blobToDataUrl, concatAudioBuffers, decodeAudioUrl, encodeWavPcm16 } fro
 import {
   applyNarrationTimingsToClips,
   detectSpeechBounds,
+  ensureUniqueClipIds,
   findEnergyCutTimes,
   layoutUtteranceClips,
   partitionSpeechText,
@@ -21,7 +22,7 @@ export async function assembleAlignedNarration(
   sourceClips: StoryboardClip[],
   segments: UtteranceSegment[]
 ) {
-  const clips = repairClipSlices(sourceClips);
+  const clips = ensureUniqueClipIds(repairClipSlices(sourceClips));
   const utterances = utterancesFromClips(clips);
   if (utterances.length === 0) {
     throw new Error('没有可对齐的旁白句');

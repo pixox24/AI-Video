@@ -14,8 +14,16 @@ import {
   normalizeInferredPack,
   styleContractForPrompt
 } from "./src/utils/stylePack";
-import type { StylePack } from "./src/types";
+import type { ScriptGenre, StylePack, VisualBible } from "./src/types";
 import { joinClipsForTts as joinClipsForTtsShared, utterancesFromClips } from "./src/utils/narrationTrack";
+import {
+  bibleContractForPrompt,
+  bibleSourceHash,
+  fallbackVisualBible,
+  mergeVisualBible,
+  normalizeVisualBible,
+  visualBibleModeForGenre
+} from "./src/utils/visualBible";
 
 function incomingStyleContract(raw: unknown): string {
   if (raw && typeof raw === "object" && (raw as StylePack).world && (raw as StylePack).render) {
@@ -1235,6 +1243,8 @@ app.post("/api/script/draft", async (req, res) => {
 - 最后一拍 function 必须是 cta 或 reveal
 - visualIntent 必须写看得见的因果，禁止「很有氛围」「电影感」
 - visualIntent 必须服从下面的美术世界契约（服饰、道具、建筑、时代）
+- 若体裁是故事或情绪：visualIntent 必须反复画同一个可指认的人（发型+服装锁定），优先待在同一空间；收束拍回收钩子的构图或物件。不要每拍换主角。
+- 若体裁是科普/教程/带货/反常识：允许按句图解，但色板和道具材质保持一致。
 - 不要改口播去迁就风格
 - beats 4 到 8 个，优先按体裁包节拍：${beatPlan || "hook → setup → turn → proof → cta"}
 - energy 只能是 fast / medium / slow / hold
@@ -1460,7 +1470,7 @@ whyThisWorks 必须点名调研里的一条。`;
 });
 
 app.post("/api/script/split-spans", async (req, res) => {
-  const { narration, llmApi } = req.body || {};
+  const { narration, llmApi, visualBible, genre } = req.body || {};
   const text = String(narration || "").trim();
   if (!text) {
     return res.status(400).json({ error: "narration is required" });
@@ -1473,6 +1483,9 @@ app.post("/api/script/split-spans", async (req, res) => {
 - 一句默认 1 张图；只有新主体/对照翻转才 2 张；最多 3 张。
 - startRatio/endRatio 覆盖 0 到 1，sliceText 必须是互不重复的前后两截，合起来等于该句。禁止两张图都写成后半句。
 - visualIntent 写看得见的画面，不要写情绪形容词。
+- 若下面有画面圣经：叙事型必须反复使用圣经里的角色和场景；说明型只锁色板，允许图解。
+
+${bibleContractForPrompt(normalizeVisualBible(visualBible, visualBibleModeForGenre(genre)))}
 
 【口播】
 ${text}
@@ -1494,6 +1507,71 @@ function 只能是 hook/setup/turn/proof/reveal/cta。energy 只能是 fast/medi
     console.warn("[Split Spans] LLM failed:", error?.message || error);
   }
   return res.json({ spans: [] });
+});
+
+app.post("/api/script/visual-bible", async (req, res) => {
+  const { narration, genre, title, stylePack, llmApi, previousBible } = req.body || {};
+  const text = String(narration || "").trim();
+  if (!text) {
+    return res.status(400).json({ error: "narration is required" });
+  }
+  const mode = visualBibleModeForGenre(genre as ScriptGenre);
+  const styleContract = incomingStyleContract(stylePack);
+  const prev = normalizeVisualBible(previousBible, mode);
+  const prompt = mode === "story"
+    ? `根据整段口播，编译一份短视频「画面圣经 VisualBible」。这不是风格滤镜，是故事里有谁、在哪、什么会回来。
+硬规则：
+- 角色 1 到 2 个。lead 必须可被指认：年龄段、发型、体态、服装。禁止只写性格。
+- 场景 1 到 2 个。全片优先待在这些空间，不要每句换地方。
+- 若口播有会回来的物件，写 motif；没有就 motif=null。
+- refs 必须是空数组（脸部参考图下一阶段才接）。seedHint 可空。
+- locked 一律 false。
+- look / wardrobe 必须是看得见的，服从下面的美术世界（时代与服饰语言）。
+- 不要改口播。
+
+${styleContract}
+
+【体裁】${genre || "故事"}
+【题目】${title || ""}
+【口播】
+${text}
+
+只输出 JSON：{"mode":"story","logline":"","paletteLock":"","characters":[{"id":"char-lead","name":"","role":"lead","ageBand":"","look":"","wardrobe":"","signature":"","locked":false,"refs":[]}],"locations":[{"id":"loc-1","name":"","look":"","timeOfDay":"","locked":false,"refs":[]}],"motif":null,"continuityRule":"同一人同一空间推进；对照才换主体；收束回收开场"}`
+    : `根据整段口播，编译说明型短视频的画面约束。不要硬编主角连续剧。
+- mode 必须是 expository
+- characters 通常为空；只有口播明显反复同一讲解者才给 1 个
+- locations 可空
+- paletteLock 必填：同一色温/材质
+- refs 必须是 [] 
+
+${styleContract}
+
+【体裁】${genre || "科普"}
+【口播】
+${text}
+
+只输出 JSON：{"mode":"expository","logline":"","paletteLock":"","characters":[],"locations":[],"motif":null,"continuityRule":"色板和道具材质保持一致，允许按句图解"}`;
+
+  try {
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你只输出合法 JSON。画面圣经是可钉的约束，不是散文。refs 必须是空数组。",
+      user: prompt,
+      temperature: 0.35
+    });
+    const normalized = normalizeVisualBible(parsed, mode);
+    const incoming = normalized && (normalized.characters.length > 0 || normalized.mode === "expository" || normalized.paletteLock)
+      ? { ...normalized, sourceHash: bibleSourceHash(text, genre, mode), generatedAt: Date.now() }
+      : fallbackVisualBible({ narration: text, genre, title });
+    const merged = mergeVisualBible(prev, incoming);
+    return res.json({ bible: merged });
+  } catch (error: any) {
+    console.warn("[Visual Bible] fallback:", error?.message || error);
+    return res.json({
+      bible: mergeVisualBible(prev, fallbackVisualBible({ narration: text, genre, title })),
+      fallback: true
+    });
+  }
 });
 
 // 2.1 Polish, Rewrite, or Expand single narration/prompt with LLM
@@ -1839,7 +1917,7 @@ app.post("/api/style/infer", async (req, res) => {
 });
 
 app.post("/api/style/rewrite-shots", async (req, res) => {
-  const { clips, stylePack, llmApi } = req.body || {};
+  const { clips, stylePack, llmApi, visualBible } = req.body || {};
   const pack = stylePack && typeof stylePack === "object" ? (stylePack as StylePack) : PRESET_STYLE_PACKS.cinematic;
   const list = Array.isArray(clips) ? clips : [];
   if (list.length === 0) {
@@ -1864,7 +1942,8 @@ app.post("/api/style/rewrite-shots", async (req, res) => {
 
   const prompt = `${styleContractForPrompt(pack)}
 
-请把下面每一镜的画面改写：保留口播因果和该镜自己的主体。若上文是风格基因，只迁移视觉系统，不要把剥掉的内容写进任何一镜。若上文是美术世界，则服从世界契约。不要改口播。
+请把下面每一镜的画面改写：保留口播因果。若上文是风格基因，只迁移视觉系统，不要把剥掉的内容写进任何一镜。若上文是美术世界，则服从世界契约。若有画面圣经：叙事型必须反复使用同一角色卡和场景卡，收束回收开场；说明型只锁色板。不要改口播。
+${bibleContractForPrompt(normalizeVisualBible(visualBible))}
 ${shotLines}
 
 只输出 JSON：{"shots":[{"id":string,"chineseVisualPrompt":string,"visualPrompt":string}]}`;
@@ -1911,9 +1990,34 @@ ${shotLines}
   return res.json({ ok: true, shots: fallback(), fallback: true });
 });
 
+app.post("/api/assets/image", (req, res) => {
+  const dataUrl = String(req.body?.dataUrl || "").trim();
+  const prefix = String(req.body?.prefix || "asset").replace(/[^a-z0-9-]/gi, "").slice(0, 24) || "asset";
+  const match = dataUrl.match(/^data:([^;]+);base64,([\s\S]+)$/);
+  if (!match) {
+    return res.status(400).json({ error: "需要图片 data URL" });
+  }
+  const mime = match[1] || "image/jpeg";
+  if (!mime.startsWith("image/")) {
+    return res.status(400).json({ error: "只接受图片文件" });
+  }
+  const ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : "jpg";
+  const filename = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  try {
+    const buffer = Buffer.from(match[2], "base64");
+    if (buffer.length > 8 * 1024 * 1024) {
+      return res.status(400).json({ error: "图片超过 8MB" });
+    }
+    fs.writeFileSync(path.join(generatedDir, filename), buffer);
+    return res.json({ url: `/generated/${filename}` });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "参考图写入失败" });
+  }
+});
+
 app.post("/api/visual/generate", async (req, res) => {
   try {
-    const { prompt, visualStyle = "cinematic", aspectRatio = "16:9", seed, customApi, styleRender } = req.body || {};
+    const { prompt, visualStyle = "cinematic", aspectRatio = "16:9", seed, customApi, styleRender, characterRef } = req.body || {};
 
     if (!prompt) {
       return res.status(400).json({ error: "Prompt is required" });
@@ -1965,7 +2069,13 @@ app.post("/api/visual/generate", async (req, res) => {
         return needle.length > 0 && !cleanedPrompt.toLowerCase().includes(needle);
       })
       .slice(0, 2);
-    const finalPrompt = extras.length ? `${cleanedPrompt}, ${extras.join(", ")}` : cleanedPrompt;
+    const scenePrompt = extras.length ? `${cleanedPrompt}, ${extras.join(", ")}` : cleanedPrompt;
+    const refName = String(characterRef?.name || "").trim();
+    const refLock = characterRef?.url
+      ? `Keep the exact same person as the reference photo${refName ? ` (${refName})` : ""}: same face, hair, age, and clothing. This is a new camera shot — change pose, framing, and background to match the scene. Do not copy the reference composition.`
+      : "";
+    const finalPrompt = refLock ? `${refLock} Scene: ${scenePrompt}` : scenePrompt;
+    const referenceImage = characterRef?.url ? await resolveReferenceImageDataUrl(String(characterRef.url)) : null;
 
     // =========================================================================
     // PRIORITY 1: User-configured Custom Image Generation Provider API
@@ -1999,7 +2109,8 @@ app.post("/api/visual/generate", async (req, res) => {
           prompt: finalPrompt,
           size: chosenSize,
           protocol: customApi.protocol || 'auto',
-          quality: customApi.quality
+          quality: customApi.quality,
+          referenceImage: referenceImage || undefined
         });
 
         if (customResult.ok && customResult.imageUrl) {
@@ -2384,6 +2495,33 @@ async function pollAsyncTask(taskId: string, rootBase: string, apiKey: string, m
   return null;
 }
 
+async function resolveReferenceImageDataUrl(url: string): Promise<string | null> {
+  const trimmed = String(url || "").trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("data:image/")) return trimmed;
+  if (trimmed.startsWith("/generated/")) {
+    const filename = path.basename(trimmed);
+    const full = path.join(generatedDir, filename);
+    if (!full.startsWith(generatedDir) || !fs.existsSync(full)) return null;
+    const buffer = fs.readFileSync(full);
+    const ext = path.extname(filename).slice(1).toLowerCase();
+    const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+    return `data:${mime};base64,${buffer.toString("base64")}`;
+  }
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    try {
+      const res = await fetch(trimmed);
+      if (!res.ok) return null;
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const mime = (res.headers.get("content-type") || "image/jpeg").split(";")[0];
+      return `data:${mime};base64,${buffer.toString("base64")}`;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 // Master Executor: Tries Images API with intelligent Chat Completions, Universal Parsing & Async Polling
 async function executeCustomImageRequest(options: {
   endpoint: string;
@@ -2394,6 +2532,7 @@ async function executeCustomImageRequest(options: {
   protocol?: 'auto' | 'images' | 'chat-completions';
   quality?: 'standard' | 'hd';
   timeoutMs?: number;
+  referenceImage?: string;
 }): Promise<{
   ok: boolean;
   imageUrl?: string;
@@ -2412,7 +2551,8 @@ async function executeCustomImageRequest(options: {
     size = '1024x1024',
     protocol = 'auto',
     quality,
-    timeoutMs = 180000
+    timeoutMs = 180000,
+    referenceImage
   } = options;
 
   let cleanEndpoint = String(endpoint).trim().replace(/^["']|["']$/g, '');
@@ -2451,11 +2591,18 @@ async function executeCustomImageRequest(options: {
   let lastStatus = 0;
   let imagesJobAccepted = false;
 
-  // METHOD 1: Chat Completions Protocol (if requested)
-  if (protocol === 'chat-completions' || cleanEndpoint.includes('/chat/completions')) {
+  const useChatForReference = Boolean(referenceImage) && protocol !== 'images';
+  // METHOD 1: Chat Completions Protocol (if requested, or when locking a character from a reference photo)
+  if (protocol === 'chat-completions' || cleanEndpoint.includes('/chat/completions') || useChatForReference) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const userContent = referenceImage
+        ? [
+            { type: 'image_url', image_url: { url: referenceImage } },
+            { type: 'text', text: prompt }
+          ]
+        : `Please generate and draw a high quality image based on this description:\n${prompt}\nReturn the image markdown or direct URL.`;
 
       const res = await fetch(chatEndpoint, {
         method: 'POST',
@@ -2468,7 +2615,7 @@ async function executeCustomImageRequest(options: {
           messages: [
             {
               role: 'user',
-              content: `Please generate and draw a high quality image based on this description:\n${prompt}\nReturn the image markdown or direct URL.`
+              content: userContent
             }
           ]
         }),
@@ -2508,6 +2655,11 @@ async function executeCustomImageRequest(options: {
       n: 1
     };
     if (quality) requestBody.quality = quality;
+    if (referenceImage) {
+      requestBody.image = referenceImage;
+      requestBody.image_url = referenceImage;
+      requestBody.images = [referenceImage];
+    }
 
     let res = await fetch(imagesEndpoint, {
       method: 'POST',

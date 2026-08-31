@@ -12,11 +12,19 @@ import {
   TransitionType,
   StylePack,
   VideoProject,
+  VisualBible,
   VisualStyle
 } from '../types';
 import { generateProceduralArtwork } from './visualGenerator';
 import { buildVisualPrompt, presetStylePack } from './stylePack';
-import { countNarrationChars, joinClipNarrations, repairClipSlices } from './narrationTrack';
+import {
+  applyBibleToChineseIntent,
+  applyBibleToEnglishPrompt,
+  normalizeVisualBible,
+  stampShotsWithBible,
+  visualBibleModeForGenre
+} from './visualBible';
+import { countNarrationChars, ensureUniqueClipIds, joinClipNarrations, newClipId, repairClipSlices } from './narrationTrack';
 import {
   applyHoldToShots,
   applyPinnedHolds,
@@ -135,7 +143,8 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     referenceBreakdown: raw.referenceBreakdown || null,
     conceptMix: { ...EMPTY_MIX, ...(raw.conceptMix || {}) },
     genrePackId: raw.genrePackId || null,
-    hookPreviewUrl: raw.hookPreviewUrl
+    hookPreviewUrl: raw.hookPreviewUrl,
+    visualBible: normalizeVisualBible(raw.visualBible, visualBibleModeForGenre(raw.genrePackId))
   };
 }
 
@@ -187,14 +196,17 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
   const speechSpans = spansFresh
     ? normalizeSpeechSpans(workspace.speechSpans, workspace.fullNarration)
     : buildSpeechSpans(workspace.fullNarration, workspace.beats);
-  const forecastShots = applyPinnedHolds(
-    predictShots({
-      narration: workspace.fullNarration,
-      beats: workspace.beats,
-      budget: durationBudget,
-      spans: speechSpans
-    }),
-    workspace.forecastShots
+  const forecastShots = stampShotsWithBible(
+    applyPinnedHolds(
+      predictShots({
+        narration: workspace.fullNarration,
+        beats: workspace.beats,
+        budget: durationBudget,
+        spans: speechSpans
+      }),
+      workspace.forecastShots
+    ),
+    workspace.visualBible
   );
   const directorNotes = [
     ...validateForecast({ budget: durationBudget, shots: forecastShots, beats: workspace.beats }),
@@ -494,7 +506,8 @@ export function forecastToClips(
   visualStyle: VisualStyle,
   aspectRatio: AspectRatio,
   stylePack?: StylePack,
-  previousClips: StoryboardClip[] = []
+  previousClips: StoryboardClip[] = [],
+  visualBible?: VisualBible | null
 ): StoryboardClip[] {
   const motions: CameraMotion[] = ['zoom-in', 'pan-left', 'cinematic-orbit', 'zoom-out', 'pan-right', 'tilt-up'];
   const pack = stylePack || presetStylePack(visualStyle);
@@ -504,27 +517,36 @@ export function forecastToClips(
     prevByKey.set(previousClipKey(clip, spanCursor), clip);
   });
 
+  const usedIds = new Set<string>();
   const clips = shots.map((shot, index) => {
     const motion = cameraForEnergy(shot.energy, index, motions);
     const transition: TransitionType = index === shots.length - 1 ? 'fade-black' : 'crossfade';
     const visual = shot.visualIntent || shot.sliceText || shot.narration || `scene ${index + 1}`;
+    const chineseVisual = applyBibleToChineseIntent(visual, visualBible, shot);
     const voRole = shot.voRole || 'start';
     const span = shot.spanId || `order:${shot.order}`;
-    const prev = prevByKey.get(`${span}#${shot.visualIndex ?? 0}`) || previousClips[index];
+    // Only reuse a previous clip when this exact utterance-visual slot matches.
+    // Positional previousClips[index] collides once a continue shot is inserted.
+    const prev = prevByKey.get(`${span}#${shot.visualIndex ?? 0}`);
+    const id = prev?.id && !usedIds.has(prev.id) ? prev.id : newClipId(index, usedIds);
+    usedIds.add(id);
     return {
-      id: prev?.id || `clip-${Date.now()}-${index}`,
+      id,
       order: index + 1,
       speechDuration: shot.speechDuration,
       holdDuration: shot.holdPinned ? shot.holdDuration : 0,
       holdPinned: Boolean(shot.holdPinned),
+      characterIds: shot.characterIds,
+      locationId: shot.locationId,
+      continuity: shot.continuity,
       duration: Math.max(0.05, shot.speechDuration + (shot.holdPinned ? shot.holdDuration : 0)),
       narration: voRole === 'start' ? shot.narration : '',
       secondaryText: shot.sliceText || shot.narration,
       voSpanId: shot.spanId,
       voRole,
       voSlice: shot.sliceText,
-      visualPrompt: buildVisualPrompt(visual, pack),
-      chineseVisualPrompt: visual,
+      visualPrompt: applyBibleToEnglishPrompt(buildVisualPrompt(visual, pack), visualBible, shot.characterIds),
+      chineseVisualPrompt: chineseVisual,
       cameraMotion: prev?.cameraMotion || motion,
       transition: prev?.transition || transition,
       imageUrl: prev?.imageUrl || generateProceduralArtwork(shot.narration || visual, visualStyle, aspectRatio, index),
@@ -533,7 +555,7 @@ export function forecastToClips(
       imageError: undefined
     };
   });
-  return repairClipSlices(clips);
+  return ensureUniqueClipIds(repairClipSlices(clips));
 }
 
 function cameraForEnergy(energy: ForecastShot['energy'], index: number, motions: CameraMotion[]): CameraMotion {

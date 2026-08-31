@@ -124,6 +124,9 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
               <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDot}`} />
               {generating && <span className="text-[10px] text-amber-300">绘制中</span>}
               {failed && <span className="text-[10px] text-rose-300">失败</span>}
+              {clip.characterIds && clip.characterIds.length > 0 && (
+                <span className="text-[9px] text-amber-400/80 border border-amber-500/20 rounded px-1">角色锁</span>
+              )}
             </div>
             <p className="text-[11px] text-zinc-400 truncate">{voText || '暂无旁白'}</p>
           </div>

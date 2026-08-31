@@ -1,4 +1,5 @@
 import { VideoProject, VisualStyle, SubtitleConfig, AudioConfig, CustomImageApiConfig, CustomLlmApiConfig, CustomTtsApiConfig, ScriptGenre } from '../types';
+import { SYSTEM_FONT_ID, SYSTEM_FONT_STACK } from './subtitleFonts';
 
 export const DEFAULT_CUSTOM_IMAGE_API: CustomImageApiConfig = {
   enabled: false,
@@ -603,7 +604,8 @@ export const DEFAULT_SUBTITLE_CONFIG: SubtitleConfig = {
   enabled: true,
   preset: 'viral-yellow',
   fontSize: 26,
-  fontFamily: 'system-ui, sans-serif',
+  fontId: SYSTEM_FONT_ID,
+  fontFamily: SYSTEM_FONT_STACK,
   positionY: 82,
   primaryColor: '#ffffff',
   highlightColor: '#facc15',

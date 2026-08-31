@@ -3,6 +3,15 @@
  * Handles smart multi-line wrapping, punctuation balancing, and auto-font scaling for Canvas & MP4 export
  */
 
+import { SubtitleTypeface, subtitleCanvasFont, SYSTEM_FONT_STACK } from './subtitleFonts';
+
+const DEFAULT_TYPEFACE: SubtitleTypeface = {
+  primaryFamily: SYSTEM_FONT_STACK,
+  primaryWeight: 'bold',
+  secondaryFamily: SYSTEM_FONT_STACK,
+  secondaryWeight: '500'
+};
+
 export interface FormattedSubtitleBlock {
   lines: string[];
   secondaryLines: string[];
@@ -183,7 +192,8 @@ export function calculateSubtitleLayout(
   baseFontSize: number,
   isBilingual: boolean,
   maxWidthRatio: number = 0.84,
-  maxLines: number = 3
+  maxLines: number = 3,
+  typeface: SubtitleTypeface = DEFAULT_TYPEFACE
 ): FormattedSubtitleBlock {
   const maxWidth = canvasWidth * maxWidthRatio;
 
@@ -193,7 +203,7 @@ export function calculateSubtitleLayout(
 
   // Try fitting with base font size first; shrink if needed
   for (let attempt = 0; attempt < 4; attempt++) {
-    ctx.font = `bold ${currentFontSize}px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+    ctx.font = subtitleCanvasFont(typeface.primaryFamily, currentFontSize, typeface.primaryWeight);
     lines = wrapText(ctx, text, maxWidth, maxLines);
 
     // Measure maximum line width
@@ -217,7 +227,7 @@ export function calculateSubtitleLayout(
 
   // Calculate secondary text lines if bilingual
   if (isBilingual && secondaryText) {
-    ctx.font = `500 ${secondaryFontSize}px system-ui, -apple-system, sans-serif`;
+    ctx.font = subtitleCanvasFont(typeface.secondaryFamily, secondaryFontSize, typeface.secondaryWeight);
     secondaryLines = wrapText(ctx, secondaryText, maxWidth, 2);
 
     // If secondary text still exceeds, scale it down slightly
@@ -226,7 +236,7 @@ export function calculateSubtitleLayout(
       if (w > maxWidth) {
         secondaryFontSize = Math.max(11, Math.round(secondaryFontSize * 0.85));
         secondaryLineHeight = Math.round(secondaryFontSize * 1.25);
-        ctx.font = `500 ${secondaryFontSize}px system-ui, -apple-system, sans-serif`;
+        ctx.font = subtitleCanvasFont(typeface.secondaryFamily, secondaryFontSize, typeface.secondaryWeight);
         secondaryLines = wrapText(ctx, secondaryText, maxWidth, 2);
         break;
       }
@@ -235,14 +245,14 @@ export function calculateSubtitleLayout(
 
   // Calculate bounding box
   let maxLineWidth = 0;
-  ctx.font = `bold ${currentFontSize}px system-ui, -apple-system, sans-serif`;
+  ctx.font = subtitleCanvasFont(typeface.primaryFamily, currentFontSize, typeface.primaryWeight);
   for (const line of lines) {
     const w = ctx.measureText(line).width;
     if (w > maxLineWidth) maxLineWidth = w;
   }
 
   if (secondaryLines.length > 0) {
-    ctx.font = `500 ${secondaryFontSize}px system-ui, -apple-system, sans-serif`;
+    ctx.font = subtitleCanvasFont(typeface.secondaryFamily, secondaryFontSize, typeface.secondaryWeight);
     for (const line of secondaryLines) {
       const w = ctx.measureText(line).width;
       if (w > maxLineWidth) maxLineWidth = w;

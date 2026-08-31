@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry } from './types';
 import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, resolveLlmApi, resolveTtsApi } from './utils/presets';
+import { resolveSubtitleFontId } from './utils/subtitleFonts';
 import { applyTtsSettingsToProject, applyVoiceToProject, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
 import { hydrateActiveStylePack, localRewriteClipPrompt, presetStylePack, renderLine } from './utils/stylePack';
 import {
@@ -17,10 +18,12 @@ import {
 import {
   allocateSpeechTimings,
   applyNarrationTimingsToClips,
+  ensureUniqueClipIds,
   isNarrationTrackFresh,
   joinClipsForTts,
   measureSpeechWindow,
   narrationSourceHash,
+  newClipId,
   rebindProjectNarration,
   relinkNarrationTrack,
   repairClipSlices,
@@ -45,11 +48,12 @@ import { TimelineBar } from './components/TimelineBar';
 import { ExportModal } from './components/ExportModal';
 import { StatusToastHost } from './components/StatusToastHost';
 import { showStatusToast } from './utils/statusToast';
+import { characterForShot, characterRefUrl, storyLeadMissingRef } from './utils/visualBible';
 
 function settleProjectImages(project: VideoProject): VideoProject {
   const settled: VideoProject = {
     ...project,
-    clips: (project.clips || []).map((clip) => {
+    clips: ensureUniqueClipIds((project.clips || []).map((clip) => {
       if (clip.imageStatus === 'generating' || clip.imageStatus === 'queued') {
         return {
           ...clip,
@@ -58,7 +62,7 @@ function settleProjectImages(project: VideoProject): VideoProject {
         };
       }
       return { ...clip, isGeneratingImage: false };
-    })
+    }))
   };
   return {
     ...settled,
@@ -66,6 +70,11 @@ function settleProjectImages(project: VideoProject): VideoProject {
       ...settled.audio,
       bgmTrackId: resolveBgmTrackId(settled.audio?.bgmTrackId),
       voiceCharacter: resolveTtsVoiceId(settled.audio?.voiceCharacter, resolveTtsApi(settled.settings?.customTtsApi))
+    },
+    subtitles: {
+      ...DEFAULT_SUBTITLE_CONFIG,
+      ...settled.subtitles,
+      fontId: resolveSubtitleFontId(settled.subtitles)
     },
     scriptWorkspace: hydrateScriptWorkspace(settled),
     settings: {
@@ -114,6 +123,13 @@ export default function App() {
   } | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const characterRefWarnOnceRef = useRef(false);
+
+  useEffect(() => {
+    if (!storyLeadMissingRef(project.scriptWorkspace?.visualBible)) {
+      characterRefWarnOnceRef.current = false;
+    }
+  }, [project.scriptWorkspace?.visualBible]);
   const [isGeneratingNarration, setIsGeneratingNarration] = useState(false);
   const [narrationError, setNarrationError] = useState<string | null>(null);
   const [styleLibrary, setStyleLibrary] = useState<StyleLibraryEntry[]>(() => loadStyleLibrary());
@@ -177,17 +193,30 @@ export default function App() {
   }, []);
 
   const applyClipsChange = useCallback((clipsOrUpdater: ClipsChange) => {
-    setProject(prev => ({
-      ...prev,
-      clips: typeof clipsOrUpdater === 'function' ? clipsOrUpdater(prev.clips) : clipsOrUpdater,
-      updatedAt: Date.now()
-    }));
+    setProject(prev => {
+      const raw = typeof clipsOrUpdater === 'function' ? clipsOrUpdater(prev.clips) : clipsOrUpdater;
+      const nextClips = ensureUniqueClipIds(raw);
+      const idsRepaired = nextClips.some((clip, index) => clip.id !== raw[index]?.id);
+      if (!idsRepaired) {
+        return { ...prev, clips: nextClips, updatedAt: Date.now() };
+      }
+      const linked = relinkNarrationTrack(prev.audio?.narrationTrack, nextClips);
+      return {
+        ...prev,
+        clips: linked?.clips || nextClips,
+        audio: linked ? { ...prev.audio, narrationTrack: linked.track } : prev.audio,
+        updatedAt: Date.now()
+      };
+    });
   }, []);
 
   const handleGenerateFullNarration = useCallback(async (clipsOverride?: StoryboardClip[]) => {
-    const sourceClips = clipsOverride || project.clips;
+    // onClick passes a mouse event; only an actual clip array may override.
+    const sourceClips = Array.isArray(clipsOverride) ? clipsOverride : project.clips;
     if (!joinClipsForTts(sourceClips)) {
-      setNarrationError('请先在分镜里填写旁白文案');
+      const message = '请先在分镜里填写旁白文案';
+      setNarrationError(message);
+      showStatusToast(message, { tone: 'warn', id: 'narration' });
       return;
     }
 
@@ -199,7 +228,7 @@ export default function App() {
     audioEngine.stopNarration();
 
     try {
-      const repaired = repairClipSlices(sourceClips);
+      const repaired = ensureUniqueClipIds(repairClipSlices(sourceClips));
       const utterances = utterancesFromClips(repaired);
       const res = await fetch('/api/audio/tts-utterances', {
         method: 'POST',
@@ -362,7 +391,7 @@ export default function App() {
           const source = project.clips[targetIndex];
           const duplicated: StoryboardClip = {
             ...source,
-            id: `clip-${Date.now()}`,
+            id: newClipId(targetIndex + 1),
             order: source.order + 1,
             narration: `${source.narration} (副本)`
           };
@@ -370,7 +399,7 @@ export default function App() {
           newClips.splice(targetIndex + 1, 0, duplicated);
           // Re-order
           const reordered = newClips.map((c, i) => ({ ...c, order: i + 1 }));
-          updateProject({ clips: reordered });
+          applyClipsChange(reordered);
           setSelectedClipId(duplicated.id);
         }
       }
@@ -381,7 +410,7 @@ export default function App() {
         if (targetIndex !== -1) {
           const filtered = project.clips.filter(c => c.id !== selectedClipId);
           const reordered = filtered.map((c, i) => ({ ...c, order: i + 1 }));
-          updateProject({ clips: reordered });
+          applyClipsChange(reordered);
           const nextSelected = reordered[Math.min(targetIndex, reordered.length - 1)]?.id || null;
           setSelectedClipId(nextSelected);
         }
@@ -390,7 +419,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [project.clips, selectedClipId, updateProject, activeTab]);
+  }, [project.clips, selectedClipId, applyClipsChange, activeTab]);
 
   // Cancel batch image generation
   const handleCancelGenerateAllImages = useCallback(() => {
@@ -411,10 +440,30 @@ export default function App() {
     }));
   }, []);
 
+  const characterRefPayload = (clip: StoryboardClip) => {
+    const character = characterForShot(project.scriptWorkspace?.visualBible, clip.characterIds);
+    const url = characterRefUrl(character);
+    if (!url) return undefined;
+    return { url, name: character?.name || '' };
+  };
+
+  const warnIfMissingLeadRef = () => {
+    if (characterRefWarnOnceRef.current) return;
+    if (!storyLeadMissingRef(project.scriptWorkspace?.visualBible)) return;
+    characterRefWarnOnceRef.current = true;
+    showStatusToast('主角还没钉参考图，这一批脸可能不稳', {
+      tone: 'warn',
+      id: 'character-ref-missing',
+      actionLabel: '去钉图',
+      onAction: () => setActiveTab('script')
+    });
+  };
+
   // Generate image for a single clip with live status
   const handleGenerateSingleClipImage = useCallback(async (clipId: string) => {
     const targetClip = project.clips.find(c => c.id === clipId);
     if (!targetClip) return;
+    warnIfMissingLeadRef();
 
     // Set generating status
     setProject(prev => ({
@@ -435,7 +484,8 @@ export default function App() {
           styleRender: renderLine(hydrateActiveStylePack(project.settings)),
           aspectRatio: project.settings.aspectRatio,
           seed: targetClip.order * 1000 + Date.now(),
-          customApi: resolveImageApi(project.settings.customImageApi)
+          customApi: resolveImageApi(project.settings.customImageApi),
+          characterRef: characterRefPayload(targetClip)
         }),
         signal: controller.signal
       });
@@ -475,12 +525,13 @@ export default function App() {
     } finally {
       window.clearTimeout(timeoutId);
     }
-  }, [project.clips, project.settings]);
+  }, [project.clips, project.settings, project.scriptWorkspace]);
 
   // Generate AI images for all storyboard clips in parallel with concurrency pool and status transitions
   const handleGenerateAllImages = async (clipsOverride?: StoryboardClip[]) => {
     const sourceClips = Array.isArray(clipsOverride) ? clipsOverride : project.clips;
     if (sourceClips.length === 0) return;
+    warnIfMissingLeadRef();
 
     // Create new abort controller
     if (abortControllerRef.current) {
@@ -530,7 +581,8 @@ export default function App() {
                 styleRender: renderLine(hydrateActiveStylePack(project.settings)),
                 aspectRatio: project.settings.aspectRatio,
                 seed: index * 1000 + Date.now(),
-                customApi: resolveImageApi(project.settings.customImageApi)
+                customApi: resolveImageApi(project.settings.customImageApi),
+                characterRef: characterRefPayload(clip)
               }),
               signal: timeoutController.signal
             });
@@ -626,8 +678,9 @@ export default function App() {
     const pack = packOverride || hydrateActiveStylePack(project.settings);
     showStatusToast('正在写入分镜画面词…', { tone: 'progress', id: 'style-rewrite', durationMs: 0 });
     void (async () => {
+      const visualBible = project.scriptWorkspace?.visualBible;
       let rewritten = project.clips.map((clip) => {
-        const local = localRewriteClipPrompt(clip, pack);
+        const local = localRewriteClipPrompt(clip, pack, visualBible);
         return {
           ...clip,
           visualPrompt: local.visualPrompt,
@@ -642,11 +695,16 @@ export default function App() {
           body: JSON.stringify({
             stylePack: pack,
             llmApi: resolveLlmApi(project.settings.customLlmApi),
+            visualBible,
+            genre: project.scriptWorkspace?.genrePackId,
             clips: project.clips.map((clip) => ({
               id: clip.id,
               narration: clip.narration,
               visualPrompt: clip.visualPrompt,
-              chineseVisualPrompt: clip.chineseVisualPrompt
+              chineseVisualPrompt: clip.chineseVisualPrompt,
+              characterIds: clip.characterIds,
+              locationId: clip.locationId,
+              continuity: clip.continuity
             }))
           })
         });
@@ -877,7 +935,7 @@ export default function App() {
           narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
           isGeneratingNarration={isGeneratingNarration}
           narrationError={narrationError}
-          onGenerateFullNarration={handleGenerateFullNarration}
+          onGenerateFullNarration={() => { void handleGenerateFullNarration(); }}
           recommendedGenre={project.scriptWorkspace?.genrePackId || null}
           timelinePlaying={isPlaying}
           ttsApi={resolveTtsApi(project.settings.customTtsApi)}
@@ -890,7 +948,7 @@ export default function App() {
         <ProjectsPanel
           currentProject={project}
           onLoadProject={(loaded) => {
-            const next = settleProjectImages(loaded);
+            const next = rebindProjectNarration(settleProjectImages(loaded));
             setProject(next);
             setCurrentTime(0);
             setIsPlaying(false);

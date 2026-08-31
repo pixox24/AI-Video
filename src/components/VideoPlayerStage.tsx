@@ -18,6 +18,12 @@ import { calculateSubtitleLayout } from '../utils/subtitleFormatter';
 import { clipShotNarration, isNarrationTrackFresh, mapNarrationToTimeline, mapTimelineToNarration } from '../utils/narrationTrack';
 import { resolveTtsApi } from '../utils/presets';
 import { showStatusToast } from '../utils/statusToast';
+import {
+  loadStudioFont,
+  resolveSubtitleFontId,
+  resolveSubtitleTypeface,
+  subtitleCanvasFont
+} from '../utils/subtitleFonts';
 
 interface VideoPlayerStageProps {
   clips: StoryboardClip[];
@@ -107,6 +113,11 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   }, [isPlaying, audio.bgmEnabled, audio.bgmTrackId, audio.bgmVolume, audio.customBgmUrl, isMuted]);
 
   const narrationFresh = isNarrationTrackFresh(audio, clips, resolveTtsApi(settings.customTtsApi));
+  const subtitleFontId = resolveSubtitleFontId(subtitles);
+
+  useEffect(() => {
+    void loadStudioFont(subtitleFontId);
+  }, [subtitleFontId]);
 
   useEffect(() => {
     if (narrationFresh && audio.narrationTrack?.audioUrl) {
@@ -118,7 +129,10 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
   useEffect(() => {
     if (!isPlaying) {
-      audioEngine.stopNarration();
+      // Pausing the timeline must not kill the audio-panel "试听当前音色" session.
+      if (!audioEngine.isVoicePreviewActive()) {
+        audioEngine.stopNarration();
+      }
       activeClipIndexRef.current = -1;
     }
   }, [isPlaying]);
@@ -289,6 +303,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     const posY = (h * config.positionY) / 100;
     const maxWidthRatio = config.maxWidthRatio || 0.84;
     const maxLines = config.maxLines || 3;
+    const typeface = resolveSubtitleTypeface(config);
 
     // Calculate smart multi-line layout
     const layout = calculateSubtitleLayout(
@@ -299,7 +314,8 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
       baseFontSize,
       config.bilingual,
       maxWidthRatio,
-      maxLines
+      maxLines,
+      typeface
     );
 
     if (layout.lines.length === 0) return;
@@ -330,7 +346,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     const startY = -layout.totalHeight / 2 + layout.lineHeight / 2;
 
     // Render Primary Chinese Narration Lines
-    ctx.font = `bold ${layout.fontSize}px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+    ctx.font = subtitleCanvasFont(typeface.primaryFamily, layout.fontSize, typeface.primaryWeight);
 
     layout.lines.forEach((line, idx) => {
       const lineY = startY + idx * layout.lineHeight;
@@ -350,7 +366,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
     // Render Secondary Bilingual English Lines
     if (config.bilingual && layout.secondaryLines.length > 0) {
-      ctx.font = `500 ${layout.secondaryFontSize}px system-ui, -apple-system, sans-serif`;
+      ctx.font = subtitleCanvasFont(typeface.secondaryFamily, layout.secondaryFontSize, typeface.secondaryWeight);
       const secondaryStartY = -layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;
 
       layout.secondaryLines.forEach((secLine, idx) => {
@@ -433,7 +449,11 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     }
     const hasLinkedVoiceover = clips.some((item) => item.voRole === 'continue');
     if (hasLinkedVoiceover) {
-      audioEngine.stopNarration();
+      // Linked utterances use the full aligned track. Skip per-clip TTS, but
+      // never stop an in-flight audio-panel voice preview from this rAF tick.
+      if (playing && !audioEngine.isVoicePreviewActive()) {
+        audioEngine.stopNarration();
+      }
       return;
     }
     const info = getClipAtTime(time);

@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Play, 
@@ -18,14 +18,13 @@ import {
   MessageSquare, 
   Music, 
   Video, 
-  GripVertical, 
   Check, 
   Sliders,
   Loader2,
   Hourglass
 } from 'lucide-react';
-import { StoryboardClip, TransitionType, CameraMotion } from '../types';
-import { clipShotNarration } from '../utils/narrationTrack';
+import { StoryboardClip, TransitionType } from '../types';
+import { clipShotNarration, newClipId } from '../utils/narrationTrack';
 
 interface TimelineBarProps {
   clips: StoryboardClip[];
@@ -46,16 +45,8 @@ const TRANSITIONS: { id: TransitionType; name: string; icon: string; desc: strin
   { id: 'none', name: '直切', icon: '🎬', desc: '无特效硬切，写实直接' },
 ];
 
-const CAMERA_MOTIONS: { id: CameraMotion; name: string; icon: string; desc: string }[] = [
-  { id: 'zoom-in', name: '推进', icon: '🔍', desc: '镜头平缓推近，突出视觉焦点' },
-  { id: 'zoom-out', name: '拉远', icon: '🔎', desc: '镜头缓缓拉开，展现宏大环境' },
-  { id: 'pan-left', name: '左移', icon: '⬅️', desc: '平稳向左横摇，叙事感强' },
-  { id: 'pan-right', name: '右移', icon: '➡️', desc: '平稳向右横移，引导视线' },
-  { id: 'tilt-up', name: '仰视', icon: '⬆️', desc: '由下至上摇镜，营造威严感' },
-  { id: 'tilt-down', name: '俯视', icon: '⬇️', desc: '由上至下俯拍，俯瞰全貌' },
-  { id: 'cinematic-orbit', name: '环绕', icon: '🔄', desc: '电影级弧形环绕旋转' },
-  { id: 'static', name: '静止', icon: '⏸️', desc: '固定机位稳定拍摄' },
-];
+const TRACK_HEADER_W = 44;
+const TIMELINE_END_PAD = 80;
 
 export const TimelineBar: React.FC<TimelineBarProps> = ({
   clips,
@@ -96,13 +87,22 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
 
   // Inline Popovers
   const [activeTransitionClipIndex, setActiveTransitionClipIndex] = useState<number | null>(null);
-  const [activeMotionClipId, setActiveMotionClipId] = useState<string | null>(null);
 
   // Keyboard shortcut guide modal
   const [showShortcutHelp, setShowShortcutHelp] = useState<boolean>(false);
 
   const totalDuration = clips.reduce((acc, c) => acc + (c.duration || 3.5), 0) || 10;
-  const timelineContentWidth = Math.max(900, totalDuration * pixelsPerSecond + 200);
+  const clipLayouts = useMemo(() => {
+    let acc = 0;
+    return clips.map((clip, index) => {
+      const duration = clip.duration || 3.5;
+      const start = acc;
+      acc += duration;
+      return { clip, index, start, duration, end: acc };
+    });
+  }, [clips]);
+  const timeToX = useCallback((time: number) => TRACK_HEADER_W + time * pixelsPerSecond, [pixelsPerSecond]);
+  const timelineContentWidth = Math.max(900, timeToX(totalDuration) + TIMELINE_END_PAD);
 
   // Format Timecode
   const formatTimecode = (sec: number) => {
@@ -118,15 +118,6 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     const f = Math.floor((sec % 1) * 30);
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
   };
-
-  // Find cumulative start time of a clip
-  const getClipStartTime = useCallback((index: number) => {
-    let acc = 0;
-    for (let i = 0; i < index; i++) {
-      acc += clips[i].duration || 3.5;
-    }
-    return acc;
-  }, [clips]);
 
   // Find active clip at a given timestamp
   const getClipAtTime = useCallback((time: number) => {
@@ -157,7 +148,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
   // Fit to screen (自适应全片)
   const handleFitToScreen = () => {
     if (!scrollContainerRef.current) return;
-    const containerWidth = scrollContainerRef.current.clientWidth - 80;
+    const containerWidth = scrollContainerRef.current.clientWidth - TRACK_HEADER_W - TIMELINE_END_PAD;
     if (totalDuration > 0 && containerWidth > 100) {
       const calculatedPps = Math.max(40, Math.min(220, containerWidth / totalDuration));
       setPixelsPerSecond(Math.round(calculatedPps));
@@ -207,8 +198,8 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     if (!scrollContainerRef.current) return 0;
     const rect = scrollContainerRef.current.getBoundingClientRect();
     const scrollLeft = scrollContainerRef.current.scrollLeft;
-    const relativeX = clientX - rect.left + scrollLeft - 16;
-    const rawTime = relativeX / pixelsPerSecond;
+    const relativeX = clientX - rect.left + scrollLeft;
+    const rawTime = (relativeX - TRACK_HEADER_W) / pixelsPerSecond;
     const snappedTime = Math.round(rawTime * 10) / 10;
     return Math.max(0, Math.min(totalDuration, snappedTime));
   }, [pixelsPerSecond, totalDuration]);
@@ -313,10 +304,10 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     if (isDragging || isTrimmingRef.current || isReorderingRef.current || !scrollContainerRef.current) return;
     const rect = scrollContainerRef.current.getBoundingClientRect();
     const scrollLeft = scrollContainerRef.current.scrollLeft;
-    const x = e.clientX - rect.left + scrollLeft - 16;
-    const time = Math.max(0, Math.min(totalDuration, x / pixelsPerSecond));
+    const x = e.clientX - rect.left + scrollLeft;
+    const time = Math.max(0, Math.min(totalDuration, (x - TRACK_HEADER_W) / pixelsPerSecond));
     setHoverTime(time);
-    setHoverPosition({ x: x + 16, clientX: e.clientX, clientY: e.clientY });
+    setHoverPosition({ x, clientX: e.clientX, clientY: e.clientY });
   };
 
   const handleMouseLeave = () => {
@@ -436,17 +427,11 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     setActiveTransitionClipIndex(null);
   };
 
-  const handleSelectMotion = (clipId: string, cameraMotion: CameraMotion) => {
-    const updated = clips.map(c => c.id === clipId ? { ...c, cameraMotion } : c);
-    onClipsChange(updated);
-    setActiveMotionClipId(null);
-  };
-
   // Auto-scroll when playing
   useEffect(() => {
     if (isPlaying && scrollContainerRef.current && !isDragging && !trimmingClipId && !isReorderingRef.current) {
       const container = scrollContainerRef.current;
-      const playheadX = currentTime * pixelsPerSecond + 16;
+      const playheadX = timeToX(currentTime);
       const viewLeft = container.scrollLeft;
       const viewRight = viewLeft + container.clientWidth;
 
@@ -456,13 +441,13 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
         container.scrollLeft = Math.max(0, playheadX - 50);
       }
     }
-  }, [currentTime, isPlaying, pixelsPerSecond, isDragging, trimmingClipId]);
+  }, [currentTime, isPlaying, pixelsPerSecond, isDragging, trimmingClipId, timeToX]);
 
   // Add new clip
   const handleAddClip = () => {
     const newOrder = clips.length + 1;
     const newClip: StoryboardClip = {
-      id: `clip-${Date.now()}`,
+      id: newClipId(clips.length),
       order: newOrder,
       duration: 3.5,
       narration: `镜头 ${newOrder}：解说旁白文案`,
@@ -483,7 +468,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
 
     for (let i = 0; i <= totalTenths; i++) {
       const timeInSec = i / 10;
-      const x = timeInSec * pixelsPerSecond;
+      const x = timeToX(timeInSec);
       const isOneSecond = i % 10 === 0;
       const isHalfSecond = i % 5 === 0 && !isOneSecond;
       const isTenthSecond = !isOneSecond && !isHalfSecond;
@@ -541,7 +526,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     return tickElements;
   };
 
-  const playheadX = currentTime * pixelsPerSecond + 16;
+  const playheadX = timeToX(currentTime);
   const hoverClipInfo = hoverTime !== null ? getClipAtTime(hoverTime) : null;
 
   return (
@@ -662,387 +647,278 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
         onMouseLeave={handleMouseLeave}
       >
         <div 
-          className="relative h-full flex flex-col justify-between"
+          className="relative h-full flex flex-col"
           style={{ width: `${timelineContentWidth}px`, minWidth: '100%' }}
         >
-          {/* 1. Time Ruler Top Strip */}
-          <div className="h-6 w-full bg-[#14141a] border-b border-[#23232c] sticky top-0 z-10">
-            <svg 
-              className="w-full h-full"
-              style={{ paddingLeft: '16px' }}
-            >
+          <div
+            className="sticky left-0 z-40 pointer-events-none h-0 w-0"
+          >
+          <div
+            className="absolute top-0 left-0 border-r border-[#2a2a36] bg-[#121218]"
+            style={{ width: TRACK_HEADER_W, height: isTrackExpanded ? 116 : 76 }}
+          >
+            <div className="h-6 border-b border-[#23232c]" />
+            <div className="h-[52px] flex items-center justify-center" title="画面轨">
+              <Film className="w-3.5 h-3.5 text-amber-400" />
+            </div>
+            {isTrackExpanded && (
+              <>
+                <div className="h-5 flex items-center justify-center" title="字幕轨">
+                  <MessageSquare className="w-3 h-3 text-emerald-400" />
+                </div>
+                <div className="h-5 flex items-center justify-center" title="声音轨">
+                  <Volume2 className="w-3 h-3 text-amber-400" />
+                </div>
+              </>
+            )}
+          </div>
+          </div>
+
+          <div className="h-6 w-full bg-[#14141a] border-b border-[#23232c] relative">
+            <svg width={timelineContentWidth} height={24} className="block">
               {renderRulerTicks()}
             </svg>
           </div>
 
-          {/* 2. TRACK 1: VIDEO / SHOT CLIPS TRACK */}
-          <div className="relative flex items-center pt-1.5 pb-1 px-4 flex-shrink-0">
-            {clips.map((clip, index) => {
-              const startTime = getClipStartTime(index);
-              const endTime = startTime + (clip.duration || 3.5);
-              const isCurrentActive = currentTime >= startTime && currentTime < endTime;
+          <div className="relative h-[52px] flex-shrink-0">
+            {clipLayouts.map(({ clip, index, start, duration }) => {
+              const isCurrentActive = currentTime >= start && currentTime < start + duration;
               const isSelected = selectedClipId === clip.id;
               const isTrimmingThis = trimmingClipId === clip.id;
               const isBeingDragged = draggedClipIndex === index;
               const isDropTarget = dragOverIndex === index;
-              
-              const clipWidth = Math.max(130, (clip.duration || 3.5) * pixelsPerSecond);
+              const clipWidth = Math.max(2, duration * pixelsPerSecond);
 
               return (
-                <React.Fragment key={clip.id}>
-                  {/* Drop Insert Indicator line */}
+                <div
+                  key={`${clip.id}-${index}`}
+                  id={`timeline-clip-${clip.id}`}
+                  draggable
+                  onDragStart={(e) => handleDragStart(index, e)}
+                  onDragOver={(e) => handleDragOver(index, e)}
+                  onDrop={(e) => handleDrop(index, e)}
+                  onDragEnd={handleDragEnd}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectClip(clip.id);
+                    onTimeUpdate(start);
+                  }}
+                  style={{ left: timeToX(start), width: clipWidth }}
+                  className={`absolute top-1 bottom-1 rounded-md overflow-hidden group select-none cursor-pointer ${
+                    isBeingDragged
+                      ? 'opacity-40 ring-1 ring-dashed ring-amber-400'
+                      : isSelected || isCurrentActive || isTrimmingThis
+                      ? 'ring-1 ring-amber-400 z-10'
+                      : 'ring-1 ring-black/40 hover:ring-white/20'
+                  }`}
+                >
+                  {clip.imageUrl ? (
+                    <img
+                      src={clip.imageUrl}
+                      alt=""
+                      className={`absolute inset-0 w-full h-full object-cover ${clip.imageStatus === 'generating' ? 'opacity-50' : ''}`}
+                    />
+                  ) : (
+                    <div className="absolute inset-0 bg-[#1a1a22]" />
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/25" />
+
+                  {clip.imageStatus === 'generating' && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-300" />
+                    </div>
+                  )}
+                  {clip.imageStatus === 'queued' && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <Hourglass className="w-3 h-3 animate-pulse text-zinc-300" />
+                    </div>
+                  )}
+
+                  {clipWidth >= 22 && (
+                    <span className="absolute top-1 left-1 min-w-4 h-4 px-1 rounded bg-black/65 text-[9px] font-semibold text-white/90 flex items-center justify-center">
+                      {clip.order}
+                    </span>
+                  )}
+                  {clipWidth >= 52 && (
+                    <span className="absolute top-1 right-1 h-4 px-1 rounded bg-black/65 text-[9px] font-mono text-white/80 flex items-center">
+                      {duration.toFixed(1)}
+                    </span>
+                  )}
+
                   {isDropTarget && draggedClipIndex !== null && draggedClipIndex > index && (
-                    <div className="w-1.5 h-13 bg-amber-400 rounded-full mx-1 shadow-[0_0_8px_#f59e0b] animate-pulse z-20" />
+                    <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-amber-400 z-20" />
                   )}
-
-                  {/* Main Clip Block */}
-                  <div
-                    id={`timeline-clip-${clip.id}`}
-                    draggable
-                    onDragStart={(e) => handleDragStart(index, e)}
-                    onDragOver={(e) => handleDragOver(index, e)}
-                    onDrop={(e) => handleDrop(index, e)}
-                    onDragEnd={handleDragEnd}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onSelectClip(clip.id);
-                      onTimeUpdate(startTime);
-                    }}
-                    style={{ width: `${clipWidth}px` }}
-                    className={`relative flex-shrink-0 h-13 rounded-xl border transition-all cursor-pointer overflow-hidden flex items-center p-1.5 gap-2 group select-none ${
-                      isBeingDragged
-                        ? 'opacity-40 scale-95 border-dashed border-amber-400 bg-amber-500/10'
-                        : isSelected || isCurrentActive || isTrimmingThis
-                        ? 'bg-[#252532] border-amber-500 ring-1 ring-amber-500/50 shadow-md shadow-amber-500/10'
-                        : 'bg-[#18181f] border-[#292934] hover:border-[#3d3d4e] hover:bg-[#1e1e26]'
-                    }`}
-                  >
-                    {/* Drag Handle Grip */}
-                    <div 
-                      className="cursor-grab active:cursor-grabbing text-zinc-600 group-hover:text-zinc-300 transition-colors -ml-0.5"
-                      title="按住拖拽自由重排镜头顺序"
-                    >
-                      <GripVertical className="w-3.5 h-3.5" />
-                    </div>
-
-                    {/* Thumbnail Image */}
-                    <div className="w-11 h-10 rounded-lg bg-black/40 overflow-hidden flex-shrink-0 border border-white/10 relative">
-                      {clip.imageUrl ? (
-                        <img
-                          src={clip.imageUrl}
-                          alt={`Shot ${clip.order}`}
-                          className={`w-full h-full object-cover ${
-                            clip.imageStatus === 'generating' ? 'opacity-40 blur-[0.5px]' : 'opacity-100'
-                          }`}
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-[10px] text-zinc-500">
-                          Shot {clip.order}
-                        </div>
-                      )}
-
-                      {/* Mini Generating Spinner */}
-                      {clip.imageStatus === 'generating' && (
-                        <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                          <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                        </div>
-                      )}
-
-                      {/* Mini Queued Indicator */}
-                      {clip.imageStatus === 'queued' && (
-                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                          <Hourglass className="w-3 h-3 animate-pulse text-zinc-400" />
-                        </div>
-                      )}
-
-                      {/* Duration Badge */}
-                      <div className="absolute bottom-0.5 right-0.5 px-1 py-0.2 bg-black/80 rounded text-[9px] font-mono text-amber-400 font-semibold">
-                        {clip.duration}s
-                      </div>
-                    </div>
-
-                    {/* Text Info & Interactive Camera Motion Badge */}
-                    <div className="flex-1 min-w-0 space-y-0.5 pr-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold text-zinc-200 truncate">
-                          镜头 {clip.order}
-                        </span>
-
-                        {/* Interactive Camera Motion Badge */}
-                        <div className="relative">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setActiveMotionClipId(activeMotionClipId === clip.id ? null : clip.id);
-                            }}
-                            className={`text-[9px] font-mono px-1.5 py-0.5 rounded border flex items-center gap-1 transition-all cursor-pointer ${
-                              activeMotionClipId === clip.id
-                                ? 'bg-amber-500 text-black border-amber-400 font-semibold'
-                                : 'bg-[#21212b] hover:bg-[#2c2c3a] text-zinc-300 border-[#323242]'
-                            }`}
-                            title="点击就地切换运镜动效"
-                          >
-                            <span>{CAMERA_MOTIONS.find(m => m.id === clip.cameraMotion)?.icon || '🔍'}</span>
-                            <span>{CAMERA_MOTIONS.find(m => m.id === clip.cameraMotion)?.name || clip.cameraMotion}</span>
-                          </button>
-
-                          {/* Inline Motion Popover Selector */}
-                          {activeMotionClipId === clip.id && (
-                            <div 
-                              onClick={(e) => e.stopPropagation()}
-                              className="absolute top-7 right-0 bg-[#1c1c27] border border-[#37374b] rounded-xl p-1.5 shadow-2xl shadow-black/90 z-50 w-48 space-y-1"
-                            >
-                              <div className="text-[10px] font-semibold text-zinc-300 px-1.5 py-0.5 border-b border-zinc-800 flex justify-between items-center">
-                                <span>选择镜头运镜动效</span>
-                                <span className="text-amber-400 text-[9px]">镜头 {clip.order}</span>
-                              </div>
-                              <div className="space-y-0.5 pt-0.5">
-                                {CAMERA_MOTIONS.map(motion => (
-                                  <button
-                                    key={motion.id}
-                                    onClick={() => handleSelectMotion(clip.id, motion.id)}
-                                    className={`w-full text-left px-2 py-1 rounded-lg text-[10px] flex items-center justify-between transition-colors ${
-                                      clip.cameraMotion === motion.id
-                                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-medium'
-                                        : 'text-zinc-300 hover:bg-[#292939]'
-                                    }`}
-                                  >
-                                    <span className="flex items-center gap-1.5">
-                                      <span>{motion.icon}</span>
-                                      <span>{motion.name}</span>
-                                    </span>
-                                    <span className="text-[9px] text-zinc-500">{motion.desc.slice(0, 6)}</span>
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <p className="text-[10px] text-zinc-400 truncate leading-snug">
-                        {clipShotNarration(clip) || clip.visualPrompt || '分镜片段'}
-                      </p>
-                    </div>
-
-                    {/* Active Progress Bar */}
-                    {isCurrentActive && (
-                      <div
-                        className="absolute bottom-0 left-0 h-1 bg-amber-400 rounded-b transition-all"
-                        style={{
-                          width: `${Math.min(100, Math.max(0, ((currentTime - startTime) / (clip.duration || 3.5)) * 100))}%`
-                        }}
-                      />
-                    )}
-
-                    {/* RIGHT EDGE TRIM HANDLE (Drag to resize duration) */}
-                    <div
-                      onPointerDown={(e) => handleTrimStart(e, clip.id, clip.duration || 3.5)}
-                      className="absolute right-0 top-0 bottom-0 w-3.5 bg-gradient-to-l from-amber-500/40 via-amber-500/10 to-transparent hover:from-amber-500 hover:via-amber-400/40 cursor-ew-resize opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-10"
-                      title={clip.speechDuration ? '拖拽只增加念完后的画面停留，不能短于旁白时长' : '按住向左右拖拽微调分镜时长'}
-                    >
-                      <div className="w-1 h-5 rounded-full bg-amber-300 flex flex-col justify-between py-0.5 shadow-sm">
-                        <div className="w-0.5 h-0.5 rounded-full bg-black mx-auto" />
-                        <div className="w-0.5 h-0.5 rounded-full bg-black mx-auto" />
-                      </div>
-                    </div>
-
-                    {/* Live Duration Trim Floating Tooltip */}
-                    {isTrimmingThis && trimData && (
-                      <div className="absolute top-1 right-2 px-2 py-0.5 bg-amber-500 text-black text-[10px] font-mono font-bold rounded-md shadow-lg shadow-black/60 z-30 animate-pulse">
-                        {(() => {
-                          const speech = clips.find(c => c.id === clip.id)?.speechDuration || 0;
-                          if (speech > 0) {
-                            const hold = Math.max(0, trimData.newDuration - speech);
-                            return `语音 ${speech.toFixed(1)}s + 停留 ${hold.toFixed(1)}s`;
-                          }
-                          return `时长: ${trimData.newDuration.toFixed(1)}s (${trimData.newDuration >= trimData.originalDuration ? '+' : ''}${(trimData.newDuration - trimData.originalDuration).toFixed(1)}s)`;
-                        })()}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Drop Insert Indicator line (right) */}
                   {isDropTarget && draggedClipIndex !== null && draggedClipIndex < index && (
-                    <div className="w-1.5 h-13 bg-amber-400 rounded-full mx-1 shadow-[0_0_8px_#f59e0b] animate-pulse z-20" />
+                    <div className="absolute right-0 top-0 bottom-0 w-0.5 bg-amber-400 z-20" />
                   )}
 
-                  {/* INLINE TRANSITION CONNECTOR PILL (Between adjacent clips) */}
-                  {index < clips.length - 1 && (
-                    <div className="relative flex-shrink-0 px-1 z-10 flex items-center justify-center">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setActiveTransitionClipIndex(activeTransitionClipIndex === index ? null : index);
-                        }}
-                        className={`px-1.5 py-1 rounded-md text-[10px] border transition-all flex items-center gap-1 cursor-pointer ${
-                          activeTransitionClipIndex === index
-                            ? 'bg-amber-500 text-black border-amber-400 ring-2 ring-amber-400/50'
-                            : 'bg-[#1a1a24] hover:bg-[#252535] text-zinc-300 border-[#2f2f3d]'
-                        }`}
-                        title={`转场: ${TRANSITIONS.find(t => t.id === clip.transition)?.name || '叠化'} (点击就地切换)`}
-                      >
-                        <Zap className="w-2.5 h-2.5 text-amber-400" />
-                        <span className="font-medium text-[9px]">
-                          {TRANSITIONS.find(t => t.id === clip.transition)?.name || '叠化'}
-                        </span>
-                      </button>
+                  {isCurrentActive && (
+                    <div
+                      className="absolute bottom-0 left-0 h-0.5 bg-amber-400"
+                      style={{ width: `${Math.min(100, Math.max(0, ((currentTime - start) / duration) * 100))}%` }}
+                    />
+                  )}
 
-                      {/* INLINE TRANSITION POPOVER SELECTOR */}
-                      {activeTransitionClipIndex === index && (
-                        <div 
-                          onClick={(e) => e.stopPropagation()}
-                          className="absolute bottom-11 left-1/2 -translate-x-1/2 bg-[#1b1b24] border border-[#353545] rounded-xl p-1.5 shadow-2xl shadow-black/80 z-50 w-44 space-y-1"
-                        >
-                          <div className="text-[10px] font-semibold text-zinc-300 px-1.5 py-0.5 border-b border-zinc-800 flex justify-between items-center">
-                            <span>切换转场特效</span>
-                            <span className="text-amber-400 text-[9px]">镜头 {clip.order} ➔ {clip.order + 1}</span>
-                          </div>
-                          <div className="space-y-0.5 pt-0.5">
-                            {TRANSITIONS.map(trans => (
-                              <button
-                                key={trans.id}
-                                onClick={() => handleSelectTransition(index, trans.id)}
-                                className={`w-full text-left px-2 py-1 rounded-lg text-[10px] flex items-center justify-between transition-colors ${
-                                  clip.transition === trans.id
-                                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-medium'
-                                    : 'text-zinc-300 hover:bg-[#282836]'
-                                }`}
-                              >
-                                <span className="flex items-center gap-1.5">
-                                  <span>{trans.icon}</span>
-                                  <span>{trans.name}</span>
-                                </span>
-                                <span className="text-[9px] text-zinc-500">{trans.id}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                  <div
+                    onPointerDown={(e) => handleTrimStart(e, clip.id, duration)}
+                    className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize opacity-0 group-hover:opacity-100 bg-gradient-to-l from-white/35 to-transparent z-10"
+                    title={clip.speechDuration ? '拖拽只增加念完后的画面停留，不能短于旁白时长' : '按住拖拽微调分镜时长'}
+                  />
+
+                  {isTrimmingThis && trimData && (
+                    <div className="absolute -top-5 right-0 px-1.5 py-0.5 bg-amber-500 text-black text-[9px] font-mono font-bold rounded shadow-lg z-30 whitespace-nowrap">
+                      {(() => {
+                        const speech = clip.speechDuration || 0;
+                        if (speech > 0) {
+                          const hold = Math.max(0, trimData.newDuration - speech);
+                          return `${speech.toFixed(1)}s + ${hold.toFixed(1)}s`;
+                        }
+                        return `${trimData.newDuration.toFixed(1)}s`;
+                      })()}
                     </div>
                   )}
-                </React.Fragment>
+                </div>
               );
             })}
 
-            {/* Add Clip Button */}
+            {clipLayouts.slice(0, -1).map(({ clip, index, end }) => {
+              const trans = TRANSITIONS.find((item) => item.id === clip.transition) || TRANSITIONS[0];
+              const isNone = clip.transition === 'none';
+              const isOpen = activeTransitionClipIndex === index;
+              return (
+                <div
+                  key={`cut-${clip.id}-${index}`}
+                  className="absolute top-1 bottom-1 z-20 group/cut"
+                  style={{ left: timeToX(end) - 9, width: 18 }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                >
+                  <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/50" />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveTransitionClipIndex(isOpen ? null : index);
+                    }}
+                    title={trans.name}
+                    className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rotate-45 rounded-[2px] flex items-center justify-center cursor-pointer shadow-md transition-opacity ${
+                      isOpen
+                        ? 'bg-amber-400 opacity-100'
+                        : isNone
+                          ? 'bg-[#2a2a36] border border-zinc-600 opacity-0 group-hover/cut:opacity-100'
+                          : 'bg-[#1c1c24] border border-amber-400/70 opacity-100'
+                    }`}
+                  >
+                    <Zap className={`w-2 h-2 -rotate-45 ${isOpen ? 'text-black' : 'text-amber-300'}`} />
+                  </button>
+                  {isOpen && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-[#1b1b24] border border-[#353545] rounded-xl p-1.5 shadow-2xl z-50 w-36 space-y-0.5"
+                    >
+                      {TRANSITIONS.map((item) => (
+                        <button
+                          key={item.id}
+                          onClick={() => handleSelectTransition(index, item.id)}
+                          className={`w-full text-left px-2 py-1 rounded-lg text-[10px] ${
+                            clip.transition === item.id
+                              ? 'bg-amber-500/20 text-amber-300'
+                              : 'text-zinc-300 hover:bg-[#282836]'
+                          }`}
+                        >
+                          {item.icon} {item.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
             <button
+              onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
                 handleAddClip();
               }}
-              className="h-13 w-10 ml-2 rounded-xl bg-[#18181f] hover:bg-[#252532] border border-dashed border-[#343444] hover:border-amber-500/50 flex flex-col items-center justify-center text-zinc-400 hover:text-amber-300 transition-all flex-shrink-0 cursor-pointer"
+              style={{ left: timeToX(totalDuration) + 8 }}
+              className="absolute top-1 bottom-1 w-9 rounded-lg bg-[#18181f] hover:bg-[#252532] border border-dashed border-[#343444] hover:border-amber-500/50 flex items-center justify-center text-zinc-400 hover:text-amber-300 cursor-pointer"
               title="添加新分镜"
             >
               <Plus className="w-4 h-4" />
             </button>
           </div>
 
-          {/* 3. MULTI-TRACK EXTENSIONS: SUBTITLE TRACK & AUDIO WAVEFORM TRACK */}
           {isTrackExpanded && (
-            <div className="px-4 pb-1 space-y-1">
-              {/* SUBTITLE SUB-TRACK */}
-              <div className="flex items-center gap-1 h-5 overflow-hidden">
-                <div className="w-5 flex items-center justify-center text-zinc-500 flex-shrink-0" title="字幕轨">
-                  <MessageSquare className="w-3 h-3 text-emerald-400" />
-                </div>
-                <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                  {clips.map((clip, index) => {
-                    const startTime = getClipStartTime(index);
-                    const endTime = startTime + (clip.duration || 3.5);
-                    const isCurrentActive = currentTime >= startTime && currentTime < endTime;
-                    const clipWidth = Math.max(130, (clip.duration || 3.5) * pixelsPerSecond);
-
-                    return (
-                      <div
-                        key={`sub-${clip.id}`}
-                        style={{ width: `${clipWidth}px` }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectClip(clip.id);
-                          onTimeUpdate(startTime);
-                        }}
-                        className={`h-5 rounded-md px-1.5 flex items-center text-[9px] truncate border cursor-pointer transition-all flex-shrink-0 ${
-                          isCurrentActive
-                            ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300 font-medium ring-1 ring-emerald-500/30'
-                            : 'bg-[#15151c] border-[#252530] text-zinc-400 hover:bg-[#1c1c24]'
-                        }`}
-                        title={clipShotNarration(clip)}
-                      >
-                        <span className="truncate">💬 {clipShotNarration(clip) || '（无字幕）'}</span>
-                      </div>
-                    );
-                  })}
-                </div>
+            <>
+              <div className="relative h-5 flex-shrink-0">
+                {clipLayouts.map(({ clip, index, start, duration }) => {
+                  const isCurrentActive = currentTime >= start && currentTime < start + duration;
+                  return (
+                    <div
+                      key={`sub-${clip.id}-${index}`}
+                      style={{ left: timeToX(start), width: Math.max(2, duration * pixelsPerSecond) }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectClip(clip.id);
+                        onTimeUpdate(start);
+                      }}
+                      title={clipShotNarration(clip)}
+                      className={`absolute top-0.5 bottom-0 rounded px-1 flex items-center text-[9px] truncate border cursor-pointer ${
+                        isCurrentActive
+                          ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300'
+                          : 'bg-[#15151c] border-[#252530] text-zinc-400 hover:bg-[#1c1c24]'
+                      }`}
+                    >
+                      <span className="truncate">{clipShotNarration(clip) || '（无字幕）'}</span>
+                    </div>
+                  );
+                })}
               </div>
-
-              {/* AUDIO WAVEFORM SUB-TRACK */}
-              <div className="flex items-center gap-1 h-5 overflow-hidden">
-                <div className="w-5 flex items-center justify-center text-zinc-500 flex-shrink-0" title="AI旁白语音与BGM音频轨">
-                  <Volume2 className="w-3 h-3 text-amber-400" />
-                </div>
-                <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                  {clips.map((clip, index) => {
-                    const startTime = getClipStartTime(index);
-                    const endTime = startTime + (clip.duration || 3.5);
-                    const isCurrentActive = currentTime >= startTime && currentTime < endTime;
-                    const clipWidth = Math.max(130, (clip.duration || 3.5) * pixelsPerSecond);
-                    // Number of wave bars proportional to width
-                    const barCount = Math.max(8, Math.floor(clipWidth / 6));
-
-                    return (
-                      <div
-                        key={`audio-${clip.id}`}
-                        style={{ width: `${clipWidth}px` }}
-                        className={`h-5 rounded-md px-1.5 flex items-center justify-between border flex-shrink-0 overflow-hidden ${
-                          isCurrentActive
-                            ? 'bg-amber-500/15 border-amber-500/50'
-                            : 'bg-[#14141a] border-[#22222c]'
-                        }`}
-                      >
-                        {Array.from({ length: barCount }).map((_, barIdx) => {
-                          // Procedural audio energy wave variation
-                          const pseudoHeight = 3 + Math.abs(Math.sin((barIdx + index * 5) * 0.8)) * 11;
-                          const isBarActive = isCurrentActive && (currentTime - startTime) / (clip.duration || 3.5) >= barIdx / barCount;
-
-                          return (
-                            <div
-                              key={barIdx}
-                              className={`w-0.5 rounded-full transition-all ${
-                                isBarActive
-                                  ? 'bg-amber-400 shadow-[0_0_4px_#f59e0b]'
-                                  : isCurrentActive
-                                  ? 'bg-amber-500/50'
-                                  : 'bg-zinc-600'
-                              }`}
-                              style={{ height: `${pseudoHeight}px` }}
-                            />
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
-                </div>
+              <div className="relative h-5 flex-shrink-0">
+                {clipLayouts.map(({ clip, index, start, duration }) => {
+                  const isCurrentActive = currentTime >= start && currentTime < start + duration;
+                  const clipWidth = Math.max(2, duration * pixelsPerSecond);
+                  const barCount = Math.max(4, Math.floor(clipWidth / 5));
+                  return (
+                    <div
+                      key={`audio-${clip.id}-${index}`}
+                      style={{ left: timeToX(start), width: clipWidth }}
+                      className={`absolute top-0.5 bottom-0 rounded px-0.5 flex items-center justify-between border overflow-hidden ${
+                        isCurrentActive ? 'bg-amber-500/15 border-amber-500/50' : 'bg-[#14141a] border-[#22222c]'
+                      }`}
+                    >
+                      {Array.from({ length: barCount }).map((_, barIdx) => {
+                        const pseudoHeight = 3 + Math.abs(Math.sin((barIdx + index * 5) * 0.8)) * 10;
+                        const isBarActive = isCurrentActive && (currentTime - start) / duration >= barIdx / barCount;
+                        return (
+                          <div
+                            key={barIdx}
+                            className={`w-0.5 rounded-full ${
+                              isBarActive ? 'bg-amber-400' : isCurrentActive ? 'bg-amber-500/50' : 'bg-zinc-600'
+                            }`}
+                            style={{ height: `${pseudoHeight}px` }}
+                          />
+                        );
+                      })}
+                    </div>
+                  );
+                })}
               </div>
-            </div>
+            </>
           )}
 
           {hoverTime !== null && hoverPosition && !isDragging && (
-            <div 
-              className="absolute top-0 bottom-0 w-[1px] bg-white/60 pointer-events-none z-20 shadow-[0_0_4px_rgba(255,255,255,0.8)]"
-              style={{ left: `${hoverPosition.x}px` }}
+            <div
+              className="absolute top-0 bottom-0 w-px bg-white/50 pointer-events-none z-30"
+              style={{ left: timeToX(hoverTime) }}
             />
           )}
 
-          {/* 5. DRAGGABLE PLAYHEAD NEEDLE & HANDLE */}
           <div
             id="timeline-playhead"
-            className="absolute bottom-0 pointer-events-none z-30"
-            style={{ 
-              left: `${playheadX}px`, 
-              top: '4px',
-              transform: 'translateX(-50%)' 
-            }}
+            className="absolute top-0 bottom-0 pointer-events-none z-30"
+            style={{ left: playheadX, transform: 'translateX(-50%)' }}
           >
             {/* Draggable Diamond & Time */}
             <div className="pointer-events-auto cursor-ew-resize flex flex-col items-center group">
@@ -1058,8 +934,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
               />
             </div>
 
-            {/* Glowing Vertical Needle */}
-            <div className="w-[2px] h-[calc(100%-18px)] bg-amber-400 mx-auto shadow-[0_0_8px_#f59e0b] relative">
+            <div className="absolute top-[18px] bottom-0 left-1/2 -translate-x-1/2 w-[2px] bg-amber-400 shadow-[0_0_8px_#f59e0b]">
               <div className="absolute inset-0 bg-white/40 animate-pulse" />
             </div>
           </div>

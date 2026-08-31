@@ -80,12 +80,16 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
 
   // Subscribe to audio engine preview states for bi-directional synchronization
   useEffect(() => {
-    const unsubscribe = audioEngine.subscribePreviewState((trackId) => {
+    const unsubscribeBgm = audioEngine.subscribePreviewState((trackId) => {
       setPreviewingBgmId(trackId);
+    });
+    const unsubscribeVoice = audioEngine.subscribeVoicePreview((playing) => {
+      setIsPlayingPreviewVoice(playing);
     });
 
     return () => {
-      unsubscribe();
+      unsubscribeBgm();
+      unsubscribeVoice();
       audioEngine.stopPreviewBgm();
       audioEngine.stopNarration();
     };
@@ -121,7 +125,17 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
         () => setIsPlayingPreviewVoice(false),
         { persistPreview: true }
       ).then((result) => {
-        if (result?.fromCache) {
+        if (result?.cancelled) {
+          hideStatusToast('voice-preview');
+          return;
+        }
+        if (!result?.played) {
+          hideStatusToast('voice-preview');
+          setIsPlayingPreviewVoice(false);
+          showStatusToast('试听合成了，但没有播出来，请再点一次', { tone: 'warn', id: 'voice-preview' });
+          return;
+        }
+        if (result.fromCache) {
           hideStatusToast('voice-preview');
           return;
         }
@@ -319,7 +333,8 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
               可在这里单独重配音，不改画面文件。合成后各镜时长会按口播自动对齐。分镜表里也有同一入口。
             </p>
             <button
-              onClick={onGenerateFullNarration}
+              type="button"
+              onClick={() => onGenerateFullNarration?.()}
               disabled={isGeneratingNarration || !onGenerateFullNarration}
               className="w-full py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-semibold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 text-xs"
             >

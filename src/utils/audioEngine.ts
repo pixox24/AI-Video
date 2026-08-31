@@ -4,6 +4,11 @@ import { ttsSourceKey } from './ttsCatalog';
 import { getTtsPreviewUrl, makeVoicePreviewKey, setTtsPreviewUrl } from './ttsPreviewCache';
 
 export type AudioPreviewListener = (previewTrackId: string | null) => void;
+export type VoicePreviewListener = (playing: boolean) => void;
+
+/** 1-sample silent WAV: capture the click's user-gesture on an HTMLAudioElement before TTS returns. */
+const SILENT_WAV =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
 /**
  * High-performance, single-instance audio engine for studio BGM playback,
@@ -26,6 +31,7 @@ class AudioEngine {
   // Voiceover instance & session
   private activeAudioElement: HTMLAudioElement | null = null;
   private voiceSessionToken: number = 0;
+  private voicePreviewActive = false;
   private ttsCache: Map<string, string> = new Map();
   private audioDuckingEnabled: boolean = true;
   private duckingAnimFrame: number | null = null;
@@ -33,8 +39,10 @@ class AudioEngine {
   private fullNarrationAudio: HTMLAudioElement | null = null;
   private fullNarrationUrl: string | null = null;
   private narrationForceSeek = false;
+  private audioUnlockCtx: AudioContext | null = null;
 
   private previewListeners: Set<AudioPreviewListener> = new Set();
+  private voicePreviewListeners: Set<VoicePreviewListener> = new Set();
 
   public subscribePreviewState(listener: AudioPreviewListener): () => void {
     this.previewListeners.add(listener);
@@ -52,6 +60,42 @@ class AudioEngine {
         console.error('Error in preview listener:', e);
       }
     });
+  }
+
+  public subscribeVoicePreview(listener: VoicePreviewListener): () => void {
+    this.voicePreviewListeners.add(listener);
+    return () => {
+      this.voicePreviewListeners.delete(listener);
+    };
+  }
+
+  public isVoicePreviewActive(): boolean {
+    return this.voicePreviewActive;
+  }
+
+  private setVoicePreviewActive(playing: boolean) {
+    if (this.voicePreviewActive === playing) return;
+    this.voicePreviewActive = playing;
+    this.voicePreviewListeners.forEach((listener) => {
+      try {
+        listener(playing);
+      } catch (e) {
+        console.error('Error in voice preview listener:', e);
+      }
+    });
+  }
+
+  private unlockPlaybackFromUserGesture() {
+    try {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      if (!this.audioUnlockCtx) this.audioUnlockCtx = new Ctx();
+      if (this.audioUnlockCtx.state === 'suspended') {
+        void this.audioUnlockCtx.resume();
+      }
+    } catch {
+      // ignore
+    }
   }
 
   /**
@@ -333,13 +377,24 @@ class AudioEngine {
     rate: number = 1.0, 
     onEnd?: () => void,
     opts?: { persistPreview?: boolean }
-  ): Promise<{ fromCache: boolean }> {
-    this.stopFullNarration();
+  ): Promise<{ fromCache: boolean; played: boolean; cancelled?: boolean }> {
+    const persistPreview = Boolean(opts?.persistPreview);
+    // Voice-panel preview must not tear down the timeline's full VO file; only pause it.
+    if (persistPreview) {
+      if (this.fullNarrationAudio && !this.fullNarrationAudio.paused) {
+        try { this.fullNarrationAudio.pause(); } catch { /* ignore */ }
+      }
+    } else {
+      this.stopFullNarration();
+    }
     this.stopNarration();
     const session = this.voiceSessionToken;
+    if (persistPreview) this.setVoicePreviewActive(true);
+
     if (!text || !text.trim()) {
+      this.setVoicePreviewActive(false);
       if (onEnd) onEnd();
-      return { fromCache: false };
+      return { fromCache: false, played: false, cancelled: false };
     }
 
     // Apply audio ducking on BGM
@@ -347,11 +402,11 @@ class AudioEngine {
 
     const handleVoiceEnd = () => {
       if (this.voiceSessionToken !== session) return;
+      this.setVoicePreviewActive(false);
       this.applyDucking(false);
       if (onEnd) onEnd();
     };
 
-    const persistPreview = Boolean(opts?.persistPreview);
     const sourceKey = ttsSourceKey(this.ttsApi as CustomTtsApiConfig | undefined, character);
     const previewKey = makeVoicePreviewKey(sourceKey, persistPreview ? 1 : rate);
     const cacheKey = persistPreview ? previewKey : `${sourceKey}|${rate}|${text.trim()}`;
@@ -360,6 +415,18 @@ class AudioEngine {
       audioUrl = getTtsPreviewUrl(previewKey) || undefined;
     }
     const fromCache = Boolean(audioUrl);
+
+    // Hold one HTMLAudioElement from the click so play() after TTS still counts as a user gesture.
+    let previewPlayer: HTMLAudioElement | null = null;
+    if (persistPreview) {
+      this.unlockPlaybackFromUserGesture();
+      previewPlayer = new Audio();
+      previewPlayer.preload = 'auto';
+      previewPlayer.volume = 0;
+      previewPlayer.src = SILENT_WAV;
+      this.activeAudioElement = previewPlayer;
+      void previewPlayer.play().catch(() => {});
+    }
 
     if (!audioUrl) {
       try {
@@ -374,7 +441,7 @@ class AudioEngine {
           })
         });
 
-        if (this.voiceSessionToken !== session) return { fromCache: false };
+        if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
 
         if (res.ok) {
           const data = await res.json();
@@ -389,42 +456,81 @@ class AudioEngine {
       }
     }
 
-    if (this.voiceSessionToken !== session) return { fromCache: false };
+    if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
 
     // Play high-quality neural voice if retrieved
     if (audioUrl) {
-      try {
-        const audio = new Audio(audioUrl);
-        this.activeAudioElement = audio;
-        audio.playbackRate = 1.0;
-
-        audio.onended = () => {
-          if (this.voiceSessionToken !== session) return;
-          this.teardownAudio(audio);
-          this.activeAudioElement = null;
-          handleVoiceEnd();
-        };
-
-        audio.onerror = () => {
-          if (this.voiceSessionToken !== session) return;
-          this.teardownAudio(audio);
-          this.activeAudioElement = null;
-          this.fallbackWebSpeech(text, character, rate, handleVoiceEnd);
-        };
-
-        await audio.play();
-        return { fromCache };
-      } catch (playErr) {
-        if (this.voiceSessionToken !== session) return { fromCache: false };
-        console.warn('Audio element play failed, falling back:', playErr);
+      const played = await this.playVoiceUrl(
+        audioUrl,
+        session,
+        text,
+        character,
+        persistPreview ? 1 : rate,
+        handleVoiceEnd,
+        previewPlayer
+      );
+      if (this.voiceSessionToken !== session) {
+        return { fromCache, played: false, cancelled: true };
+      }
+      if (played) {
+        return { fromCache, played: true };
       }
     }
 
-    if (this.voiceSessionToken !== session) return { fromCache: false };
+    if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
+
+    if (previewPlayer && this.activeAudioElement === previewPlayer) {
+      this.teardownAudio(previewPlayer);
+      this.activeAudioElement = null;
+    }
 
     // Fallback: Web Speech API
-    this.fallbackWebSpeech(text, character, rate, handleVoiceEnd);
-    return { fromCache: false };
+    this.fallbackWebSpeech(text, character, persistPreview ? 1 : rate, handleVoiceEnd);
+    return { fromCache: false, played: true };
+  }
+
+  private async playVoiceUrl(
+    audioUrl: string,
+    session: number,
+    text: string,
+    character: string,
+    rate: number,
+    handleVoiceEnd: () => void,
+    existingPlayer: HTMLAudioElement | null
+  ): Promise<boolean> {
+    const audio = existingPlayer || new Audio();
+    try {
+      this.activeAudioElement = audio;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.playbackRate = 1.0;
+      audio.volume = 1;
+      try { audio.pause(); } catch { /* ignore */ }
+
+      audio.onended = () => {
+        if (this.voiceSessionToken !== session) return;
+        this.teardownAudio(audio);
+        if (this.activeAudioElement === audio) this.activeAudioElement = null;
+        handleVoiceEnd();
+      };
+
+      audio.onerror = () => {
+        if (this.voiceSessionToken !== session) return;
+        this.teardownAudio(audio);
+        if (this.activeAudioElement === audio) this.activeAudioElement = null;
+        this.fallbackWebSpeech(text, character, rate, handleVoiceEnd);
+      };
+
+      audio.src = audioUrl;
+      await audio.play();
+      return this.voiceSessionToken === session;
+    } catch (playErr) {
+      audio.onended = null;
+      audio.onerror = null;
+      if (this.voiceSessionToken !== session) return false;
+      console.warn('Audio element play failed, falling back:', playErr);
+      return false;
+    }
   }
 
   private fallbackWebSpeech(
@@ -481,6 +587,7 @@ class AudioEngine {
 
   public stopNarration() {
     this.voiceSessionToken++;
+    this.setVoicePreviewActive(false);
     this.applyDucking(false);
 
     if (this.activeAudioElement) {

@@ -2,7 +2,8 @@ import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { VideoProject, StoryboardClip, CameraMotion, SubtitleConfig } from '../types';
 import { calculateSubtitleLayout } from './subtitleFormatter';
 import { DEFAULT_BGM_TRACK_ID, bgmById, resolveBgmTrackId, resolveTtsApi } from './presets';
-import { clipShotNarration, detectSpeechBounds, isNarrationTrackFresh } from './narrationTrack';
+import { clipNarrationTimings, clipShotNarration, detectSpeechBounds, isNarrationTrackFresh } from './narrationTrack';
+import { ensureSubtitleFont, resolveSubtitleTypeface, subtitleCanvasFont } from './subtitleFonts';
 
 const TRANSITION_SECONDS = 0.4;
 
@@ -142,13 +143,14 @@ function mixNarrationFromTrack(
     return speechIntervals;
   }
 
-  const byId = new Map((track?.clips || []).map((item) => [item.clipId, item]));
+  const resolved = clipNarrationTimings(project.clips, track?.clips);
   let timelineCursor = 0;
   let lastAudioEnd = 0;
 
-  for (const clip of project.clips) {
+  for (let i = 0; i < project.clips.length; i++) {
+    const clip = project.clips[i];
     const clipDuration = clip.duration || 3.5;
-    const timing = byId.get(clip.id);
+    const timing = resolved[i];
     const audioStart = timing?.audioStart ?? lastAudioEnd;
     const timedSpeech = timing ? Math.max(0, timing.audioEnd - timing.audioStart) : 0;
     const speechDuration =
@@ -393,6 +395,8 @@ export async function exportProjectToMP4(
   const totalFrames = Math.max(1, Math.floor(totalDuration * fps));
 
   onProgress?.(5, '正在初始化画布与导出参数...');
+  onProgress?.(6, '正在载入字幕字体...');
+  await ensureSubtitleFont(project.subtitles);
 
   // Determine export canvas dimensions based on aspect ratio & export quality
   let width = 1920;
@@ -747,6 +751,7 @@ function drawExportSubtitles(
   const posY = (height * config.positionY) / 100;
   const maxWidthRatio = config.maxWidthRatio || 0.84;
   const maxLines = config.maxLines || 3;
+  const typeface = resolveSubtitleTypeface(config);
 
   const layout = calculateSubtitleLayout(
     ctx,
@@ -756,7 +761,8 @@ function drawExportSubtitles(
     baseFontSize,
     config.bilingual,
     maxWidthRatio,
-    maxLines
+    maxLines,
+    typeface
   );
 
   if (layout.lines.length === 0) return;
@@ -783,7 +789,7 @@ function drawExportSubtitles(
   const primaryBlockHeight = layout.lines.length * layout.lineHeight;
   const startY = -layout.totalHeight / 2 + layout.lineHeight / 2;
 
-  ctx.font = `bold ${layout.fontSize}px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`;
+  ctx.font = subtitleCanvasFont(typeface.primaryFamily, layout.fontSize, typeface.primaryWeight);
 
   layout.lines.forEach((line, idx) => {
     const lineY = startY + idx * layout.lineHeight;
@@ -798,7 +804,7 @@ function drawExportSubtitles(
   });
 
   if (config.bilingual && layout.secondaryLines.length > 0) {
-    ctx.font = `500 ${layout.secondaryFontSize}px system-ui, -apple-system, "PingFang SC", sans-serif`;
+    ctx.font = subtitleCanvasFont(typeface.secondaryFamily, layout.secondaryFontSize, typeface.secondaryWeight);
     const secondaryStartY = -layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;
 
     layout.secondaryLines.forEach((secLine, idx) => {

@@ -5,8 +5,11 @@ import {
   StyleDna,
   StyleDnaModule,
   StylePack,
+  VisualBible,
+  VisualContinuity,
   VisualStyle
 } from '../types';
+import { applyBibleToChineseIntent, applyBibleToEnglishPrompt } from './visualBible';
 
 export const DEFAULT_STYLE_VISION_API: CustomStyleVisionApiConfig = {
   enabled: false,
@@ -560,25 +563,31 @@ export function hashStyleImage(dataUrl: string): string {
 }
 
 export function localRewriteClipPrompt(
-  clip: { visualPrompt?: string; chineseVisualPrompt?: string; narration?: string },
-  pack: StylePack
+  clip: { visualPrompt?: string; chineseVisualPrompt?: string; narration?: string; characterIds?: string[]; locationId?: string; continuity?: VisualContinuity },
+  pack: StylePack,
+  visualBible?: VisualBible | null
 ): { visualPrompt: string; chineseVisualPrompt: string } {
   const scene = stripStyleRenders(
     clip.chineseVisualPrompt || clip.narration || clip.visualPrompt || pack.label
   );
+  const withBible = applyBibleToChineseIntent(scene, visualBible, clip);
   if (usesStyleDna(pack)) {
     const mods = new Set(activeTransferModules(pack));
     const chinese = mods.has('world')
-      ? `${pack.world.era}。${pack.world.wardrobe}。${scene}`.replace(/。+/g, '。')
-      : scene;
+      ? `${pack.world.era}。${pack.world.wardrobe}。${withBible}`.replace(/。+/g, '。')
+      : withBible;
     return {
       chineseVisualPrompt: chinese,
-      visualPrompt: buildVisualPrompt(scene, pack)
+      visualPrompt: applyBibleToEnglishPrompt(buildVisualPrompt(scene, pack), visualBible, clip.characterIds)
     };
   }
-  const chinese = `${pack.world.era}。${pack.world.wardrobe}。${scene}`.replace(/。+/g, '。');
+  const chinese = `${pack.world.era}。${pack.world.wardrobe}。${withBible}`.replace(/。+/g, '。');
   return {
     chineseVisualPrompt: chinese,
-    visualPrompt: buildVisualPrompt(`${pack.world.era}, ${pack.world.wardrobe}, ${scene}`, pack)
+    visualPrompt: applyBibleToEnglishPrompt(
+      buildVisualPrompt(`${pack.world.era}, ${pack.world.wardrobe}, ${scene}`, pack),
+      visualBible,
+      clip.characterIds
+    )
   };
 }
