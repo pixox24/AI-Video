@@ -41,6 +41,7 @@ import {
   VisualStyle
 } from '../types';
 import { countNarrationChars } from '../utils/narrationTrack';
+import { applyLlmCoverage, CAMERA_ANGLE_LABEL, COVERAGE_JOB_LABEL, SHOT_SIZE_LABEL } from '../utils/shotCoverage';
 import {
   PACE_PRESETS,
   PLATFORM_OPTIONS,
@@ -124,6 +125,10 @@ interface ScriptPanelProps {
   isGeneratingNarration?: boolean;
   narrationError?: string | null;
   narrationFresh?: boolean;
+  isPlaying?: boolean;
+  currentTime?: number;
+  onTogglePlay?: () => void;
+  sentenceGap?: number;
 }
 
 const INTENT_CARDS: {
@@ -183,7 +188,11 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   onRecommendBgm,
   isGeneratingNarration = false,
   narrationError = null,
-  narrationFresh = false
+  narrationFresh = false,
+  isPlaying = false,
+  currentTime = 0,
+  onTogglePlay,
+  sentenceGap = 0.2
 }) => {
   const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | 'bible' | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -380,6 +389,39 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     return rebuildForecast({ ...base, fullNarration: narration, speechSpans: [] });
   };
 
+  const refineCoverage = async (base: ScriptWorkspace): Promise<ScriptWorkspace> => {
+    const shots = base.forecastShots || [];
+    if (shots.length < 2) return base;
+    try {
+      const res = await fetch('/api/script/coverage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          shots: shots.map((shot) => ({
+            id: shot.id,
+            function: shot.function,
+            voRole: shot.voRole,
+            splitReason: shot.splitReason,
+            sliceText: shot.sliceText,
+            narration: shot.narration,
+            visualIntent: shot.visualIntent
+          })),
+          visualBible: base.visualBible,
+          genre: base.genrePackId || selected?.genre || null,
+          stylePack,
+          llmApi: customLlmApi
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (Array.isArray(data?.shots) && data.shots.length === shots.length) {
+        return { ...base, forecastShots: applyLlmCoverage(shots, data.shots) };
+      }
+    } catch {
+      // keep rule coverage from rebuildForecast
+    }
+    return base;
+  };
+
   const applyDraftResult = async (data: any, topic: string) => {
     const fallback = fallbackDraft({
       topic,
@@ -410,7 +452,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       gate: 'fast'
     };
     const withBible = await ensureVisualBible(drafted, fullNarration);
-    const next = await refineSpeechSpans(withBible, fullNarration);
+    const spanned = await refineSpeechSpans(withBible, fullNarration);
+    const next = await refineCoverage(spanned);
     if (typeof data?.title === 'string' && data.title.trim()) {
       onTopicChange(data.title.trim());
     }
@@ -436,7 +479,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       gate: 'fast'
     });
     const withBible = await ensureVisualBible(diagnosed, pasted);
-    const next = await refineSpeechSpans(withBible, pasted);
+    const spanned = await refineSpeechSpans(withBible, pasted);
+    const next = await refineCoverage(spanned);
     onChange(next);
     setStatus(
       withBible.visualBible?.mode === 'story'
@@ -465,7 +509,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         ...workspace,
         visualBible: workspace.visualBible ? { ...workspace.visualBible, pinned: false } : null
       }, narration);
-      onChange(rebuildForecast(next));
+      const covered = await refineCoverage(rebuildForecast(next));
+      onChange(covered);
       setStatus(next.visualBible?.mode === 'story' ? '画面圣经已更新，角色会贯穿各镜' : '画面约束已更新');
     } finally {
       setBusy(null);
@@ -480,11 +525,12 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       aspectRatio,
       stylePack,
       existingClips,
-      workspace.visualBible
+      workspace.visualBible,
+      sentenceGap
     );
     commit(stampAppliedWorkspace(workspace, workspace.forecastShots, stylePack, clips.length));
     onNeedFullNarration?.(clips);
-    setStatus(`已写入 ${clips.length} 镜。对照句同一口气配两图。`);
+    setStatus(`已写入 ${clips.length} 镜。机位已按全片设计，对照句同一口气配两图。`);
   };
 
   const handleStyleOnly = () => {
@@ -959,6 +1005,20 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
             className="text-[12px] text-zinc-400 hover:text-zinc-200 cursor-pointer disabled:opacity-40"
           >
             只更新画面，旁白沿用
+          </button>
+        )}
+        {existingClips.length > 0 && onTogglePlay && (
+          <button
+            type="button"
+            onClick={onTogglePlay}
+            title="空格也可播放/暂停"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-[#2e2e3a] text-[12px] text-zinc-200 hover:border-amber-500/40 hover:text-amber-300 cursor-pointer"
+          >
+            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+            {isPlaying ? '暂停预览' : '播放预览'}
+            <span className="font-mono text-[10px] text-zinc-500">
+              {currentTime.toFixed(1)}s
+            </span>
           </button>
         )}
         <button
@@ -1624,7 +1684,11 @@ function RhythmStage({
               <div className="flex-1 min-w-0">
                 <div className="text-[12px] text-zinc-200 truncate">{shot.sliceText || shot.narration || '（无口播，纯画面停留）'}</div>
                 <div className="mt-1 text-[10px] text-zinc-500">
-                  {FUNCTION_LABEL[shot.function]} · {ENERGY_LABEL[shot.energy]} · 口播 {shot.speechDuration.toFixed(1)}s · 停留 {shot.holdDuration.toFixed(1)}s
+                  {FUNCTION_LABEL[shot.function]} · {ENERGY_LABEL[shot.energy]}
+                  {shot.shotSize ? ` · ${SHOT_SIZE_LABEL[shot.shotSize]}` : ''}
+                  {shot.cameraAngle ? ` · ${CAMERA_ANGLE_LABEL[shot.cameraAngle]}` : ''}
+                  {shot.coverageJob ? ` · ${COVERAGE_JOB_LABEL[shot.coverageJob]}` : ''}
+                  {' '}· 口播 {shot.speechDuration.toFixed(1)}s · 停留 {shot.holdDuration.toFixed(1)}s
                   {shot.visualCount && shot.visualCount > 1 ? ` · 同一句图 ${(shot.visualIndex || 0) + 1}/${shot.visualCount}` : ''}
                   {shot.holdPinned ? ' · 停留已钉' : ''}
                   {continuityShortLabel(shot.continuity) ? ` · ${continuityShortLabel(shot.continuity)}` : ''}

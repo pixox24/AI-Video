@@ -18,6 +18,8 @@ import confetti from 'canvas-confetti';
 import { VideoProject } from '../types';
 import { exportProjectToMP4 } from '../utils/mp4Exporter';
 import { clipShotNarration } from '../utils/narrationTrack';
+import { buildExportChecklist } from '../utils/exportChecklist';
+import { isStudioFontReady, loadStudioFont, resolveSubtitleFontId, studioFontById } from '../utils/subtitleFonts';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -35,6 +37,30 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
     format: 'mp4' | 'webm';
     sizeMb?: string;
   } | null>(null);
+  const [fontReady, setFontReady] = useState(true);
+  const [fontLoading, setFontLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const fontId = resolveSubtitleFontId(project.subtitles);
+    const font = studioFontById(fontId);
+    if (!font.url || isStudioFontReady(fontId)) {
+      setFontReady(true);
+      setFontLoading(false);
+      return;
+    }
+    setFontReady(false);
+    setFontLoading(true);
+    let cancelled = false;
+    void loadStudioFont(fontId).then((ok) => {
+      if (cancelled) return;
+      setFontReady(ok);
+      setFontLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, project.subtitles]);
 
   useEffect(() => {
     if (isOpen) return;
@@ -50,6 +76,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
   if (!isOpen) return null;
 
   const totalDuration = project.clips.reduce((acc, c) => acc + (c.duration || 3.5), 0);
+  const checklist = buildExportChecklist(project).map((issue) => (
+    issue.id === 'font' && fontLoading
+      ? { ...issue, text: `正在加载字幕字体「${studioFontById(resolveSubtitleFontId(project.subtitles)).name}」…` }
+      : issue
+  ));
+  const blocked = checklist.some((issue) => issue.level === 'block');
 
   // Generate Video using true H.264 MP4 encoder
   const handleStartExportVideo = async () => {
@@ -188,6 +220,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
             </div>
           </div>
 
+          {checklist.length > 0 && (
+            <div className="space-y-1.5">
+              <span className="text-zinc-400 font-medium text-[11px]">导出前检查</span>
+              <div className="rounded-xl border border-[#2c2c3c] bg-[#1a1a24] p-2.5 space-y-1.5">
+                {checklist.map((issue) => (
+                  <div key={issue.id} className="flex items-start gap-2 text-[11px] leading-relaxed">
+                    <span className={`mt-0.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                      issue.level === 'block' ? 'bg-rose-400' : 'bg-amber-400'
+                    }`} />
+                    <span className={issue.level === 'block' ? 'text-rose-300' : 'text-amber-200/90'}>{issue.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Export Progress Bar */}
           {isExporting && (
             <div className="space-y-2.5 p-3.5 bg-[#1f1f2a] border border-amber-500/30 rounded-xl shadow-lg">
@@ -288,11 +336,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
 
           <button
             onClick={handleStartExportVideo}
-            disabled={isExporting}
+            disabled={isExporting || blocked}
             className="px-5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer disabled:opacity-50 transition-all active:scale-95"
           >
             {isExporting ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-black" /> : <Video className="w-3.5 h-3.5" />}
-            {isExporting ? '正在渲染 MP4...' : exportedResult ? '重新渲染 MP4' : '开始渲染导出 MP4'}
+            {isExporting
+              ? (fontLoading ? '正在载入字体…' : '正在渲染 MP4...')
+              : exportedResult
+                ? '重新渲染 MP4'
+                : blocked
+                  ? '请先补全必选项'
+                  : '开始渲染导出 MP4'}
           </button>
         </div>
       </div>

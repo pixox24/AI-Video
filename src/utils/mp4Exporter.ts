@@ -103,9 +103,8 @@ function mixNarrationFromTrack(
 ): { start: number; end: number }[] {
   const speechIntervals: { start: number; end: number }[] = [];
   const track = project.audio?.narrationTrack;
-  const hasPinnedHold = project.clips.some(
-    (clip) => Boolean(clip.holdPinned) && (clip.holdDuration || 0) > 0.05
-  );
+  const timelineDuration = project.clips.reduce((sum, clip) => sum + (clip.duration || 3.5), 0);
+  const fileIncludesHolds = Math.abs(decodedBuffer.duration - timelineDuration) < 0.15;
 
   const connectSource = (when: number, offset: number, duration: number) => {
     const bufferDuration = decodedBuffer.duration;
@@ -127,9 +126,12 @@ function mixNarrationFromTrack(
     return true;
   };
 
-  // Preview plays one continuous file when holds are not pinned. Scheduling the
-  // whole buffer avoids 1-sample gaps from per-clip BufferSource slices.
-  if (!hasPinnedHold) {
+  // One clock: if the VO file already contains sentence-gap silence, mix it whole.
+  if (fileIncludesHolds && track?.alignment?.version === 2) {
+    connectSource(0, 0, Math.min(decodedBuffer.duration, totalDuration));
+    return speechIntervals;
+  }
+  if (!project.clips.some((clip) => (clip.holdDuration || 0) > 0.04)) {
     if (track?.alignment?.version === 2) {
       connectSource(0, 0, Math.min(decodedBuffer.duration, totalDuration));
       return speechIntervals;
@@ -157,7 +159,7 @@ function mixNarrationFromTrack(
       timedSpeech > 0.02
         ? timedSpeech
         : clip.speechDuration ?? 0;
-    const holdDuration = clip.holdPinned ? Math.max(0, clip.holdDuration || 0) : 0;
+    const holdDuration = Math.max(0, clip.holdDuration || 0);
     const playDuration = Math.min(speechDuration, Math.max(0, clipDuration - holdDuration), clipDuration);
 
     try {

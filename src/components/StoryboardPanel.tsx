@@ -21,12 +21,18 @@ import {
   AspectRatio,
   CustomImageApiConfig,
   CustomLlmApiConfig,
-  ClipsChange
+  ClipsChange,
+  StylePack,
+  VisualBible,
+  ScriptGenre
 } from '../types';
 import { resolveImageApi } from '../utils/presets';
 import { generateProceduralArtwork } from '../utils/visualGenerator';
-import { buildVisualPrompt, presetStylePack } from '../utils/stylePack';
+import { presetStylePack } from '../utils/stylePack';
+import { beatToChinese, clipImagePromptArgs } from '../utils/imagePrompt';
 import { newClipId } from '../utils/narrationTrack';
+import { isUtteranceTail } from '../utils/sentenceGap';
+import { storeImageDataUrl } from '../utils/projectPersist';
 import { ToolRail } from './ToolRail';
 import { StoryboardClipCard } from './StoryboardClipCard';
 
@@ -49,6 +55,12 @@ interface StoryboardPanelProps {
   onRegenerateNarration?: () => void;
   isGeneratingNarration?: boolean;
   narrationFresh?: boolean;
+  onRetryFailedImages?: () => void;
+  sentenceGap?: number;
+  onUtteranceHoldChange?: (clipId: string, holdDuration: number, pinned: boolean) => void;
+  stylePack?: StylePack;
+  visualBible?: VisualBible | null;
+  genre?: ScriptGenre | null;
 }
 
 export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
@@ -69,8 +81,24 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
   batchProgress,
   onRegenerateNarration,
   isGeneratingNarration = false,
-  narrationFresh = false
+  narrationFresh = false,
+  onRetryFailedImages,
+  sentenceGap = 0.2,
+  onUtteranceHoldChange,
+  stylePack,
+  visualBible = null,
+  genre = null
 }) => {
+  const activePack = stylePack || presetStylePack(visualStyle);
+  const compileClip = (clip: StoryboardClip, index: number, total = clips.length) => clipImagePromptArgs(
+    clip,
+    index,
+    total,
+    activePack,
+    visualBible,
+    { aspectRatio, customImageApi },
+    genre
+  );
   const [subTab, setSubTab] = useState<StoryboardSubTab>(clips.length > 0 ? 'shots' : 'split');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [generatingClipId, setGeneratingClipId] = useState<string | null>(null);
@@ -108,19 +136,28 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
         const data = await res.json().catch(() => ({}));
         if (data?.shots && Array.isArray(data.shots) && data.shots.length > 0) {
           const usedIds = new Set<string>();
-          const newClips: StoryboardClip[] = data.shots.map((shot: any, index: number) => ({
-            id: newClipId(index, usedIds),
-            order: index + 1,
-            duration: typeof shot.duration === 'number' ? shot.duration : Number(shot.duration) || 3.5,
-            narration: shot.narration,
-            secondaryText: shot.secondaryText || `Scene ${index + 1}`,
-            visualPrompt: shot.visualPrompt || `${cleanText.slice(0, 30)}, cinematic lighting`,
-            chineseVisualPrompt: shot.chineseVisualPrompt || shot.narration,
-            cameraMotion: (shot.cameraMotion as CameraMotion) || 'zoom-in',
-            transition: (shot.transition as TransitionType) || 'crossfade',
-            imageUrl: generateProceduralArtwork(shot.narration || '', visualStyle, aspectRatio, index),
-            isGeneratingImage: false
-          }));
+          const newClips: StoryboardClip[] = data.shots.map((shot: any, index: number) => {
+            const draft: StoryboardClip = {
+              id: newClipId(index, usedIds),
+              order: index + 1,
+              duration: typeof shot.duration === 'number' ? shot.duration : Number(shot.duration) || 3.5,
+              narration: shot.narration,
+              secondaryText: shot.secondaryText || `Scene ${index + 1}`,
+              visualPrompt: '',
+              chineseVisualPrompt: shot.chineseVisualPrompt || '',
+              cameraMotion: (shot.cameraMotion as CameraMotion) || 'zoom-in',
+              transition: (shot.transition as TransitionType) || 'crossfade',
+              imageUrl: generateProceduralArtwork(shot.narration || '', visualStyle, aspectRatio, index),
+              isGeneratingImage: false
+            };
+            const compiled = compileClip(draft, index, data.shots.length);
+            return {
+              ...draft,
+              visualBeat: compiled.beat,
+              visualPrompt: compiled.prompt,
+              chineseVisualPrompt: beatToChinese(compiled.beat) || draft.chineseVisualPrompt
+            };
+          });
 
           if (data.title) onTopicChange(data.title);
           onClipsChange(newClips);
@@ -160,18 +197,25 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       const newClips: StoryboardClip[] = safeChunks.map((chunk, idx) => {
         const charCount = chunk.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').length;
         const duration = Math.max(2.5, Math.min(7.0, Math.round((charCount / 4.2) * 10) / 10 || 3.5));
-        return {
+        const draft: StoryboardClip = {
           id: newClipId(idx, usedIds),
           order: idx + 1,
           duration,
           narration: chunk,
           secondaryText: `Scene ${idx + 1}: ${chunk.slice(0, 35)}`,
-          visualPrompt: buildVisualPrompt(`High quality shot of ${chunk.slice(0, 45)}`, presetStylePack(visualStyle)),
-          chineseVisualPrompt: `画面表现：${chunk}`,
+          visualPrompt: '',
+          chineseVisualPrompt: '',
           cameraMotion: cameraMotions[idx % cameraMotions.length],
           transition: transitions[idx % transitions.length],
           imageUrl: generateProceduralArtwork(chunk, visualStyle, aspectRatio, idx),
           isGeneratingImage: false
+        };
+        const compiled = compileClip(draft, idx, safeChunks.length);
+        return {
+          ...draft,
+          visualBeat: compiled.beat,
+          visualPrompt: compiled.prompt,
+          chineseVisualPrompt: beatToChinese(compiled.beat)
         };
       });
 
@@ -210,9 +254,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       if (data && data.polishedText) {
         updateClip(clipId, {
           narration: data.polishedText,
-          secondaryText: data.secondaryText || clip.secondaryText,
-          visualPrompt: data.visualPrompt || clip.visualPrompt,
-          chineseVisualPrompt: data.chineseVisualPrompt || clip.chineseVisualPrompt
+          secondaryText: data.secondaryText || clip.secondaryText
         });
       }
     } catch (err) {
@@ -239,7 +281,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: clip.visualPrompt,
+          prompt: compileClip(clip, Math.max(0, clips.findIndex((item) => item.id === clipId))).prompt,
           visualStyle,
           aspectRatio,
           seed: clip.order * 1000 + Date.now(),
@@ -287,9 +329,15 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       return;
     }
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const dataUrl = e.target?.result as string;
-      if (dataUrl) updateClip(clipId, { imageUrl: dataUrl, imageStatus: 'success' });
+      if (!dataUrl) return;
+      try {
+        const imageUrl = await storeImageDataUrl(dataUrl);
+        updateClip(clipId, { imageUrl, imageStatus: 'success' });
+      } catch {
+        updateClip(clipId, { imageUrl: dataUrl, imageStatus: 'success' });
+      }
     };
     reader.readAsDataURL(file);
   };
@@ -305,10 +353,20 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
       const newClip: StoryboardClip = {
         id: addedId,
         order: newOrder,
-        duration: 3.5,
+        duration: 3.5 + sentenceGap,
+        holdDuration: sentenceGap,
         narration: `镜头 ${newOrder}：请在此输入旁白与画面描述`,
         secondaryText: `Scene ${newOrder}: Describe what unfolds on screen.`,
-        visualPrompt: buildVisualPrompt(`Shot for scene ${newOrder}`, presetStylePack(visualStyle)),
+        visualPrompt: compileClip({
+          id: addedId,
+          order: newOrder,
+          duration: 3.5 + sentenceGap,
+          narration: `镜头 ${newOrder}：请在此输入旁白与画面描述`,
+          visualPrompt: '',
+          chineseVisualPrompt: `第 ${newOrder} 幕画面`,
+          cameraMotion: 'zoom-in',
+          transition: 'crossfade'
+        }, prev.length, prev.length + 1).prompt,
         chineseVisualPrompt: `第 ${newOrder} 幕画面`,
         cameraMotion: 'zoom-in',
         transition: 'crossfade',
@@ -522,13 +580,24 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
                     )}
                   </div>
                 ) : (
-                  <button
-                    onClick={onGenerateAllImages}
-                    className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer"
-                  >
-                    <Sparkles className="w-3 h-3 text-amber-400" />
-                    全量生图
-                  </button>
+                  <>
+                    {clips.some((clip) => clip.imageStatus === 'failed') && onRetryFailedImages && (
+                      <button
+                        type="button"
+                        onClick={onRetryFailedImages}
+                        className="px-2.5 py-1.5 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 rounded-lg text-[11px] cursor-pointer"
+                      >
+                        只重试失败 {clips.filter((clip) => clip.imageStatus === 'failed').length}
+                      </button>
+                    )}
+                    <button
+                      onClick={onGenerateAllImages}
+                      className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer"
+                    >
+                      <Sparkles className="w-3 h-3 text-amber-400" />
+                      全量生图
+                    </button>
+                  </>
                 )}
                 {onRegenerateNarration && (
                   <button
@@ -577,6 +646,12 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
                   onPolish={(e) => { void handlePolishNarration(clip.id, e); }}
                   onMove={(direction, e) => moveClip(index, direction, e)}
                   onDelete={(e) => handleDeleteClip(clip.id, e)}
+                  isUtteranceTail={isUtteranceTail(clips, index)}
+                  sentenceGap={sentenceGap}
+                  onUtteranceHoldChange={onUtteranceHoldChange
+                    ? (holdDuration, pinned) => onUtteranceHoldChange(clip.id, holdDuration, pinned)
+                    : undefined}
+                  imagePromptPreview={compileClip(clip, index).prompt}
                 />
               ))}
             </div>

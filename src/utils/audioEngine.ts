@@ -181,6 +181,7 @@ class AudioEngine {
    * Start or resume BGM for video timeline playback
    */
   public startBgm(trackId: string, volume: number = 0.10, customUrl?: string) {
+    if (this.voicePreviewActive || this.previewTrackId) return;
     // Stop old BGM/preview first. stopBgm() bumps the session so in-flight
     // play() callbacks from the previous track cannot resurrect it.
     this.stopPreviewBgm();
@@ -261,6 +262,9 @@ class AudioEngine {
     this.stopPreviewBgm();
     const session = this.previewSessionToken;
     this.stopNarration();
+    if (this.fullNarrationAudio && !this.fullNarrationAudio.paused) {
+      try { this.fullNarrationAudio.pause(); } catch { /* ignore */ }
+    }
 
     // 2. Also pause timeline BGM while previewing so there is zero audio cacophony
     if (this.bgmAudio) {
@@ -381,6 +385,7 @@ class AudioEngine {
     const persistPreview = Boolean(opts?.persistPreview);
     // Voice-panel preview must not tear down the timeline's full VO file; only pause it.
     if (persistPreview) {
+      this.stopBgm();
       if (this.fullNarrationAudio && !this.fullNarrationAudio.paused) {
         try { this.fullNarrationAudio.pause(); } catch { /* ignore */ }
       }

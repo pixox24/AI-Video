@@ -42,13 +42,18 @@ export class ErrorBoundary extends React.Component<Props, State> {
   };
 
   handleReset = () => {
-    try {
-      localStorage.removeItem('ai_video_current_project');
-    } catch {
-      // ignore
-    }
-    this.setState({ hasError: false, error: null, errorInfo: null });
-    window.location.reload();
+    const ok = window.confirm('会先把当前磁盘稿备份为「上一份」，再回到示例工程。确定？');
+    if (!ok) return;
+    void fetch('/api/project/stash', { method: 'POST' }).catch(() => undefined).finally(() => {
+      try {
+        sessionStorage.setItem('ai_video_reset_to_sample', '1');
+        localStorage.removeItem('ai_video_current_project');
+      } catch {
+        // ignore
+      }
+      this.setState({ hasError: false, error: null, errorInfo: null });
+      window.location.reload();
+    });
   };
 
   render() {
@@ -73,7 +78,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
                 className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black font-semibold text-xs rounded-xl flex items-center gap-1.5 transition-all shadow-md shadow-amber-500/20 cursor-pointer"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                重新加载页面
+                重新加载（保留工程）
               </button>
 
               <button
@@ -81,7 +86,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
                 className="px-4 py-2 bg-[#20202a] hover:bg-[#2a2a38] text-zinc-300 text-xs rounded-xl flex items-center gap-1.5 transition-all border border-[#2e2e3e] cursor-pointer"
               >
                 <Home className="w-3.5 h-3.5" />
-                重置为初始状态
+                备份并回到示例
               </button>
             </div>
           </div>

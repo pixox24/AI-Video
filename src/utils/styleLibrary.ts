@@ -26,7 +26,7 @@ function loadRaw(): StyleLibraryEntry[] {
   }
 }
 
-const MAX_THUMB_CHARS = 160000;
+const MAX_THUMB_CHARS = 48000;
 
 function compactThumb(dataUrl?: string): string | undefined {
   if (!dataUrl) return undefined;
@@ -133,8 +133,8 @@ export function makeStyleCardThumb(dataUrl: string): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const width = 512;
-      const height = 288;
+      const width = 320;
+      const height = 180;
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -149,7 +149,7 @@ export function makeStyleCardThumb(dataUrl: string): Promise<string> {
       const drawW = img.naturalWidth * scale;
       const drawH = img.naturalHeight * scale;
       ctx.drawImage(img, (width - drawW) / 2, (height - drawH) / 2, drawW, drawH);
-      resolve(canvas.toDataURL('image/jpeg', 0.86));
+      resolve(canvas.toDataURL('image/jpeg', 0.72));
     };
     img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;
@@ -159,7 +159,7 @@ export function makeStyleCardThumb(dataUrl: string): Promise<string> {
 export function libraryCardSrc(entry: StyleLibraryEntry): string | undefined {
   const card = entry.thumbDataUrl;
   const source = entry.pack.reference?.thumbDataUrl;
-  if (card && source) return source.length > card.length ? source : card;
+  if (card && source) return source.length < card.length ? source : card;
   return card || source;
 }
 

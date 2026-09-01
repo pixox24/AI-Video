@@ -42,6 +42,7 @@ import {
   resolveTtsApi,
   isCustomTtsProvider
 } from '../utils/presets';
+import { defaultVoiceForModel, resolveBailianTtsEndpoint, resolveTtsVoiceId } from '../utils/ttsCatalog';
 import { StyleDnaModule, StyleLibraryEntry, StylePack } from '../types';
 import {
   DEFAULT_STYLE_VISION_API,
@@ -1980,7 +1981,7 @@ function TtsProviderSection({
         <div>
           <h3 className="text-[15px] font-semibold text-zinc-100">TTS 配音供应商</h3>
           <p className="mt-1 text-[13px] text-zinc-500 leading-relaxed max-w-2xl">
-            选中即使用。内置 Edge TTS 无需密钥；阿里云百炼需填写北京地域 API Key。日常选音色请到「声音」页。
+            选中即使用。后台选哪个模型，试听、整段旁白和导出都走同一个。内置 Edge TTS 无需密钥；阿里云百炼需填写北京地域 API Key。日常选音色请到「声音」页。
           </p>
         </div>
 
@@ -2063,14 +2064,21 @@ function TtsProviderSection({
 
             <div className="space-y-2">
               <FieldLabel icon={<Zap className="w-3.5 h-3.5 text-amber-400" />} title="模型" />
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {currentPreset.popularModels.map((model) => {
                   const selected = ttsApi.model === model.id;
                   return (
                     <button
                       key={model.id}
                       type="button"
-                      onClick={() => updateTtsApi({ model: model.id })}
+                      onClick={() => {
+                        const nextModel = model.id;
+                        updateTtsApi({
+                          model: nextModel,
+                          endpoint: resolveBailianTtsEndpoint(ttsApi.endpoint, nextModel),
+                          voice: resolveTtsVoiceId(ttsApi.voice, { ...ttsApi, model: nextModel })
+                        });
+                      }}
                       className={`text-left rounded-xl border px-3.5 py-3 cursor-pointer transition-all ${
                         selected
                           ? 'bg-amber-500/12 border-amber-500/50'
@@ -2092,14 +2100,14 @@ function TtsProviderSection({
             <div className="space-y-2">
               <FieldLabel icon={<Mic className="w-3.5 h-3.5 text-amber-400" />} title="连通测试音色" />
               <p className="text-[11px] text-zinc-500 leading-relaxed">
-                日常换声音请到左侧「声音」。这里只影响「测试并试听」，也可填目录外的 voice id。
+                日常换声音请到左侧「声音」。这里只影响「测试并试听」，也可填目录外的 voice id。3.0 与 Qwen3 的音色不能混用。
               </p>
               <input
                 id="input-tts-voice"
                 type="text"
                 value={ttsApi.voice}
                 onChange={(e) => updateTtsApi({ voice: e.target.value })}
-                placeholder="Cherry"
+                placeholder={defaultVoiceForModel(ttsApi.model)}
                 className="w-full bg-[#121217] border border-[#2b2b38] focus:border-amber-500 rounded-xl px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 font-mono outline-none"
               />
             </div>

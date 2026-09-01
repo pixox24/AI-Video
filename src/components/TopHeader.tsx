@@ -13,7 +13,10 @@ import {
   Play,
   Square as StopSquare,
   XCircle,
-  RefreshCw
+  RefreshCw,
+  Undo2,
+  Redo2,
+  Mic
 } from 'lucide-react';
 import { AspectRatio, ProjectSettings } from '../types';
 
@@ -27,6 +30,15 @@ interface TopHeaderProps {
   onCancelGenerateAll?: () => void;
   isGeneratingAll: boolean;
   batchProgress?: { completed: number; total: number; activeCount: number } | null;
+  narrationFresh?: boolean;
+  isGeneratingNarration?: boolean;
+  onRegenerateNarration?: () => void;
+  failedImageCount?: number;
+  onRetryFailedImages?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
@@ -38,7 +50,16 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onGenerateAll,
   onCancelGenerateAll,
   isGeneratingAll,
-  batchProgress
+  batchProgress,
+  narrationFresh = true,
+  isGeneratingNarration = false,
+  onRegenerateNarration,
+  failedImageCount = 0,
+  onRetryFailedImages,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo
 }) => {
   const [showAspectDropdown, setShowAspectDropdown] = useState(false);
   const [showBgDropdown, setShowBgDropdown] = useState(false);
@@ -177,6 +198,45 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
       {/* Right controls: AI batch generate and Export (Matching reference UI) */}
       <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onUndo}
+          disabled={!canUndo}
+          title="撤销 (Ctrl+Z)"
+          className="p-1.5 rounded-lg border border-[#2e2e3a] text-zinc-400 hover:text-amber-300 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+        >
+          <Undo2 className="w-3.5 h-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={onRedo}
+          disabled={!canRedo}
+          title="重做 (Ctrl+Shift+Z)"
+          className="p-1.5 rounded-lg border border-[#2e2e3a] text-zinc-400 hover:text-amber-300 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+        >
+          <Redo2 className="w-3.5 h-3.5" />
+        </button>
+        {!narrationFresh && onRegenerateNarration && (
+          <button
+            type="button"
+            onClick={onRegenerateNarration}
+            disabled={isGeneratingNarration}
+            title="口播和分镜不一致，点击重配音"
+            className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer disabled:opacity-50"
+          >
+            <Mic className={`w-3.5 h-3.5 ${isGeneratingNarration ? 'animate-pulse' : ''}`} />
+            {isGeneratingNarration ? '配音中' : '旁白需重配'}
+          </button>
+        )}
+        {failedImageCount > 0 && !isGeneratingAll && onRetryFailedImages && (
+          <button
+            type="button"
+            onClick={onRetryFailedImages}
+            className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 text-[11px] font-medium cursor-pointer"
+          >
+            重试失败 {failedImageCount}
+          </button>
+        )}
         {isGeneratingAll ? (
           <div className="flex items-center gap-1.5 bg-[#1c1c24] border border-amber-500/40 rounded-lg p-1 pr-2">
             <button

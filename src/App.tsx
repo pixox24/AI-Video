@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry } from './types';
+import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry, ProjectLibraryItem } from './types';
 import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, resolveLlmApi, resolveTtsApi } from './utils/presets';
 import { resolveSubtitleFontId } from './utils/subtitleFonts';
-import { applyTtsSettingsToProject, applyVoiceToProject, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
+import { applyTtsSettingsToProject, applyVoiceToProject, bailianTtsConcurrency, designedVoiceMatchesModel, isDesignedVoiceId, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
+import { findDesignedVoice } from './utils/voiceLibrary';
 import { hydrateActiveStylePack, localRewriteClipPrompt, presetStylePack, renderLine } from './utils/stylePack';
+import { beatToChinese, clipImagePromptArgs } from './utils/imagePrompt';
 import {
   catalogFromPack,
   hydrateStyleShelf,
@@ -29,8 +31,15 @@ import {
   repairClipSlices,
   utterancesFromClips
 } from './utils/narrationTrack';
-import { assembleAlignedNarration } from './utils/narrationAlignClient';
+import { assembleAlignedNarration, reassembleNarrationWithHolds } from './utils/narrationAlignClient';
+import {
+  clampSentenceGap,
+  narrationFileIncludesHolds,
+  resolveSentenceGap,
+  stampSentenceGaps
+} from './utils/sentenceGap';
 import { audioEngine } from './utils/audioEngine';
+import { setPlayhead } from './utils/playhead';
 
 import { runConcurrencyPool } from './utils/concurrencyPool';
 import { forecastScriptHash, hydrateScriptWorkspace, stylePackFingerprint } from './utils/scriptWorkspace';
@@ -48,6 +57,35 @@ import { TimelineBar } from './components/TimelineBar';
 import { ExportModal } from './components/ExportModal';
 import { StatusToastHost } from './components/StatusToastHost';
 import { showStatusToast } from './utils/statusToast';
+import { ConfirmDialog } from './components/ConfirmDialog';
+import {
+  createBlankProject,
+  fetchDiskCurrentProject,
+  fetchPreviousProject,
+  isSampleProjectId,
+  projectHasLocalWork,
+  getPersistSnapshot,
+  rememberSaveRevision,
+  RESET_TO_SAMPLE_KEY,
+  stashPreviousProject,
+  writeCurrentProject,
+  writeDiskCurrentProject
+} from './utils/projectPersist';
+import {
+  captureAppSettingsIfEmpty,
+  mergeAppSettings,
+  persistAppSettingsFromProject
+} from './utils/appSettings';
+import {
+  copyTemplateProject,
+  createLibraryProject,
+  deleteLibraryProject,
+  duplicateLibraryProject,
+  fetchLibraryProject,
+  fetchProjectLibrary,
+  migrateBrowserCopiesToLibrary
+} from './utils/projectLibrary';
+import { createEditHistory } from './utils/editHistory';
 import { characterForShot, characterRefUrl, storyLeadMissingRef } from './utils/visualBible';
 
 function settleProjectImages(project: VideoProject): VideoProject {
@@ -64,10 +102,13 @@ function settleProjectImages(project: VideoProject): VideoProject {
       return { ...clip, isGeneratingImage: false };
     }))
   };
+  const sentenceGap = resolveSentenceGap(settled.audio);
   return {
     ...settled,
+    clips: stampSentenceGaps(ensureUniqueClipIds(settled.clips || []), sentenceGap),
     audio: {
       ...settled.audio,
+      sentenceGap,
       bgmTrackId: resolveBgmTrackId(settled.audio?.bgmTrackId),
       voiceCharacter: resolveTtsVoiceId(settled.audio?.voiceCharacter, resolveTtsApi(settled.settings?.customTtsApi))
     },
@@ -84,31 +125,25 @@ function settleProjectImages(project: VideoProject): VideoProject {
   };
 }
 
+function hydratePersistedProject(raw: VideoProject): VideoProject {
+  return mergeAppSettings(rebindProjectNarration(settleProjectImages(raw)));
+}
+
 export default function App() {
   // Initialize with the rich Space Exploration sample project
   const [project, setProject] = useState<VideoProject>(() => {
     const saved = localStorage.getItem('ai_video_current_project');
     if (saved) {
       try {
-        return rebindProjectNarration(settleProjectImages(JSON.parse(saved)));
+        return hydratePersistedProject(JSON.parse(saved));
       } catch {
-        return SAMPLE_PROJECTS[0];
+        return hydratePersistedProject(SAMPLE_PROJECTS[0]);
       }
     }
-    return SAMPLE_PROJECTS[0];
+    return hydratePersistedProject(SAMPLE_PROJECTS[0]);
   });
 
-  const [savedProjects, setSavedProjects] = useState<VideoProject[]>(() => {
-    const saved = localStorage.getItem('ai_video_saved_projects');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return SAMPLE_PROJECTS;
-      }
-    }
-    return SAMPLE_PROJECTS;
-  });
+  const [libraryItems, setLibraryItems] = useState<ProjectLibraryItem[]>([]);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('script');
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -123,7 +158,23 @@ export default function App() {
   } | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const historyRef = useRef(createEditHistory());
+  const skipHistoryRef = useRef(false);
+  const [persistReady, setPersistReady] = useState(false);
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    detail: string;
+    confirmLabel: string;
+    action: () => void | Promise<void>;
+  } | null>(null);
+  const bootUpdatedAtRef = useRef(project.updatedAt);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const characterRefWarnOnceRef = useRef(false);
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const bakeTimerRef = useRef<number | null>(null);
+  const bakeGenRef = useRef(0);
+  const autoBakedUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!storyLeadMissingRef(project.scriptWorkspace?.visualBible)) {
@@ -135,13 +186,11 @@ export default function App() {
   const [styleLibrary, setStyleLibrary] = useState<StyleLibraryEntry[]>(() => loadStyleLibrary());
   const [stylePins, setStylePins] = useState<string[]>(() => loadStylePins());
 
-  const isImmersiveTab = activeTab === 'settings' || activeTab === 'script';
-
   useEffect(() => {
-    if (isImmersiveTab) {
+    if (activeTab === 'settings') {
       setIsPlaying(false);
     }
-  }, [isImmersiveTab]);
+  }, [activeTab]);
 
   // Sync the active TTS provider into the audio engine for preview & playback
   useEffect(() => {
@@ -163,7 +212,7 @@ export default function App() {
         const timings = allocateSpeechTimings(repaired, window.duration, window);
         return {
           ...prev,
-          clips: applyNarrationTimingsToClips(repaired, timings),
+          clips: applyNarrationTimingsToClips(repaired, timings, resolveSentenceGap(prev.audio)),
           audio: {
             ...prev.audio,
             narrationTrack: {
@@ -183,24 +232,56 @@ export default function App() {
     };
   }, [project.audio?.narrationTrack?.audioUrl, project.audio?.narrationTrack?.speechStart]);
 
-  // Update project helper
-  const updateProject = useCallback((updates: Partial<VideoProject>) => {
-    setProject(prev => ({
-      ...prev,
-      ...updates,
-      updatedAt: Date.now()
-    }));
+  const bumpHistory = useCallback(() => {
+    setHistoryVersion((value) => value + 1);
   }, []);
+
+  const recordHistory = useCallback((snapshot: VideoProject) => {
+    if (skipHistoryRef.current) return;
+    historyRef.current.push(snapshot);
+    bumpHistory();
+  }, [bumpHistory]);
+
+  const handleUndo = useCallback(() => {
+    setProject((current) => {
+      const next = historyRef.current.undo(current);
+      return next || current;
+    });
+    bumpHistory();
+  }, [bumpHistory]);
+
+  const handleRedo = useCallback(() => {
+    setProject((current) => {
+      const next = historyRef.current.redo(current);
+      return next || current;
+    });
+    bumpHistory();
+  }, [bumpHistory]);
+
+  // Update project helper
+  const updateProject = useCallback((updates: Partial<VideoProject>, opts?: { history?: boolean }) => {
+    setProject(prev => {
+      if (opts?.history !== false) recordHistory(prev);
+      const next = {
+        ...prev,
+        ...updates,
+        updatedAt: Date.now()
+      };
+      if (updates.settings) persistAppSettingsFromProject(next);
+      return next;
+    });
+  }, [recordHistory]);
 
   const applyClipsChange = useCallback((clipsOrUpdater: ClipsChange) => {
     setProject(prev => {
+      if (!skipHistoryRef.current) recordHistory(prev);
       const raw = typeof clipsOrUpdater === 'function' ? clipsOrUpdater(prev.clips) : clipsOrUpdater;
       const nextClips = ensureUniqueClipIds(raw);
       const idsRepaired = nextClips.some((clip, index) => clip.id !== raw[index]?.id);
       if (!idsRepaired) {
         return { ...prev, clips: nextClips, updatedAt: Date.now() };
       }
-      const linked = relinkNarrationTrack(prev.audio?.narrationTrack, nextClips);
+      const linked = relinkNarrationTrack(prev.audio?.narrationTrack, nextClips, resolveSentenceGap(prev.audio));
       return {
         ...prev,
         clips: linked?.clips || nextClips,
@@ -208,7 +289,7 @@ export default function App() {
         updatedAt: Date.now()
       };
     });
-  }, []);
+  }, [recordHistory]);
 
   const handleGenerateFullNarration = useCallback(async (clipsOverride?: StoryboardClip[]) => {
     // onClick passes a mouse event; only an actual clip array may override.
@@ -220,38 +301,85 @@ export default function App() {
       return;
     }
 
+    const ttsForVoice = resolveTtsApi(project.settings.customTtsApi);
+    const designed = findDesignedVoice(project.audio.voiceCharacter);
+    if (designed && (designed.status !== 'ok' || designed.targetModel !== ttsForVoice.model)) {
+      const message = designed.status === 'deploying'
+        ? '这条设计音色还在审核，通过后再生成旁白'
+        : '当前设计音色和设置里的 3.0 模型不一致，换模型或换一条音色';
+      setNarrationError(message);
+      showStatusToast(message, { tone: 'warn', id: 'narration' });
+      return;
+    }
+    if (isDesignedVoiceId(project.audio.voiceCharacter) && !designedVoiceMatchesModel(project.audio.voiceCharacter, ttsForVoice.model)) {
+      const message = '这条设计音色不属于当前 3.0 模型';
+      setNarrationError(message);
+      showStatusToast(message, { tone: 'warn', id: 'narration' });
+      return;
+    }
+
     setIsPlaying(false);
     setIsGeneratingNarration(true);
     setNarrationError(null);
-    showStatusToast('正在按句合成旁白并对齐画面', { tone: 'progress', id: 'narration', durationMs: 0 });
+    setActiveTab('storyboard');
+    recordHistory(project);
     audioEngine.stopFullNarration();
     audioEngine.stopNarration();
 
     try {
       const repaired = ensureUniqueClipIds(repairClipSlices(sourceClips));
       const utterances = utterancesFromClips(repaired);
-      const res = await fetch('/api/audio/tts-utterances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          utterances: utterances.map((item) => ({ text: item.text })),
-          clips: repaired.map((clip) => ({
-            id: clip.id,
-            narration: clip.narration,
-            voRole: clip.voRole,
-            voSlice: clip.voSlice
-          })),
-          character: project.audio.voiceCharacter,
-          rate: project.audio.speechRate,
-          ttsApi: resolveTtsApi(project.settings.customTtsApi)
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !Array.isArray(data?.segments) || data.segments.length === 0) {
-        throw new Error(data?.error || `按句旁白合成失败 (HTTP ${res.status})`);
+      const ttsApi = resolveTtsApi(project.settings.customTtsApi);
+      const concurrency = bailianTtsConcurrency(ttsApi);
+      showStatusToast(`正在配音 1/${utterances.length}`, { tone: 'progress', id: 'narration', durationMs: 0 });
+
+      const pool = await runConcurrencyPool(
+        utterances,
+        async (utterance) => {
+          const res = await fetch('/api/audio/tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: utterance.text,
+              character: project.audio.voiceCharacter,
+              rate: project.audio.speechRate,
+              ttsApi
+            })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data?.audioUrl) {
+            throw new Error(data?.error || `「${utterance.text.slice(0, 18)}」合成失败`);
+          }
+          return {
+            text: utterance.text,
+            audioUrl: String(data.audioUrl),
+            words: Array.isArray(data.words) ? data.words : []
+          };
+        },
+        {
+          concurrency,
+          getId: (item, index) => `${index}-${item.text.slice(0, 8)}`,
+          onItemStart: (task) => {
+            showStatusToast(
+              `正在配音 ${task.index + 1}/${utterances.length}：${task.item.text.slice(0, 18)}`,
+              { tone: 'progress', id: 'narration', durationMs: 0 }
+            );
+          }
+        }
+      );
+
+      const failed = pool.find((item) => !item.ok);
+      if (failed) {
+        const reason = failed.error instanceof Error ? failed.error.message : String(failed.error || '');
+        throw new Error(reason || '按句旁白合成失败');
+      }
+      const segments = pool.map((item) => item.result!).filter(Boolean);
+      if (segments.length !== utterances.length) {
+        throw new Error('按句旁白合成不完整');
       }
 
-      const assembled = await assembleAlignedNarration(repaired, data.segments);
+      showStatusToast('正在拼接并对齐画面…', { tone: 'progress', id: 'narration', durationMs: 0 });
+      const assembled = await assembleAlignedNarration(repaired, segments, resolveSentenceGap(project.audio));
       const storeRes = await fetch('/api/audio/store', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -286,6 +414,7 @@ export default function App() {
         updatedAt: Date.now()
       }));
       setCurrentTime(0);
+      setPlayhead(0);
       showStatusToast('旁白已更新，各镜已按真实开口对齐', { tone: 'ok', id: 'narration' });
     } catch (err: any) {
       const message = err?.message || '整段旁白合成失败';
@@ -294,12 +423,104 @@ export default function App() {
     } finally {
       setIsGeneratingNarration(false);
     }
-  }, [project.clips, project.audio.voiceCharacter, project.audio.speechRate, project.settings.customTtsApi]);
+  }, [project, project.clips, project.audio.voiceCharacter, project.audio.speechRate, project.settings.customTtsApi, recordHistory]);
+
+  const bakeNarrationHolds = useCallback(async () => {
+    const current = projectRef.current;
+    const track = current.audio?.narrationTrack;
+    if (!track?.audioUrl || !track.alignment?.utterances?.length) return;
+    const gap = resolveSentenceGap(current.audio);
+    const stamped = stampSentenceGaps(current.clips, gap);
+    if (narrationFileIncludesHolds(track, stamped)) return;
+    const gen = ++bakeGenRef.current;
+    try {
+      const assembled = await reassembleNarrationWithHolds(stamped, track, gap);
+      if (!assembled || gen !== bakeGenRef.current) return;
+      const storeRes = await fetch('/api/audio/store', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioUrl: assembled.wavDataUrl })
+      });
+      const stored = await storeRes.json().catch(() => ({}));
+      const audioUrl = stored?.audioUrl || assembled.wavDataUrl;
+      if (gen !== bakeGenRef.current) return;
+      setProject((prev) => ({
+        ...prev,
+        clips: assembled.clips,
+        audio: {
+          ...prev.audio,
+          narrationTrack: {
+            ...(prev.audio.narrationTrack || track),
+            audioUrl,
+            duration: assembled.duration,
+            speechStart: 0,
+            speechEnd: assembled.duration,
+            clips: assembled.timings,
+            alignment: assembled.alignment
+          }
+        },
+        updatedAt: Date.now()
+      }));
+    } catch (err) {
+      console.warn('[SentenceGap] 气口未能写入旁白文件', err);
+    }
+  }, []);
+
+  const scheduleBakeHolds = useCallback(() => {
+    if (bakeTimerRef.current) window.clearTimeout(bakeTimerRef.current);
+    bakeTimerRef.current = window.setTimeout(() => {
+      void bakeNarrationHolds();
+    }, 280);
+  }, [bakeNarrationHolds]);
+
+  useEffect(() => {
+    return () => {
+      if (bakeTimerRef.current) window.clearTimeout(bakeTimerRef.current);
+    };
+  }, []);
+
+  const handleSentenceGapChange = useCallback((seconds: number) => {
+    const gap = clampSentenceGap(seconds);
+    setIsPlaying(false);
+    setProject((prev) => {
+      recordHistory(prev);
+      return {
+        ...prev,
+        clips: stampSentenceGaps(prev.clips, gap),
+        audio: { ...prev.audio, sentenceGap: gap },
+        updatedAt: Date.now()
+      };
+    });
+    scheduleBakeHolds();
+  }, [recordHistory, scheduleBakeHolds]);
+
+  const handleUtteranceHoldChange = useCallback((clipId: string, holdDuration: number, pinned: boolean) => {
+    setIsPlaying(false);
+    setProject((prev) => {
+      recordHistory(prev);
+      const gap = resolveSentenceGap(prev.audio);
+      const nextClips = prev.clips.map((clip) => {
+        if (clip.id !== clipId) return clip;
+        const speech = clip.speechDuration ?? Math.max(0.05, (clip.duration || 0) - (clip.holdDuration || 0));
+        const hold = pinned ? Math.max(0, Math.min(8, holdDuration)) : gap;
+        return {
+          ...clip,
+          holdDuration: hold,
+          holdPinned: pinned,
+          duration: Math.max(0.05, Math.round((speech + hold) * 100) / 100)
+        };
+      });
+      return { ...prev, clips: nextClips, updatedAt: Date.now() };
+    });
+    scheduleBakeHolds();
+  }, [recordHistory, scheduleBakeHolds]);
 
   const handleApplyStoryboard = useCallback((clips: StoryboardClip[]) => {
     const ttsApi = resolveTtsApi(project.settings.customTtsApi);
-    if (isNarrationTrackFresh(project.audio, clips, ttsApi)) {
-      const linked = relinkNarrationTrack(project.audio.narrationTrack, clips);
+    const sentenceGap = resolveSentenceGap(project.audio);
+    const stamped = stampSentenceGaps(clips, sentenceGap);
+    if (isNarrationTrackFresh(project.audio, stamped, ttsApi)) {
+      const linked = relinkNarrationTrack(project.audio.narrationTrack, stamped, sentenceGap);
       if (linked) {
         setProject((prev) => ({
           ...prev,
@@ -308,33 +529,146 @@ export default function App() {
           updatedAt: Date.now()
         }));
         if (linked.clips[0]) setSelectedClipId(linked.clips[0].id);
+        setActiveTab('storyboard');
         showStatusToast('已写入分镜，旁白沿用', { tone: 'ok', id: 'narration' });
+        scheduleBakeHolds();
         return;
       }
     }
-    applyClipsChange(clips);
-    if (clips[0]) setSelectedClipId(clips[0].id);
-    void handleGenerateFullNarration(clips);
-  }, [project.audio, project.settings.customTtsApi, applyClipsChange, handleGenerateFullNarration]);
+    applyClipsChange(stamped);
+    if (stamped[0]) setSelectedClipId(stamped[0].id);
+    setActiveTab('storyboard');
+    void handleGenerateFullNarration(stamped);
+  }, [project.audio, project.settings.customTtsApi, applyClipsChange, handleGenerateFullNarration, scheduleBakeHolds]);
 
-  // Sync to local storage
   useEffect(() => {
-    try {
-      const toSave = settleProjectImages(project);
-      const serializable: VideoProject = {
-        ...toSave,
-        clips: toSave.clips.map((clip) => {
-          if (clip.imageUrl && clip.imageUrl.startsWith('data:') && clip.imageUrl.length > 200000) {
-            return { ...clip, imageUrl: undefined };
-          }
-          return clip;
-        })
-      };
-      localStorage.setItem('ai_video_current_project', JSON.stringify(serializable));
-    } catch (err) {
-      console.warn('[Project Persist] Failed to save current project:', err);
+    const track = project.audio?.narrationTrack;
+    if (!track?.audioUrl || !track.alignment?.utterances?.length) return;
+    if (narrationFileIncludesHolds(track, project.clips)) {
+      autoBakedUrlRef.current = track.audioUrl;
+      return;
     }
-  }, [project]);
+    if (autoBakedUrlRef.current === track.audioUrl) return;
+    autoBakedUrlRef.current = track.audioUrl;
+    scheduleBakeHolds();
+  }, [project.audio?.narrationTrack?.audioUrl, scheduleBakeHolds]);
+
+  // Hydrate from disk after first paint. Browser cache is only a fallback.
+  useEffect(() => {
+    let cancelled = false;
+    const skipDisk = (() => {
+      try {
+        return sessionStorage.getItem(RESET_TO_SAMPLE_KEY) === '1';
+      } catch {
+        return false;
+      }
+    })();
+
+    (async () => {
+      try {
+        if (skipDisk) return;
+        const disk = await fetchDiskCurrentProject();
+        if (cancelled) return;
+        const local = (() => {
+          try {
+            const raw = localStorage.getItem('ai_video_current_project');
+            return raw ? JSON.parse(raw) as VideoProject : null;
+          } catch {
+            return null;
+          }
+        })();
+        if (disk?.project) {
+          const live = projectRef.current;
+          const userTouched = live.updatedAt !== bootUpdatedAtRef.current;
+          if (userTouched) {
+            await writeDiskCurrentProject(settleProjectImages(live));
+          } else {
+            const diskTime = Number(disk.project.updatedAt) || disk.savedAt || 0;
+            const localTime = Number(local?.updatedAt) || 0;
+            if (!local || !Array.isArray(local.clips) || diskTime >= localTime) {
+              const next = hydratePersistedProject(disk.project);
+              rememberSaveRevision(next.saveRevision);
+              captureAppSettingsIfEmpty(next);
+              setProject(next);
+              setSelectedClipId(next.clips[0]?.id || null);
+              writeCurrentProject(next);
+              if (!local || local.id !== next.id) {
+                showStatusToast('已从磁盘恢复工程', { tone: 'ok', id: 'persist-restore' });
+              }
+            } else {
+              await writeDiskCurrentProject(settleProjectImages(local));
+            }
+          }
+        } else if (local && Array.isArray(local.clips)) {
+          await writeDiskCurrentProject(settleProjectImages(local));
+        }
+      } catch (err) {
+        console.warn('[Project Persist] Hydrate from disk failed:', err);
+      } finally {
+        if (!cancelled) {
+          captureAppSettingsIfEmpty(projectRef.current);
+          setPersistReady(true);
+          void migrateBrowserCopiesToLibrary().then((count) => {
+            if (count > 0) {
+              showStatusToast(`已把 ${count} 份浏览器草稿迁进工程库`, { tone: 'ok', id: 'library-migrate' });
+            }
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshLibrary = useCallback(async () => {
+    const { items } = await fetchProjectLibrary();
+    setLibraryItems(items);
+  }, []);
+
+  useEffect(() => {
+    if (!persistReady) return;
+    void refreshLibrary();
+  }, [persistReady, refreshLibrary]);
+
+  // Sync to local storage, session file, and project library
+  useEffect(() => {
+    if (!persistReady) return;
+    if (isSampleProjectId(project.id) && projectHasLocalWork(project)) {
+      setProject((prev) => (
+        isSampleProjectId(prev.id) ? { ...prev, id: `project-${prev.updatedAt}` } : prev
+      ));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const settled = settleProjectImages(project);
+      writeCurrentProject(settled);
+      void writeDiskCurrentProject(settled).then((ok) => {
+        if (ok) {
+          try {
+            sessionStorage.removeItem(RESET_TO_SAMPLE_KEY);
+          } catch {
+            // ignore
+          }
+          void refreshLibrary();
+        }
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [project, persistReady, refreshLibrary]);
+
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      const status = getPersistSnapshot().status;
+      if (status === 'error' || status === 'saving') {
+        event.preventDefault();
+        event.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
 
   // Pro Editing Keyboard Shortcuts
   useEffect(() => {
@@ -343,11 +677,31 @@ export default function App() {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
         return;
       }
-      if (activeTab === 'settings' || activeTab === 'script') {
+
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyY') {
+        e.preventDefault();
+        handleRedo();
         return;
       }
 
+      if (activeTab === 'settings') return;
+
       const total = project.clips.reduce((acc, c) => acc + (c.duration || 3.5), 0) || 10;
+
+      // Script desk: space toggles preview when not typing.
+      if (activeTab === 'script') {
+        if (e.code === 'Space' && project.clips.length > 0) {
+          e.preventDefault();
+          setIsPlaying((prev) => !prev);
+        }
+        return;
+      }
 
       // 1. Space: Play / Pause
       if (e.code === 'Space') {
@@ -419,7 +773,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [project.clips, selectedClipId, applyClipsChange, activeTab]);
+  }, [project.clips, selectedClipId, applyClipsChange, activeTab, handleUndo, handleRedo]);
 
   // Cancel batch image generation
   const handleCancelGenerateAllImages = useCallback(() => {
@@ -447,6 +801,18 @@ export default function App() {
     return { url, name: character?.name || '' };
   };
 
+  const compiledPromptFor = (clip: StoryboardClip, index: number, clips = project.clips) => {
+    return clipImagePromptArgs(
+      clip,
+      index,
+      clips.length,
+      hydrateActiveStylePack(project.settings),
+      project.scriptWorkspace?.visualBible,
+      project.settings,
+      project.scriptWorkspace?.genrePackId
+    );
+  };
+
   const warnIfMissingLeadRef = () => {
     if (characterRefWarnOnceRef.current) return;
     if (!storyLeadMissingRef(project.scriptWorkspace?.visualBible)) return;
@@ -463,6 +829,7 @@ export default function App() {
   const handleGenerateSingleClipImage = useCallback(async (clipId: string) => {
     const targetClip = project.clips.find(c => c.id === clipId);
     if (!targetClip) return;
+    recordHistory(project);
     warnIfMissingLeadRef();
 
     // Set generating status
@@ -473,13 +840,15 @@ export default function App() {
 
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 360000);
+    const clipIndex = Math.max(0, project.clips.findIndex((item) => item.id === clipId));
+    const compiled = compiledPromptFor(targetClip, clipIndex);
 
     try {
       const res = await fetch('/api/visual/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: targetClip.visualPrompt,
+          prompt: compiled.prompt,
           visualStyle: project.settings.visualStyle,
           styleRender: renderLine(hydrateActiveStylePack(project.settings)),
           aspectRatio: project.settings.aspectRatio,
@@ -504,7 +873,10 @@ export default function App() {
           imageUrl: data.imageUrl,
           imageStatus: 'success',
           isGeneratingImage: false,
-          imageError: undefined
+          imageError: undefined,
+          visualPrompt: c.promptPinned ? c.visualPrompt : compiled.prompt,
+          visualBeat: c.visualBeat || compiled.beat,
+          chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(compiled.beat)
         } : c),
         updatedAt: Date.now()
       }));
@@ -525,7 +897,7 @@ export default function App() {
     } finally {
       window.clearTimeout(timeoutId);
     }
-  }, [project.clips, project.settings, project.scriptWorkspace]);
+  }, [project.clips, project.settings, project.scriptWorkspace, project, recordHistory]);
 
   // Generate AI images for all storyboard clips in parallel with concurrency pool and status transitions
   const handleGenerateAllImages = async (clipsOverride?: StoryboardClip[]) => {
@@ -543,17 +915,21 @@ export default function App() {
     setIsGeneratingAllImages(true);
     const totalClips = sourceClips.length;
     setBatchGenerationProgress({ completed: 0, total: totalClips, activeCount: 0 });
+    const targetIds = new Set(sourceClips.map((clip) => clip.id));
 
-    // Set initial 'queued' status for all clips
-    setProject(prev => ({
-      ...prev,
-      clips: prev.clips.map(c => ({
-        ...c,
-        imageStatus: 'queued' as const,
-        isGeneratingImage: false,
-        imageError: undefined
-      }))
-    }));
+    setProject(prev => {
+      recordHistory(prev);
+      return {
+        ...prev,
+        clips: prev.clips.map(c => targetIds.has(c.id) ? {
+          ...c,
+          imageStatus: 'queued' as const,
+          isGeneratingImage: false,
+          imageError: undefined
+        } : c)
+      };
+    });
+    skipHistoryRef.current = true;
 
     // Concurrency limit: from settings or default to 3 (optimal balance between speed and rate limits)
     const concurrency = Math.min(
@@ -562,13 +938,14 @@ export default function App() {
     );
 
     try {
-      await runConcurrencyPool<StoryboardClip, { clipId: string; imageUrl: string }>(
+      await runConcurrencyPool<StoryboardClip, { clipId: string; imageUrl: string; prompt: string; beat: StoryboardClip['visualBeat'] }>(
         sourceClips,
         async (clip: StoryboardClip, index: number, signal?: AbortSignal) => {
           const timeoutController = new AbortController();
           const timeoutId = window.setTimeout(() => timeoutController.abort(), 360000);
           const onAbort = () => timeoutController.abort();
           signal?.addEventListener('abort', onAbort);
+          const compiled = compiledPromptFor(clip, Math.max(0, project.clips.findIndex((item) => item.id === clip.id)));
 
           let res: Response;
           try {
@@ -576,7 +953,7 @@ export default function App() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                prompt: clip.visualPrompt,
+                prompt: compiled.prompt,
                 visualStyle: project.settings.visualStyle,
                 styleRender: renderLine(hydrateActiveStylePack(project.settings)),
                 aspectRatio: project.settings.aspectRatio,
@@ -606,7 +983,7 @@ export default function App() {
             throw new Error(data?.error || '生图接口未返回有效画面');
           }
 
-          return { clipId: clip.id, imageUrl: data.imageUrl };
+          return { clipId: clip.id, imageUrl: data.imageUrl, prompt: compiled.prompt, beat: compiled.beat };
         },
         {
           concurrency,
@@ -628,6 +1005,9 @@ export default function App() {
               clips: prev.clips.map(c => c.id === task.item.id ? {
                 ...c,
                 imageUrl: result.imageUrl,
+                visualPrompt: c.promptPinned ? c.visualPrompt : result.prompt,
+                visualBeat: c.visualBeat || result.beat,
+                chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(result.beat || {}),
                 imageStatus: 'success' as const,
                 isGeneratingImage: false,
                 imageError: undefined
@@ -660,6 +1040,7 @@ export default function App() {
     } catch (err: any) {
       console.warn('Batch generation interrupted or failed:', err?.message);
     } finally {
+      skipHistoryRef.current = false;
       setIsGeneratingAllImages(false);
       abortControllerRef.current = null;
       setProject(prev => settleProjectImages(prev));
@@ -667,6 +1048,12 @@ export default function App() {
         setBatchGenerationProgress(null);
       }, 2500);
     }
+  };
+
+  const handleRetryFailedImages = () => {
+    const failed = project.clips.filter((clip) => clip.imageStatus === 'failed');
+    if (failed.length === 0) return;
+    void handleGenerateAllImages(failed);
   };
 
   // Re-apply style to all clips via the selected image provider
@@ -679,12 +1066,29 @@ export default function App() {
     showStatusToast('正在写入分镜画面词…', { tone: 'progress', id: 'style-rewrite', durationMs: 0 });
     void (async () => {
       const visualBible = project.scriptWorkspace?.visualBible;
-      let rewritten = project.clips.map((clip) => {
+      let rewritten = project.clips.map((clip, index) => {
         const local = localRewriteClipPrompt(clip, pack, visualBible);
-        return {
+        const next = {
           ...clip,
-          visualPrompt: local.visualPrompt,
-          chineseVisualPrompt: local.chineseVisualPrompt
+          chineseVisualPrompt: local.chineseVisualPrompt,
+          visualBeat: clip.visualBeat,
+          promptPinned: clip.promptPinned
+        };
+        if (next.promptPinned) return next;
+        const compiled = clipImagePromptArgs(
+          next,
+          index,
+          project.clips.length,
+          pack,
+          visualBible,
+          project.settings,
+          project.scriptWorkspace?.genrePackId
+        );
+        return {
+          ...next,
+          visualBeat: compiled.beat,
+          visualPrompt: compiled.prompt,
+          chineseVisualPrompt: beatToChinese(compiled.beat) || local.chineseVisualPrompt
         };
       });
 
@@ -710,16 +1114,43 @@ export default function App() {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && Array.isArray(data?.shots)) {
-          const byId = new Map<string, { visualPrompt?: string; chineseVisualPrompt?: string }>(
-            data.shots.map((item: { id: string; visualPrompt?: string; chineseVisualPrompt?: string }) => [item.id, item])
-          );
-          rewritten = rewritten.map((clip) => {
+          const byId = new Map<string, {
+            setting?: string;
+            subject?: string;
+            action?: string;
+            chineseVisualPrompt?: string;
+          }>(data.shots.map((item: {
+            id: string;
+            setting?: string;
+            subject?: string;
+            action?: string;
+            chineseVisualPrompt?: string;
+          }) => [item.id, item]));
+          rewritten = rewritten.map((clip, index) => {
             const hit = byId.get(clip.id);
-            if (!hit?.visualPrompt) return clip;
-            return {
+            if (clip.promptPinned) return clip;
+            const beat = hit && (hit.subject || hit.setting || hit.action)
+              ? { setting: hit.setting, subject: hit.subject, action: hit.action }
+              : clip.visualBeat;
+            const next = {
               ...clip,
-              visualPrompt: hit.visualPrompt,
-              chineseVisualPrompt: hit.chineseVisualPrompt || clip.chineseVisualPrompt
+              visualBeat: beat,
+              chineseVisualPrompt: hit?.chineseVisualPrompt || beatToChinese(beat || {}) || clip.chineseVisualPrompt
+            };
+            const compiled = clipImagePromptArgs(
+              next,
+              index,
+              rewritten.length,
+              pack,
+              visualBible,
+              project.settings,
+              project.scriptWorkspace?.genrePackId
+            );
+            return {
+              ...next,
+              visualBeat: compiled.beat,
+              visualPrompt: compiled.prompt,
+              chineseVisualPrompt: beatToChinese(compiled.beat) || next.chineseVisualPrompt
             };
           });
         }
@@ -750,27 +1181,120 @@ export default function App() {
     })();
   };
 
-  // Save current project copy
-  const handleSaveCurrentProject = () => {
-    const newProject: VideoProject = {
-      ...project,
-      id: `project-${Date.now()}`,
-      title: `${project.title} (副本)`,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
-    const updated = [newProject, ...savedProjects];
-    setSavedProjects(updated);
-    localStorage.setItem('ai_video_saved_projects', JSON.stringify(updated));
-    showStatusToast('已保存为新工程草稿', { tone: 'ok' });
-  };
+  const applyLoadedProject = useCallback((loaded: VideoProject) => {
+    const next = hydratePersistedProject(loaded);
+    rememberSaveRevision(next.saveRevision);
+    captureAppSettingsIfEmpty(next);
+    persistAppSettingsFromProject(next);
+    historyRef.current.clear();
+    setProject(next);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    setSelectedClipId(next.clips[0]?.id || null);
+    bumpHistory();
+  }, [bumpHistory]);
 
-  // Delete project
-  const handleDeleteProject = (projectId: string) => {
-    const updated = savedProjects.filter(p => p.id !== projectId);
-    setSavedProjects(updated);
-    localStorage.setItem('ai_video_saved_projects', JSON.stringify(updated));
-  };
+  const replaceCurrentProject = useCallback(async (loaded: VideoProject) => {
+    await stashPreviousProject();
+    applyLoadedProject(loaded);
+  }, [applyLoadedProject]);
+
+  const requestReplaceProject = useCallback((loaded: VideoProject, label: string, opts?: { force?: boolean }) => {
+    if (!opts?.force && loaded.id === project.id) return;
+    const run = () => {
+      void replaceCurrentProject(loaded);
+    };
+    if (!projectHasLocalWork(project)) {
+      run();
+      return;
+    }
+    setConfirmState({
+      title: `打开「${label}」？`,
+      detail: `当前《${project.title || '未命名'}》会先写入工程库。打开后自动存会改成新工程，可点「恢复上一份」找回来。`,
+      confirmLabel: '打开',
+      action: run
+    });
+  }, [project, replaceCurrentProject]);
+
+  const handleSaveAs = useCallback(async () => {
+    try {
+      const title = `${project.title || '未命名工程'} (副本)`;
+      let copy: VideoProject | null = null;
+      if (!isSampleProjectId(project.id)) {
+        try {
+          copy = await duplicateLibraryProject(project.id, title);
+        } catch {
+          copy = null;
+        }
+      }
+      if (!copy) {
+        copy = await createLibraryProject({
+          ...project,
+          id: `project-${Date.now()}`,
+          title,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          saveRevision: 0
+        });
+      }
+      if (!copy) throw new Error('另存失败');
+      applyLoadedProject(copy);
+      await refreshLibrary();
+      showStatusToast(`已另存为「${copy.title}」`, { tone: 'ok', id: 'library-save-as' });
+    } catch (err: any) {
+      showStatusToast(err?.message || '另存失败', { tone: 'error', id: 'library-save-as' });
+    }
+  }, [applyLoadedProject, project, refreshLibrary]);
+
+  const handleOpenLibraryProject = useCallback(async (id: string) => {
+    if (id === project.id) return;
+    const loaded = await fetchLibraryProject(id);
+    if (!loaded) {
+      showStatusToast('工程不存在或已损坏', { tone: 'error', id: 'library-open' });
+      await refreshLibrary();
+      return;
+    }
+    requestReplaceProject(loaded, loaded.title || '工程');
+  }, [project.id, refreshLibrary, requestReplaceProject]);
+
+  const handleDeleteLibraryProject = useCallback((projectId: string) => {
+    const item = libraryItems.find((entry) => entry.id === projectId);
+    setConfirmState({
+      title: `删除「${item?.title || '工程'}」？`,
+      detail: '只从工程库移除文件夹，public/generated 里的图还在，可在下方重新挂回。',
+      confirmLabel: '删除',
+      action: async () => {
+        const ok = await deleteLibraryProject(projectId);
+        if (!ok) {
+          showStatusToast('删除失败', { tone: 'error', id: 'library-delete' });
+          return;
+        }
+        if (project.id === projectId) {
+          applyLoadedProject(createBlankProject(project));
+        }
+        await refreshLibrary();
+        showStatusToast('已从工程库删除', { tone: 'ok', id: 'library-delete' });
+      }
+    });
+  }, [applyLoadedProject, libraryItems, project, refreshLibrary]);
+
+  const handleAttachGeneratedImage = useCallback((url: string) => {
+    if (!selectedClipId) {
+      showStatusToast('请先在分镜里点一个镜头，再把图挂上去', {
+        tone: 'warn',
+        id: 'orphan-attach',
+        actionLabel: '去分镜表',
+        onAction: () => setActiveTab('storyboard')
+      });
+      return;
+    }
+    applyClipsChange((clips) => clips.map((clip) => (
+      clip.id === selectedClipId
+        ? { ...clip, imageUrl: url, imageStatus: 'success', isGeneratingImage: false, imageError: undefined }
+        : clip
+    )));
+    showStatusToast('已挂到当前分镜', { tone: 'ok', id: 'orphan-attach' });
+  }, [applyClipsChange, selectedClipId]);
 
   return (
     <div className="flex h-screen w-screen bg-[#0a0a0d] text-zinc-100 p-2.5 sm:p-3 gap-2.5 sm:gap-3 overflow-hidden font-sans select-none">
@@ -794,6 +1318,7 @@ export default function App() {
           selectedClipId={selectedClipId}
           onSelectClip={setSelectedClipId}
           onGenerateAllImages={handleGenerateAllImages}
+          onRetryFailedImages={handleRetryFailedImages}
           onCancelGenerateAllImages={handleCancelGenerateAllImages}
           onGenerateSingleImage={handleGenerateSingleClipImage}
           isGeneratingAll={isGeneratingAllImages}
@@ -801,6 +1326,11 @@ export default function App() {
           onRegenerateNarration={() => { void handleGenerateFullNarration(); }}
           isGeneratingNarration={isGeneratingNarration}
           narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
+          sentenceGap={resolveSentenceGap(project.audio)}
+          onUtteranceHoldChange={handleUtteranceHoldChange}
+          stylePack={hydrateActiveStylePack(project.settings)}
+          visualBible={project.scriptWorkspace?.visualBible}
+          genre={project.scriptWorkspace?.genrePackId || null}
         />
       )}
 
@@ -938,25 +1468,44 @@ export default function App() {
           onGenerateFullNarration={() => { void handleGenerateFullNarration(); }}
           recommendedGenre={project.scriptWorkspace?.genrePackId || null}
           timelinePlaying={isPlaying}
+          onPauseTimeline={() => setIsPlaying(false)}
           ttsApi={resolveTtsApi(project.settings.customTtsApi)}
           onVoiceChange={(voiceId) => updateProject(applyVoiceToProject(project, voiceId))}
           onOpenSettings={() => setActiveTab('settings')}
+          onSentenceGapChange={handleSentenceGapChange}
+          clips={project.clips}
         />
       )}
 
       {activeTab === 'projects' && (
         <ProjectsPanel
           currentProject={project}
-          onLoadProject={(loaded) => {
-            const next = rebindProjectNarration(settleProjectImages(loaded));
-            setProject(next);
-            setCurrentTime(0);
-            setIsPlaying(false);
-            if (next.clips?.length > 0) setSelectedClipId(next.clips[0].id);
+          selectedClipId={selectedClipId}
+          libraryItems={libraryItems}
+          onOpenLibraryProject={(id) => { void handleOpenLibraryProject(id); }}
+          onOpenTemplate={(template) => requestReplaceProject(copyTemplateProject(template, project), template.title || '模板', { force: true })}
+          onSaveAs={() => { void handleSaveAs(); }}
+          onDeleteLibraryProject={handleDeleteLibraryProject}
+          onNewBlankProject={() => requestReplaceProject(createBlankProject(project), '未命名工程')}
+          onRestorePrevious={() => {
+            void fetchPreviousProject().then((stored) => {
+              if (!stored) {
+                showStatusToast('没有上一份备份', { tone: 'warn', id: 'persist-previous' });
+                return;
+              }
+              requestReplaceProject(stored.project, stored.project.title || '上一份工程', { force: true });
+            });
           }}
-          savedProjects={savedProjects}
-          onSaveCurrentProject={handleSaveCurrentProject}
-          onDeleteProject={handleDeleteProject}
+          onAttachGeneratedImage={handleAttachGeneratedImage}
+          onImportProject={(imported) => {
+            requestReplaceProject({
+              ...imported,
+              id: `project-${Date.now()}`,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              saveRevision: 0
+            }, imported.title || '导入工程', { force: true });
+          }}
         />
       )}
 
@@ -970,6 +1519,7 @@ export default function App() {
           onOpenStylePanel={() => setActiveTab('style')}
         />
       ) : activeTab === 'script' ? (
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <ScriptPanel
           workspace={project.scriptWorkspace || hydrateScriptWorkspace(project)}
           onChange={(scriptWorkspace) => updateProject({ scriptWorkspace })}
@@ -986,11 +1536,15 @@ export default function App() {
           onSelectClip={setSelectedClipId}
           onOpenStoryboard={() => setActiveTab('storyboard')}
           onNeedFullNarration={handleApplyStoryboard}
+          sentenceGap={resolveSentenceGap(project.audio)}
           onApplyStyleOnly={handleApplyStyleToAllClips}
           isApplyingStyle={isGeneratingAllImages}
           isGeneratingNarration={isGeneratingNarration}
           narrationError={narrationError}
           narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
+          isPlaying={isPlaying}
+          currentTime={currentTime}
+          onTogglePlay={() => setIsPlaying((prev) => !prev)}
           onRecommendBgm={(trackId) => {
             updateProject({
               audio: project.audio.bgmTrackId === 'custom-uploaded'
@@ -999,11 +1553,28 @@ export default function App() {
             });
           }}
         />
+        <div className="h-0 w-0 overflow-hidden" aria-hidden>
+          <VideoPlayerStage
+            clips={project.clips}
+            subtitles={project.subtitles}
+            audio={project.audio}
+            settings={project.settings}
+            currentTime={currentTime}
+            onTimeUpdate={setCurrentTime}
+            isPlaying={isPlaying}
+            onTogglePlay={() => setIsPlaying((prev) => !prev)}
+            selectedClipId={selectedClipId}
+            onSelectClip={setSelectedClipId}
+            isGeneratingNarration={isGeneratingNarration}
+            narrationError={narrationError}
+          />
+        </div>
+        </div>
       ) : (
         <main className="flex-1 flex flex-col h-full min-w-0 gap-2.5 sm:gap-3 overflow-hidden">
           <TopHeader
             title={project.title}
-            onTitleChange={(title) => updateProject({ title })}
+            onTitleChange={(title) => updateProject({ title }, { history: false })}
             settings={project.settings}
             onSettingsChange={(settings) => updateProject({ settings })}
             onOpenExportModal={() => {
@@ -1014,6 +1585,15 @@ export default function App() {
             onCancelGenerateAll={handleCancelGenerateAllImages}
             isGeneratingAll={isGeneratingAllImages}
             batchProgress={batchGenerationProgress}
+            narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
+            isGeneratingNarration={isGeneratingNarration}
+            onRegenerateNarration={() => { void handleGenerateFullNarration(); }}
+            failedImageCount={project.clips.filter((clip) => clip.imageStatus === 'failed').length}
+            onRetryFailedImages={handleRetryFailedImages}
+            canUndo={historyVersion >= 0 && historyRef.current.canUndo()}
+            canRedo={historyVersion >= 0 && historyRef.current.canRedo()}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
           />
 
           <VideoPlayerStage
@@ -1040,6 +1620,9 @@ export default function App() {
             onTogglePlay={() => setIsPlaying(prev => !prev)}
             selectedClipId={selectedClipId}
             onSelectClip={setSelectedClipId}
+            sentenceGap={resolveSentenceGap(project.audio)}
+            onUtteranceHoldChange={handleUtteranceHoldChange}
+            onHoldCommit={scheduleBakeHolds}
           />
         </main>
       )}
@@ -1049,6 +1632,19 @@ export default function App() {
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
         project={project}
+      />
+
+      <ConfirmDialog
+        open={Boolean(confirmState)}
+        title={confirmState?.title || ''}
+        detail={confirmState?.detail || ''}
+        confirmLabel={confirmState?.confirmLabel || '继续'}
+        onCancel={() => setConfirmState(null)}
+        onConfirm={() => {
+          const action = confirmState?.action;
+          setConfirmState(null);
+          if (action) void action();
+        }}
       />
     </div>
   );

@@ -1,6 +1,5 @@
 import {
   AspectRatio,
-  CameraMotion,
   ConceptMix,
   ForecastShot,
   ResearchNotes,
@@ -16,15 +15,18 @@ import {
   VisualStyle
 } from '../types';
 import { generateProceduralArtwork } from './visualGenerator';
-import { buildVisualPrompt, presetStylePack } from './stylePack';
+import { presetStylePack } from './stylePack';
+import { beatToChinese, compileImagePrompt } from './imagePrompt';
+import { cameraMotionForCoverage, withCoverage } from './shotCoverage';
 import {
   applyBibleToChineseIntent,
-  applyBibleToEnglishPrompt,
   normalizeVisualBible,
   stampShotsWithBible,
+  stripBiblePrefix,
   visualBibleModeForGenre
 } from './visualBible';
 import { countNarrationChars, ensureUniqueClipIds, joinClipNarrations, newClipId, repairClipSlices } from './narrationTrack';
+import { clampSentenceGap, SENTENCE_GAP_DEFAULT } from './sentenceGap';
 import {
   applyHoldToShots,
   applyPinnedHolds,
@@ -196,17 +198,21 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
   const speechSpans = spansFresh
     ? normalizeSpeechSpans(workspace.speechSpans, workspace.fullNarration)
     : buildSpeechSpans(workspace.fullNarration, workspace.beats);
-  const forecastShots = stampShotsWithBible(
-    applyPinnedHolds(
-      predictShots({
-        narration: workspace.fullNarration,
-        beats: workspace.beats,
-        budget: durationBudget,
-        spans: speechSpans
-      }),
-      workspace.forecastShots
+  const forecastShots = withCoverage(
+    stampShotsWithBible(
+      applyPinnedHolds(
+        predictShots({
+          narration: workspace.fullNarration,
+          beats: workspace.beats,
+          budget: durationBudget,
+          spans: speechSpans
+        }),
+        workspace.forecastShots
+      ),
+      workspace.visualBible
     ),
-    workspace.visualBible
+    workspace.visualBible,
+    workspace.forecastShots
   );
   const directorNotes = [
     ...validateForecast({ budget: durationBudget, shots: forecastShots, beats: workspace.beats }),
@@ -507,9 +513,9 @@ export function forecastToClips(
   aspectRatio: AspectRatio,
   stylePack?: StylePack,
   previousClips: StoryboardClip[] = [],
-  visualBible?: VisualBible | null
+  visualBible?: VisualBible | null,
+  sentenceGap: number = SENTENCE_GAP_DEFAULT
 ): StoryboardClip[] {
-  const motions: CameraMotion[] = ['zoom-in', 'pan-left', 'cinematic-orbit', 'zoom-out', 'pan-right', 'tilt-up'];
   const pack = stylePack || presetStylePack(visualStyle);
   const prevByKey = new Map<string, StoryboardClip>();
   const spanCursor = new Map<string, number>();
@@ -519,9 +525,9 @@ export function forecastToClips(
 
   const usedIds = new Set<string>();
   const clips = shots.map((shot, index) => {
-    const motion = cameraForEnergy(shot.energy, index, motions);
+    const motion = cameraMotionForCoverage(shot);
     const transition: TransitionType = index === shots.length - 1 ? 'fade-black' : 'crossfade';
-    const visual = shot.visualIntent || shot.sliceText || shot.narration || `scene ${index + 1}`;
+    const visual = stripBiblePrefix(shot.visualIntent || shot.sliceText || shot.narration || `scene ${index + 1}`);
     const chineseVisual = applyBibleToChineseIntent(visual, visualBible, shot);
     const voRole = shot.voRole || 'start';
     const span = shot.spanId || `order:${shot.order}`;
@@ -530,24 +536,65 @@ export function forecastToClips(
     const prev = prevByKey.get(`${span}#${shot.visualIndex ?? 0}`);
     const id = prev?.id && !usedIds.has(prev.id) ? prev.id : newClipId(index, usedIds);
     usedIds.add(id);
+    const nextShot = shots[index + 1];
+    const isTail = !nextShot || nextShot.voRole !== 'continue';
+    const holdDuration = shot.holdPinned
+      ? shot.holdDuration
+      : isTail
+        ? clampSentenceGap(sentenceGap)
+        : 0;
+    const draft = {
+      narration: voRole === 'start' ? shot.narration : '',
+      voSlice: shot.sliceText,
+      chineseVisualPrompt: chineseVisual,
+      characterIds: shot.characterIds,
+      locationId: shot.locationId,
+      continuity: shot.continuity,
+      cameraMotion: prev?.cameraMotion || motion,
+      order: index + 1,
+      promptPinned: Boolean(prev?.promptPinned),
+      visualPrompt: prev?.promptPinned ? (prev.visualPrompt || '') : '',
+      shotSize: shot.shotSize,
+      cameraAngle: shot.cameraAngle,
+      shotComposition: shot.shotComposition,
+      coverageJob: shot.coverageJob,
+      coverageLink: shot.coverageLink,
+      coverageSource: shot.coverageSource
+    };
+    const compiled = compileImagePrompt({
+      clip: draft,
+      pack,
+      bible: visualBible,
+      aspectRatio,
+      clipIndex: index,
+      clipCount: shots.length
+    });
     return {
       id,
       order: index + 1,
       speechDuration: shot.speechDuration,
-      holdDuration: shot.holdPinned ? shot.holdDuration : 0,
+      holdDuration,
       holdPinned: Boolean(shot.holdPinned),
       characterIds: shot.characterIds,
       locationId: shot.locationId,
       continuity: shot.continuity,
-      duration: Math.max(0.05, shot.speechDuration + (shot.holdPinned ? shot.holdDuration : 0)),
-      narration: voRole === 'start' ? shot.narration : '',
+      duration: Math.max(0.05, shot.speechDuration + holdDuration),
+      narration: draft.narration,
       secondaryText: shot.sliceText || shot.narration,
       voSpanId: shot.spanId,
       voRole,
       voSlice: shot.sliceText,
-      visualPrompt: applyBibleToEnglishPrompt(buildVisualPrompt(visual, pack), visualBible, shot.characterIds),
-      chineseVisualPrompt: chineseVisual,
-      cameraMotion: prev?.cameraMotion || motion,
+      visualBeat: compiled.beat,
+      visualPrompt: compiled.prompt,
+      chineseVisualPrompt: beatToChinese(compiled.beat) || chineseVisual,
+      promptPinned: draft.promptPinned,
+      shotSize: shot.shotSize,
+      cameraAngle: shot.cameraAngle,
+      shotComposition: shot.shotComposition,
+      coverageJob: shot.coverageJob,
+      coverageLink: shot.coverageLink,
+      coverageSource: shot.coverageSource,
+      cameraMotion: draft.cameraMotion,
       transition: prev?.transition || transition,
       imageUrl: prev?.imageUrl || generateProceduralArtwork(shot.narration || visual, visualStyle, aspectRatio, index),
       isGeneratingImage: false,
@@ -556,12 +603,6 @@ export function forecastToClips(
     };
   });
   return ensureUniqueClipIds(repairClipSlices(clips));
-}
-
-function cameraForEnergy(energy: ForecastShot['energy'], index: number, motions: CameraMotion[]): CameraMotion {
-  if (energy === 'hold' || energy === 'slow') return 'static';
-  if (energy === 'fast') return index % 2 === 0 ? 'zoom-in' : 'zoom-out';
-  return motions[index % motions.length];
 }
 
 export function workspaceTopicTitle(workspace: ScriptWorkspace, fallback = ''): string {

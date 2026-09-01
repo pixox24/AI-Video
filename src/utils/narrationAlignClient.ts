@@ -1,5 +1,5 @@
-import { NarrationAlignment, NarrationAlignSource, NarrationWordMark, StoryboardClip } from '../types';
-import { blobToDataUrl, concatAudioBuffers, decodeAudioUrl, encodeWavPcm16 } from './audioConcat';
+import { NarrationAlignment, NarrationAlignSource, NarrationTrack, NarrationWordMark, StoryboardClip } from '../types';
+import { blobToDataUrl, concatAudioBuffers, decodeAudioUrl, encodeWavPcm16, silentBuffer, sliceAudioBuffer } from './audioConcat';
 import {
   applyNarrationTimingsToClips,
   detectSpeechBounds,
@@ -11,6 +11,7 @@ import {
   timingsFromUtteranceLayouts,
   utterancesFromClips
 } from './narrationTrack';
+import { clampSentenceGap, stampSentenceGaps } from './sentenceGap';
 
 export type UtteranceSegment = {
   text: string;
@@ -18,17 +19,19 @@ export type UtteranceSegment = {
   words?: NarrationWordMark[];
 };
 
-export async function assembleAlignedNarration(
+async function assembleFromBuffers(
   sourceClips: StoryboardClip[],
-  segments: UtteranceSegment[]
+  items: { text: string; buffer: AudioBuffer; words?: NarrationWordMark[] }[],
+  sentenceGap?: number
 ) {
-  const clips = ensureUniqueClipIds(repairClipSlices(sourceClips));
+  const gap = clampSentenceGap(sentenceGap);
+  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), gap);
   const utterances = utterancesFromClips(clips);
   if (utterances.length === 0) {
     throw new Error('没有可对齐的旁白句');
   }
-  if (segments.length !== utterances.length) {
-    throw new Error(`旁白句数不一致（文案 ${utterances.length}，音频 ${segments.length}）`);
+  if (items.length !== utterances.length) {
+    throw new Error(`旁白句数不一致（文案 ${utterances.length}，音频 ${items.length}）`);
   }
 
   const buffers = [];
@@ -38,8 +41,11 @@ export async function assembleAlignedNarration(
 
   for (let i = 0; i < utterances.length; i++) {
     const utterance = utterances[i];
-    const segment = segments[i];
-    const buffer = await decodeAudioUrl(segment.audioUrl);
+    const item = items[i];
+    const buffer = item.buffer;
+    if (!buffer || buffer.length < 32) {
+      throw new Error(`旁白句没有音频：${utterance.text.slice(0, 18)}`);
+    }
     buffers.push(buffer);
     const bounds = detectSpeechBounds(buffer);
     const slices = utterance.clips.map((clip) => clip.voSlice || '');
@@ -56,10 +62,10 @@ export async function assembleAlignedNarration(
       duration: buffer.duration,
       slices,
       text: utterance.text,
-      words: segment.words,
+      words: item.words,
       energyCuts
     });
-    layouts.push({ ranges: layout.ranges, audioOffset });
+    layouts.push({ ranges: layout.ranges, audioOffset, duration: buffer.duration });
     marks.push({
       text: utterance.text,
       audioStart: audioOffset,
@@ -68,6 +74,14 @@ export async function assembleAlignedNarration(
       source: layout.source
     });
     audioOffset += buffer.duration;
+
+    const tailId = utterance.clips[utterance.clips.length - 1]?.id;
+    const tail = clips.find((clip) => clip.id === tailId);
+    const pad = Math.max(0, tail?.holdDuration || 0);
+    if (pad > 0.001) {
+      buffers.push(silentBuffer(buffer.sampleRate, pad));
+      audioOffset += pad;
+    }
   }
 
   const sources = marks.map((mark) => mark.source);
@@ -83,7 +97,7 @@ export async function assembleAlignedNarration(
   const wav = encodeWavPcm16(concatenated);
   const wavDataUrl = await blobToDataUrl(wav);
   const timings = timingsFromUtteranceLayouts(utterances, layouts);
-  const nextClips = applyNarrationTimingsToClips(clips, timings);
+  const nextClips = applyNarrationTimingsToClips(clips, timings, gap);
   const alignment: NarrationAlignment = {
     version: 2,
     source: overall,
@@ -97,4 +111,65 @@ export async function assembleAlignedNarration(
     alignment,
     clips: nextClips
   };
+}
+
+export async function assembleAlignedNarration(
+  sourceClips: StoryboardClip[],
+  segments: UtteranceSegment[],
+  sentenceGap?: number
+) {
+  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), sentenceGap);
+  const utterances = utterancesFromClips(clips);
+  if (utterances.length === 0) {
+    throw new Error('没有可对齐的旁白句');
+  }
+  if (segments.length !== utterances.length) {
+    throw new Error(`旁白句数不一致（文案 ${utterances.length}，音频 ${segments.length}）`);
+  }
+
+  const items = [];
+  for (let i = 0; i < utterances.length; i++) {
+    const utterance = utterances[i];
+    const segment = segments[i];
+    const buffer = await decodeAudioUrl(segment.audioUrl);
+    if (!buffer || buffer.length < 32) {
+      throw new Error(`旁白句没有音频：${utterance.text.slice(0, 18)}`);
+    }
+    items.push({ text: utterance.text, buffer, words: segment.words });
+  }
+
+  return assembleFromBuffers(clips, items, sentenceGap);
+}
+
+/** Re-pad an existing aligned VO file without calling TTS. */
+export async function reassembleNarrationWithHolds(
+  sourceClips: StoryboardClip[],
+  track: NarrationTrack,
+  sentenceGap?: number
+) {
+  if (!track.audioUrl || !track.alignment?.utterances?.length) return null;
+  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), sentenceGap);
+  const utterances = utterancesFromClips(clips);
+  if (utterances.length === 0) return null;
+  if (utterances.length !== track.alignment.utterances.length) return null;
+
+  const full = await decodeAudioUrl(track.audioUrl);
+  const used = new Set<number>();
+  const items: { text: string; buffer: AudioBuffer }[] = [];
+
+  for (let i = 0; i < utterances.length; i++) {
+    const utterance = utterances[i];
+    let markIndex = track.alignment.utterances.findIndex(
+      (item, itemIndex) => item.text === utterance.text && !used.has(itemIndex)
+    );
+    if (markIndex < 0) markIndex = !used.has(i) ? i : -1;
+    const mark = markIndex >= 0 ? track.alignment.utterances[markIndex] : undefined;
+    if (!mark || mark.audioEnd <= mark.audioStart + 0.02) return null;
+    used.add(markIndex);
+    const slice = sliceAudioBuffer(full, mark.audioStart, mark.audioEnd);
+    if (!slice || slice.length < 32) return null;
+    items.push({ text: utterance.text, buffer: slice });
+  }
+
+  return assembleFromBuffers(clips, items, sentenceGap);
 }

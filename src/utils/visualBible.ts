@@ -336,7 +336,7 @@ export function composeShotVisualIntent(shot: ForecastShot, bible?: VisualBible 
   const action = stripBiblePrefix(shot.visualIntent || shot.sliceText || shot.narration || '');
   if (!bible) return action;
   if (bible.mode === 'expository') {
-    return [bible.paletteLock, action].filter(Boolean).join('。');
+    return action;
   }
   const char = bible.characters.find((item) => shot.characterIds?.includes(item.id)) || leadCharacter(bible);
   const loc = bible.locations.find((item) => item.id === shot.locationId) || bible.locations[0];

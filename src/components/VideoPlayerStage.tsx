@@ -16,6 +16,7 @@ import { StoryboardClip, SubtitleConfig, AudioConfig, ProjectSettings } from '..
 import { audioEngine } from '../utils/audioEngine';
 import { calculateSubtitleLayout } from '../utils/subtitleFormatter';
 import { clipShotNarration, isNarrationTrackFresh, mapNarrationToTimeline, mapTimelineToNarration } from '../utils/narrationTrack';
+import { setPlayhead } from '../utils/playhead';
 import { resolveTtsApi } from '../utils/presets';
 import { showStatusToast } from '../utils/statusToast';
 import {
@@ -24,6 +25,13 @@ import {
   resolveSubtitleTypeface,
   subtitleCanvasFont
 } from '../utils/subtitleFonts';
+
+function formatTimecode(sec: number) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  const f = Math.floor((sec % 1) * 30);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
+}
 
 interface VideoPlayerStageProps {
   clips: StoryboardClip[];
@@ -65,6 +73,8 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   const timeRef = useRef<number>(currentTime);
   const lastUiPushRef = useRef<number>(0);
   const wasPlayingRef = useRef<boolean>(isPlaying);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const overlayTimeRef = useRef<HTMLSpanElement | null>(null);
 
   // Total duration
   const totalDuration = clips.reduce((acc, c) => acc + (c.duration || 3.5), 0) || 10;
@@ -120,12 +130,12 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   }, [subtitleFontId]);
 
   useEffect(() => {
-    if (narrationFresh && audio.narrationTrack?.audioUrl) {
+    if (audio.voiceoverEnabled && audio.narrationTrack?.audioUrl) {
       audioEngine.ensureFullNarration(audio.narrationTrack.audioUrl, audio.voiceoverVolume ?? 0.95);
     } else {
       audioEngine.stopFullNarration();
     }
-  }, [narrationFresh, audio.narrationTrack?.audioUrl, audio.voiceoverVolume]);
+  }, [audio.voiceoverEnabled, audio.narrationTrack?.audioUrl, audio.voiceoverVolume]);
 
   useEffect(() => {
     if (!isPlaying) {
@@ -165,7 +175,10 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   const renderCanvas = useCallback((time: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    if (!ctxRef.current || ctxRef.current.canvas !== canvas) {
+      ctxRef.current = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    }
+    const ctx = ctxRef.current;
     if (!ctx) return;
 
     const width = canvas.width;
@@ -413,11 +426,13 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     if (isPlaying) {
       if (Math.abs(currentTime - timeRef.current) > 0.35) {
         timeRef.current = currentTime;
+        setPlayhead(currentTime);
         audioEngine.requestNarrationSeek();
       }
       return;
     }
     timeRef.current = currentTime;
+    setPlayhead(currentTime);
     audioEngine.requestNarrationSeek();
   }, [currentTime, isPlaying]);
 
@@ -437,7 +452,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
       audioEngine.syncFullNarration(0, false, true, 0);
       return;
     }
-    if (narrationFresh && audio.narrationTrack) {
+    if (audio.narrationTrack) {
       const mapped = mapTimelineToNarration(time, clips, audio.narrationTrack);
       audioEngine.syncFullNarration(
         mapped.audioTime,
@@ -473,7 +488,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
       if (isPlaying) {
         let next = timeRef.current + delta;
-        if (narrationFresh && audio.narrationTrack && audio.voiceoverEnabled && !isMuted) {
+        if (audio.narrationTrack && audio.voiceoverEnabled && !isMuted) {
           const mapped = mapTimelineToNarration(timeRef.current, clips, audio.narrationTrack);
           audioEngine.syncFullNarration(
             mapped.audioTime,
@@ -494,7 +509,11 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
           audioEngine.requestNarrationSeek();
         }
         timeRef.current = next;
-        if (now - lastUiPushRef.current >= 50) {
+        setPlayhead(next);
+        if (overlayTimeRef.current) {
+          overlayTimeRef.current.textContent = `${formatTimecode(next)} \\ ${formatTimecode(totalDuration)}`;
+        }
+        if (now - lastUiPushRef.current >= 150) {
           lastUiPushRef.current = now;
           onTimeUpdate(next);
         }
@@ -511,14 +530,6 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     };
   }, [isPlaying, totalDuration, onTimeUpdate, renderCanvas, syncNarrationAt, narrationFresh, audio, clips, isMuted]);
-
-  // Format Time (00:00:00 \ 00:08:00)
-  const formatTimecode = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    const f = Math.floor((sec % 1) * 30);
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
-  };
 
   // Compute container aspect ratio style
   const getAspectDimensions = () => {
@@ -613,7 +624,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
             </button>
 
             {/* Timecode display matching reference format */}
-            <span className="font-mono text-zinc-300 text-[11px]">
+            <span ref={overlayTimeRef} className="font-mono text-zinc-300 text-[11px]">
               {formatTimecode(currentTime)} \ {formatTimecode(totalDuration)}
             </span>
           </div>

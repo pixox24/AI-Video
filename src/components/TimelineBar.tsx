@@ -25,6 +25,9 @@ import {
 } from 'lucide-react';
 import { StoryboardClip, TransitionType } from '../types';
 import { clipShotNarration, newClipId } from '../utils/narrationTrack';
+import { getPlayhead, subscribePlayhead } from '../utils/playhead';
+import { formatSentenceGap, isUtteranceTail } from '../utils/sentenceGap';
+import { SentenceGapControl } from './SentenceGapControl';
 
 interface TimelineBarProps {
   clips: StoryboardClip[];
@@ -35,6 +38,9 @@ interface TimelineBarProps {
   onTogglePlay: () => void;
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
+  sentenceGap?: number;
+  onUtteranceHoldChange?: (clipId: string, holdDuration: number, pinned: boolean) => void;
+  onHoldCommit?: () => void;
 }
 
 const TRANSITIONS: { id: TransitionType; name: string; icon: string; desc: string }[] = [
@@ -57,8 +63,15 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
   onTogglePlay,
   selectedClipId,
   onSelectClip,
+  sentenceGap = 0.2,
+  onUtteranceHoldChange,
+  onHoldCommit
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const playheadElRef = useRef<HTMLDivElement>(null);
+  const playheadLabelRef = useRef<HTMLSpanElement>(null);
+  const headerTimeRef = useRef<HTMLSpanElement>(null);
+  const lastHeaderPaintRef = useRef<number>(0);
   const isDraggingPlayheadRef = useRef<boolean>(false);
   const isTrimmingRef = useRef<boolean>(false);
   const isReorderingRef = useRef<boolean>(false);
@@ -87,6 +100,12 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
 
   // Inline Popovers
   const [activeTransitionClipIndex, setActiveTransitionClipIndex] = useState<number | null>(null);
+  const [gapEditor, setGapEditor] = useState<{
+    clipId: string;
+    index: number;
+    clientX: number;
+    clientY: number;
+  } | null>(null);
 
   // Keyboard shortcut guide modal
   const [showShortcutHelp, setShowShortcutHelp] = useState<boolean>(false);
@@ -144,6 +163,17 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
   const handleResetZoom = () => {
     setPixelsPerSecond(90);
   };
+
+  useEffect(() => {
+    if (!gapEditor) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.('[data-sentence-gap-editor]')) return;
+      setGapEditor(null);
+    };
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [gapEditor]);
 
   // Fit to screen (自适应全片)
   const handleFitToScreen = () => {
@@ -362,6 +392,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
       stopAutoScroll();
       window.removeEventListener('pointermove', handleTrimMove);
       window.removeEventListener('pointerup', handleTrimUp);
+      onHoldCommit?.();
     };
 
     window.addEventListener('pointermove', handleTrimMove);
@@ -427,21 +458,39 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
     setActiveTransitionClipIndex(null);
   };
 
-  // Auto-scroll when playing
   useEffect(() => {
-    if (isPlaying && scrollContainerRef.current && !isDragging && !trimmingClipId && !isReorderingRef.current) {
-      const container = scrollContainerRef.current;
-      const playheadX = timeToX(currentTime);
-      const viewLeft = container.scrollLeft;
-      const viewRight = viewLeft + container.clientWidth;
-
-      if (playheadX > viewRight - 100) {
-        container.scrollLeft = playheadX - container.clientWidth + 200;
-      } else if (playheadX < viewLeft) {
-        container.scrollLeft = Math.max(0, playheadX - 50);
+    const paint = (time: number) => {
+      const x = timeToX(time);
+      if (playheadElRef.current) playheadElRef.current.style.left = `${x}px`;
+      if (playheadLabelRef.current) playheadLabelRef.current.textContent = `${time.toFixed(1)}s`;
+      const now = performance.now();
+      if (headerTimeRef.current && now - lastHeaderPaintRef.current >= 120) {
+        lastHeaderPaintRef.current = now;
+        const m = Math.floor(time / 60);
+        const s = Math.floor(time % 60);
+        const f = Math.floor((time % 1) * 30);
+        headerTimeRef.current.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
       }
-    }
-  }, [currentTime, isPlaying, pixelsPerSecond, isDragging, trimmingClipId, timeToX]);
+      if (
+        isPlaying
+        && scrollContainerRef.current
+        && !isDragging
+        && !trimmingClipId
+        && !isReorderingRef.current
+      ) {
+        const container = scrollContainerRef.current;
+        const viewLeft = container.scrollLeft;
+        const viewRight = viewLeft + container.clientWidth;
+        if (x > viewRight - 100) {
+          container.scrollLeft = x - container.clientWidth + 200;
+        } else if (x < viewLeft) {
+          container.scrollLeft = Math.max(0, x - 50);
+        }
+      }
+    };
+    paint(getPlayhead());
+    return subscribePlayhead(paint);
+  }, [timeToX, isPlaying, isDragging, trimmingClipId]);
 
   // Add new clip
   const handleAddClip = () => {
@@ -585,7 +634,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
 
           {/* Timecode display */}
           <span className="font-mono text-zinc-200 text-xs tracking-wider font-medium">
-            {formatHeaderTime(currentTime)} <span className="text-zinc-500">\</span> {formatHeaderTime(totalDuration)}
+            <span ref={headerTimeRef}>{formatHeaderTime(currentTime)}</span> <span className="text-zinc-500">\</span> {formatHeaderTime(totalDuration)}
           </span>
         </div>
 
@@ -746,6 +795,20 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                     </span>
                   )}
 
+                  {(() => {
+                    const speech = clip.speechDuration || 0;
+                    const hold = Math.max(0, clip.holdDuration || 0);
+                    if (hold < 0.04 || speech <= 0 || duration <= 0) return null;
+                    const leftPct = Math.min(96, Math.max(8, (speech / duration) * 100));
+                    return (
+                      <div
+                        className="absolute top-0 bottom-0 bg-black/50 border-l border-amber-300/35 pointer-events-none"
+                        style={{ left: `${leftPct}%`, right: 0 }}
+                        title={`气口 ${hold.toFixed(2)}s`}
+                      />
+                    );
+                  })()}
+
                   {isDropTarget && draggedClipIndex !== null && draggedClipIndex > index && (
                     <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-amber-400 z-20" />
                   )}
@@ -797,6 +860,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
+                      setGapEditor(null);
                       setActiveTransitionClipIndex(isOpen ? null : index);
                     }}
                     title={trans.name}
@@ -876,32 +940,76 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                 })}
               </div>
               <div className="relative h-5 flex-shrink-0">
-                {clipLayouts.map(({ clip, index, start, duration }) => {
+                {clipLayouts.map(({ clip, index, start, duration, end }) => {
                   const isCurrentActive = currentTime >= start && currentTime < start + duration;
                   const clipWidth = Math.max(2, duration * pixelsPerSecond);
-                  const barCount = Math.max(4, Math.floor(clipWidth / 5));
+                  const speech = clip.speechDuration || 0;
+                  const hold = Math.max(0, clip.holdDuration || 0);
+                  const speechRatio = speech > 0 && duration > 0 ? Math.min(1, speech / duration) : 1;
+                  const speechWidth = Math.max(2, speechRatio * clipWidth);
+                  const barCount = Math.max(3, Math.floor(speechWidth / 5));
+                  const tail = isUtteranceTail(clips, index);
+                  const gapOpen = gapEditor?.clipId === clip.id;
                   return (
-                    <div
-                      key={`audio-${clip.id}-${index}`}
-                      style={{ left: timeToX(start), width: clipWidth }}
-                      className={`absolute top-0.5 bottom-0 rounded px-0.5 flex items-center justify-between border overflow-hidden ${
-                        isCurrentActive ? 'bg-amber-500/15 border-amber-500/50' : 'bg-[#14141a] border-[#22222c]'
-                      }`}
-                    >
-                      {Array.from({ length: barCount }).map((_, barIdx) => {
-                        const pseudoHeight = 3 + Math.abs(Math.sin((barIdx + index * 5) * 0.8)) * 10;
-                        const isBarActive = isCurrentActive && (currentTime - start) / duration >= barIdx / barCount;
-                        return (
-                          <div
-                            key={barIdx}
-                            className={`w-0.5 rounded-full ${
-                              isBarActive ? 'bg-amber-400' : isCurrentActive ? 'bg-amber-500/50' : 'bg-zinc-600'
-                            }`}
-                            style={{ height: `${pseudoHeight}px` }}
-                          />
-                        );
-                      })}
-                    </div>
+                    <React.Fragment key={`audio-${clip.id}-${index}`}>
+                      <div
+                        style={{ left: timeToX(start), width: clipWidth }}
+                        className="absolute top-0.5 bottom-0 flex overflow-hidden rounded"
+                      >
+                        <div
+                          className={`h-full flex items-center justify-between px-0.5 border ${
+                            isCurrentActive ? 'bg-amber-500/15 border-amber-500/50' : 'bg-[#14141a] border-[#22222c]'
+                          }`}
+                          style={{ width: `${speechWidth}px` }}
+                        >
+                          {Array.from({ length: barCount }).map((_, barIdx) => {
+                            const pseudoHeight = 3 + Math.abs(Math.sin((barIdx + index * 5) * 0.8)) * 10;
+                            const isBarActive = isCurrentActive && speech > 0 && (currentTime - start) / Math.max(0.01, speech) >= barIdx / barCount;
+                            return (
+                              <div
+                                key={barIdx}
+                                className={`w-0.5 rounded-full ${
+                                  isBarActive ? 'bg-amber-400' : isCurrentActive ? 'bg-amber-500/50' : 'bg-zinc-600'
+                                }`}
+                                style={{ height: `${pseudoHeight}px` }}
+                              />
+                            );
+                          })}
+                        </div>
+                        {tail && hold > 0.03 && (
+                          <div className="h-full flex-1 bg-[#1a1712] border-y border-r border-[#3a3224]" />
+                        )}
+                      </div>
+                      {tail && (
+                        <button
+                          type="button"
+                          data-sentence-gap-editor
+                          title={hold > 0.001 ? `句末气口 ${formatSentenceGap(hold)}s，点这里改` : '加上句间气口'}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveTransitionClipIndex(null);
+                            setGapEditor((current) => (
+                              current?.clipId === clip.id
+                                ? null
+                                : { clipId: clip.id, index, clientX: e.clientX, clientY: e.clientY }
+                            ));
+                          }}
+                          style={{ left: timeToX(end) - 15, width: 30 }}
+                          className={`absolute -top-0.5 z-30 h-[22px] rounded-full flex items-center justify-center cursor-pointer shadow-lg transition-all ${
+                            gapOpen
+                              ? 'bg-amber-400 text-black scale-105'
+                              : hold > 0.04
+                                ? 'bg-[#241e16] text-amber-300 border border-amber-400/50 hover:bg-amber-400 hover:text-black'
+                                : 'bg-[#1b1b22] text-zinc-500 border border-[#343444] hover:border-amber-400/50 hover:text-amber-300'
+                          }`}
+                        >
+                          <span className="font-mono text-[8px] font-semibold leading-none">
+                            {hold > 0.001 ? formatSentenceGap(hold) : '+'}
+                          </span>
+                        </button>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </div>
@@ -917,6 +1025,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
 
           <div
             id="timeline-playhead"
+            ref={playheadElRef}
             className="absolute top-0 bottom-0 pointer-events-none z-30"
             style={{ left: playheadX, transform: 'translateX(-50%)' }}
           >
@@ -927,7 +1036,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
                   ? 'bg-amber-400 text-black ring-2 ring-amber-300 shadow-amber-500/40 scale-105' 
                   : 'bg-amber-500 text-black hover:bg-amber-400'
               }`}>
-                <span>{currentTime.toFixed(1)}s</span>
+                <span ref={playheadLabelRef}>{currentTime.toFixed(1)}s</span>
               </div>
               <div 
                 className="w-0 h-0 border-x-[5px] border-x-transparent border-t-[6px] border-t-amber-500" 
@@ -940,6 +1049,36 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
           </div>
         </div>
       </div>
+
+      {gapEditor && createPortal(
+        <div
+          className="fixed z-[80]"
+          style={{
+            left: `${Math.max(16, Math.min((typeof window !== 'undefined' ? window.innerWidth : 800) - 240, gapEditor.clientX - 110))}px`,
+            top: `${Math.max(12, gapEditor.clientY - 214)}px`
+          }}
+          data-sentence-gap-editor
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <SentenceGapControl
+            variant="popover"
+            value={clips[gapEditor.index]?.holdDuration ?? sentenceGap}
+            globalValue={sentenceGap}
+            pinned={Boolean(clips[gapEditor.index]?.holdPinned)}
+            onChange={(seconds) => {
+              const clip = clips[gapEditor.index];
+              if (!clip) return;
+              onUtteranceHoldChange?.(clip.id, seconds, true);
+            }}
+            onFollowGlobal={() => {
+              const clip = clips[gapEditor.index];
+              if (!clip) return;
+              onUtteranceHoldChange?.(clip.id, sentenceGap, false);
+            }}
+          />
+        </div>,
+        document.body
+      )}
 
       {hoverTime !== null && hoverPosition && !isDragging && createPortal(
         <div

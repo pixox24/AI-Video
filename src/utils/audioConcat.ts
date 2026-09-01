@@ -27,13 +27,43 @@ export async function resampleTo(buffer: AudioBuffer, sampleRate: number): Promi
   return ctx.startRendering();
 }
 
+export function silentBuffer(sampleRate: number, seconds = 0.05): AudioBuffer {
+  const length = Math.max(1, Math.round(sampleRate * Math.max(0, seconds)));
+  const ctx = new OfflineAudioContext(1, length, sampleRate);
+  return ctx.createBuffer(1, length, sampleRate);
+}
+
+export function sliceAudioBuffer(buffer: AudioBuffer, startSec: number, endSec: number): AudioBuffer {
+  const sampleRate = buffer.sampleRate;
+  const start = Math.max(0, Math.min(buffer.length, Math.round(startSec * sampleRate)));
+  const end = Math.max(start + 1, Math.min(buffer.length, Math.round(endSec * sampleRate)));
+  const length = Math.max(1, end - start);
+  const ctx = new OfflineAudioContext(1, length, sampleRate);
+  const out = ctx.createBuffer(1, length, sampleRate);
+  const dest = out.getChannelData(0);
+  if (buffer.numberOfChannels === 1) {
+    dest.set(buffer.getChannelData(0).subarray(start, start + length));
+    return out;
+  }
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
+  for (let i = 0; i < length; i++) {
+    let sum = 0;
+    for (const channel of channels) sum += channel[start + i] || 0;
+    dest[i] = sum / channels.length;
+  }
+  return out;
+}
+
 export async function concatAudioBuffers(buffers: AudioBuffer[]): Promise<AudioBuffer> {
-  const usable = buffers.filter((buffer) => buffer && buffer.length > 0);
-  if (usable.length === 0) {
+  if (!buffers.length) {
     throw new Error('没有可拼接的旁白音频');
   }
+  const sampleRate = buffers.find((buffer) => buffer && buffer.sampleRate)?.sampleRate || 24000;
+  const usable = buffers.map((buffer) => (
+    buffer && buffer.length > 0 ? buffer : silentBuffer(sampleRate)
+  ));
   if (usable.length === 1 && usable[0].numberOfChannels === 1) return usable[0];
-  const sampleRate = usable[0].sampleRate;
   const normalized = await Promise.all(usable.map((buffer) => resampleTo(buffer, sampleRate)));
   const total = normalized.reduce((sum, buffer) => sum + buffer.length, 0);
   const ctx = new OfflineAudioContext(1, Math.max(1, total), sampleRate);

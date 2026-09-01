@@ -17,6 +17,17 @@ import {
 import type { ScriptGenre, StylePack, VisualBible } from "./src/types";
 import { joinClipsForTts as joinClipsForTtsShared, utterancesFromClips } from "./src/utils/narrationTrack";
 import {
+  bailianTtsConcurrency,
+  isQwenAudioFlashModel,
+  isQwenAudioPlusModel,
+  isQwenAudioTtsModel,
+  qwenAudioLanguageHints,
+  qwenAudioSampleRate,
+  resolveBailianTtsEndpoint,
+  resolveBailianVoiceDesignEndpoint,
+  resolveTtsVoiceId
+} from "./src/utils/ttsCatalog";
+import {
   bibleContractForPrompt,
   bibleSourceHash,
   fallbackVisualBible,
@@ -37,8 +48,15 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 const generatedDir = path.join(process.cwd(), "public", "generated");
+const dataDir = path.join(process.cwd(), "data");
+const projectsDir = path.join(dataDir, "projects");
+const currentProjectFile = path.join(dataDir, "current-project.json");
+const previousProjectFile = path.join(dataDir, "previous-project.json");
+const currentPointerFile = path.join(dataDir, "current.json");
 try {
   fs.mkdirSync(generatedDir, { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(projectsDir, { recursive: true });
 } catch {
   // directory may already exist
 }
@@ -1509,6 +1527,60 @@ function 只能是 hook/setup/turn/proof/reveal/cta。energy 只能是 fast/medi
   return res.json({ spans: [] });
 });
 
+app.post("/api/script/coverage", async (req, res) => {
+  const { shots, visualBible, genre, stylePack, llmApi } = req.body || {};
+  const list = Array.isArray(shots) ? shots : [];
+  if (list.length === 0) {
+    return res.status(400).json({ error: "shots are required" });
+  }
+  const mode = visualBibleModeForGenre(genre as ScriptGenre);
+  const styleContract = incomingStyleContract(stylePack);
+  const slotLines = list
+    .map((shot: any, index: number) => {
+      const contrast = shot.voRole === "continue" || String(shot.splitReason || "").includes("对照");
+      return `${index + 1}. id=${shot.id} function=${shot.function || ""} contrast=${contrast ? "yes" : "no"} first=${index === 0} last=${index === list.length - 1}\n口播切片：${shot.sliceText || shot.narration || ""}\n画面：${shot.visualIntent || ""}`;
+    })
+    .join("\n\n");
+
+  const prompt = `你是短视频摄影指导。口播和槽位已经锁死，只给每一格填机位。
+硬规则：
+- 输出 shots 必须与输入同 id、同数量、同顺序。禁止增删格、禁止改口播。
+- 相邻两格 shotSize 不能相同。
+- 第一格 coverageJob=hook。最后一格 coverageJob=callback，构图尽量贴近第一格。
+- 对照格 coverageJob=contrast，coverageLink=contrast-cut。
+- ${mode === "story" ? "叙事：同一人同一空间，默认平视；不要每格换世界。" : "说明/科普：不要编男主走来走去；第二格优先 insert。"}
+- 不要写生图英文长 prompt，不要改画风。
+- shotSize 只能是 ecu|cu|ms|ws|insert
+- cameraAngle 只能是 eye|low|high
+- shotComposition 只能是 center|thirds|silhouette|negative-left|negative-right
+- coverageJob 只能是 hook|establish|evidence|insert|contrast|callback
+- coverageLink 只能是 advance|contrast-cut|callback|same-axis
+
+${styleContract}
+${bibleContractForPrompt(normalizeVisualBible(visualBible, mode))}
+
+【体裁】${genre || ""}
+【槽位】
+${slotLines}
+
+只输出 JSON：{"shots":[{"id":string,"shotSize":string,"cameraAngle":string,"shotComposition":string,"coverageJob":string,"coverageLink":string}]}`;
+
+  try {
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你只输出合法 JSON。机位设计不能改口播、不能增删镜头。",
+      user: prompt,
+      temperature: 0.35
+    });
+    if (Array.isArray(parsed?.shots) && parsed.shots.length === list.length) {
+      return res.json({ shots: parsed.shots, source: "llm" });
+    }
+  } catch (error: any) {
+    console.warn("[Coverage] fallback:", error?.message || error);
+  }
+  return res.json({ shots: [], source: "rule", fallback: true });
+});
+
 app.post("/api/script/visual-bible", async (req, res) => {
   const { narration, genre, title, stylePack, llmApi, previousBible } = req.body || {};
   const text = String(narration || "").trim();
@@ -1930,23 +2002,28 @@ app.post("/api/style/rewrite-shots", async (req, res) => {
       return {
         id: String(clip.id),
         chineseVisualPrompt: rewritten.chineseVisualPrompt,
-        visualPrompt: rewritten.visualPrompt
+        setting: "",
+        subject: rewritten.chineseVisualPrompt,
+        action: ""
       };
     });
 
   const shotLines = list
     .map((clip: any, index: number) => {
-      return `${index + 1}. id=${clip.id}\n口播：${clip.narration || ""}\n现有画面：${clip.chineseVisualPrompt || clip.visualPrompt || ""}`;
+      return `${index + 1}. id=${clip.id}\n口播：${clip.narration || clip.voSlice || ""}\n现有画面：${clip.chineseVisualPrompt || ""}`;
     })
     .join("\n\n");
 
   const prompt = `${styleContractForPrompt(pack)}
 
-请把下面每一镜的画面改写：保留口播因果。若上文是风格基因，只迁移视觉系统，不要把剥掉的内容写进任何一镜。若上文是美术世界，则服从世界契约。若有画面圣经：叙事型必须反复使用同一角色卡和场景卡，收束回收开场；说明型只锁色板。不要改口播。
+请把下面每一镜改写成看得见的画面节拍。不要写生图英文长 prompt，不要把风格 DNA、参考图里的人或街道写进节拍。
+每一镜只要：setting（在哪）、subject（看见谁/什么）、action（在干什么）。chineseVisualPrompt 用中文把三要素连成一句。
+口播是台词，不是画面：把「别等到眼睛干涩」写成「黑暗里一双盯着手机的干涩眼睛」，不要抄口播原句。
+若上文是风格基因：只在心里记住画法，节拍里不要出现厚涂/色板/参考图物体。若有画面圣经：叙事型同一角色同一空间；说明型不要编主角。不要改口播。
 ${bibleContractForPrompt(normalizeVisualBible(visualBible))}
 ${shotLines}
 
-只输出 JSON：{"shots":[{"id":string,"chineseVisualPrompt":string,"visualPrompt":string}]}`;
+只输出 JSON：{"shots":[{"id":string,"setting":string,"subject":string,"action":string,"chineseVisualPrompt":string}]}`;
 
   try {
     if (isUsableLlmApi(llmApi)) {
@@ -1969,15 +2046,17 @@ ${shotLines}
             ok: true,
             shots: list.map((clip: any) => {
               const hit = byId.get(String(clip.id));
-              if (hit?.visualPrompt) {
+              if (hit?.subject || hit?.setting || hit?.chineseVisualPrompt) {
                 return {
                   id: String(clip.id),
-                  chineseVisualPrompt: String(hit.chineseVisualPrompt || hit.visualIntent || clip.chineseVisualPrompt || ""),
-                  visualPrompt: String(hit.visualPrompt)
+                  setting: String(hit.setting || ""),
+                  subject: String(hit.subject || ""),
+                  action: String(hit.action || ""),
+                  chineseVisualPrompt: String(hit.chineseVisualPrompt || [hit.setting, hit.subject, hit.action].filter(Boolean).join("。"))
                 };
               }
               const rewritten = localRewriteClipPrompt(clip, pack);
-              return { id: String(clip.id), ...rewritten };
+              return { id: String(clip.id), chineseVisualPrompt: rewritten.chineseVisualPrompt, setting: "", subject: rewritten.chineseVisualPrompt, action: "" };
             })
           });
         }
@@ -2057,10 +2136,15 @@ app.post("/api/visual/generate", async (req, res) => {
       "vector-art": "modern vector illustration, clean lines, minimalist flat art, elegant color palette, high contrast"
     };
 
-    const cleanedPrompt = String(prompt).replace(/[^\w\s\u4e00-\u9fa5,.-]/g, ' ').trim();
+    const modelName = String(customApi?.model || "");
+    const keepStructure = /gpt-image|gpt-4o|gpt-4\.1|chatgpt-image|dall-?e-3/i.test(modelName)
+      || customApi?.promptProfile === "gpt-image";
+    const cleanedPrompt = keepStructure
+      ? String(prompt).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
+      : String(prompt).replace(/[^\w\s\u4e00-\u9fa5,.-]/g, " ").trim();
     const requestedRender = typeof styleRender === "string" ? styleRender.trim() : "";
     const fallbackRender = styleEnhancers[visualStyle] || "";
-    const extras = (requestedRender || fallbackRender)
+    const extras = keepStructure ? [] : (requestedRender || fallbackRender)
       .split(",")
       .map((item: string) => item.trim())
       .filter((item: string) => {
@@ -2074,7 +2158,9 @@ app.post("/api/visual/generate", async (req, res) => {
     const refLock = characterRef?.url
       ? `Keep the exact same person as the reference photo${refName ? ` (${refName})` : ""}: same face, hair, age, and clothing. This is a new camera shot — change pose, framing, and background to match the scene. Do not copy the reference composition.`
       : "";
-    const finalPrompt = refLock ? `${refLock} Scene: ${scenePrompt}` : scenePrompt;
+    const finalPrompt = refLock
+      ? (keepStructure ? `${refLock}\n${scenePrompt}` : `${refLock} Scene: ${scenePrompt}`)
+      : scenePrompt;
     const referenceImage = characterRef?.url ? await resolveReferenceImageDataUrl(String(characterRef.url)) : null;
 
     // =========================================================================
@@ -3212,88 +3298,127 @@ async function callBailianTts(opts: {
   model?: string;
   voice?: string;
   text: string;
+  rate?: number;
   timeoutMs?: number;
 }): Promise<{ ok: boolean; audioUrl?: string; error?: string; status?: number }> {
-  const endpoint = String(
-    opts.endpoint || "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-  ).trim();
   const apiKey = sanitizeBearerKey(opts.apiKey);
-  const model = (opts.model || "").trim() || "qwen3-tts-flash";
-  const voice = (opts.voice || "").trim() || "Cherry";
+  const model = (opts.model || "").trim() || "qwen-audio-3.0-tts-flash";
+  const voice = (opts.voice || "").trim() || (isQwenAudioTtsModel(model) ? "longanfengyue" : "Cherry");
   const text = String(opts.text || "").trim();
+  const endpoint = resolveBailianTtsEndpoint(opts.endpoint, model);
+  const audio30 = isQwenAudioTtsModel(model);
+  const timeoutMs =
+    opts.timeoutMs || (isQwenAudioPlusModel(model) ? 180000 : audio30 ? 120000 : 60000);
 
-  // Recommend explicit language for better pronunciation; fall back to Auto
-  const languageType = /[\u4e00-\u9fa5]/.test(text) ? "Chinese" : "Auto";
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), opts.timeoutMs || 60000);
-
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        input: { text, voice, language_type: languageType }
-      }),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-
-    const rawText = await response.text();
-    let data: any = null;
-    try {
-      data = JSON.parse(rawText);
-    } catch {
-      data = null;
-    }
-
-    if (!response.ok) {
-      return {
-        ok: false,
-        status: response.status,
-        error: data?.message || data?.code || rawText.slice(0, 400) || `HTTP ${response.status}`
-      };
-    }
-
-    const audio = data?.output?.audio;
-
-    // 1. Base64 audio data (some responses embed it directly)
-    if (audio?.data && typeof audio.data === "string" && audio.data.length > 200) {
-      return { ok: true, audioUrl: `data:audio/wav;base64,${audio.data}` };
-    }
-
-    // 2. OSS URL (non-stream result): download & convert to base64 data URI
-    const audioUrl = typeof audio?.url === "string" ? audio.url : "";
-    if (audioUrl) {
-      try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 30000);
-        const audioRes = await fetch(audioUrl, { signal: ctrl.signal });
-        clearTimeout(t);
-        if (audioRes.ok) {
-          const arrayBuffer = await audioRes.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-          const contentType = audioRes.headers.get("content-type") || "audio/wav";
-          return { ok: true, audioUrl: `data:${contentType};base64,${buffer.toString("base64")}` };
-        }
-      } catch (downloadErr: any) {
-        console.warn("[Bailian TTS] Audio download failed:", downloadErr?.message);
+  const input: Record<string, unknown> = audio30
+    ? {
+        text,
+        voice,
+        format: "wav",
+        sample_rate: qwenAudioSampleRate(model),
+        language_hints: qwenAudioLanguageHints(text)
       }
-    }
+    : {
+        text,
+        voice,
+        language_type: /[\u4e00-\u9fa5]/.test(text) ? "Chinese" : "Auto"
+      };
 
-    return { ok: false, status: response.status, error: "未在响应中解析到音频" };
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    return {
-      ok: false,
-      error: err?.name === "AbortError" ? "请求超时" : err?.message || "网络异常"
-    };
+  if (audio30 && typeof opts.rate === "number" && Number.isFinite(opts.rate) && opts.rate !== 1) {
+    input.rate = Math.min(2, Math.max(0.5, opts.rate));
   }
+
+  const maxAttempts = 4;
+  let lastError = "百炼 TTS 合成失败";
+  let lastStatus: number | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json"
+        },
+        body: JSON.stringify({ model, input }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      const rawText = await response.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
+      }
+
+      const errorText = String(data?.message || data?.code || rawText.slice(0, 400) || `HTTP ${response.status}`);
+      const rateLimited =
+        response.status === 429 ||
+        /rate limit exceeded|throttl|too many requests|request rate increased/i.test(errorText);
+
+      if (rateLimited && attempt < maxAttempts) {
+        const waitMs = 800 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+
+      if (!response.ok) {
+        lastStatus = response.status;
+        lastError = errorText;
+        return { ok: false, status: response.status, error: errorText };
+      }
+
+      const audio = data?.output?.audio;
+      if (data?.code && String(data.code) !== "Success" && !audio?.url && !(typeof audio?.data === "string" && audio.data.length > 200)) {
+        lastStatus = response.status;
+        lastError = data?.message || data?.code || "百炼 TTS 返回错误";
+        if (rateLimited && attempt < maxAttempts) continue;
+        return { ok: false, status: response.status, error: lastError };
+      }
+
+      if (audio?.data && typeof audio.data === "string" && audio.data.length > 200) {
+        return { ok: true, audioUrl: `data:audio/wav;base64,${audio.data}` };
+      }
+
+      const audioUrl = typeof audio?.url === "string" ? audio.url : "";
+      if (audioUrl) {
+        try {
+          const ctrl = new AbortController();
+          const t = setTimeout(() => ctrl.abort(), 30000);
+          const audioRes = await fetch(audioUrl, { signal: ctrl.signal });
+          clearTimeout(t);
+          if (audioRes.ok) {
+            const arrayBuffer = await audioRes.arrayBuffer();
+            const buffer = Buffer.from(arrayBuffer);
+            const contentType = audioRes.headers.get("content-type") || "audio/wav";
+            return { ok: true, audioUrl: `data:${contentType};base64,${buffer.toString("base64")}` };
+          }
+        } catch (downloadErr: any) {
+          console.warn("[Bailian TTS] Audio download failed:", downloadErr?.message);
+        }
+      }
+
+      lastStatus = response.status;
+      lastError = "未在响应中解析到音频";
+      return { ok: false, status: response.status, error: lastError };
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      lastError = err?.name === "AbortError" ? "请求超时" : err?.message || "网络异常";
+      if (attempt < maxAttempts && err?.name !== "AbortError") {
+        const waitMs = 800 * 2 ** (attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+      return { ok: false, error: lastError };
+    }
+  }
+
+  return { ok: false, status: lastStatus, error: lastError };
 }
 
 const EDGE_VOICE_MAP: Record<string, string> = {
@@ -3307,26 +3432,15 @@ const EDGE_VOICE_MAP: Record<string, string> = {
   "bilingual-female": "en-US-JennyNeural"
 };
 
-const BAILIAN_VOICE_IDS = new Set(["Cherry", "Serena", "Ethan", "Chelsie", "Jasper"]);
-const EDGE_TO_BAILIAN: Record<string, string> = {
-  "magnetic-male": "Ethan",
-  "warm-female": "Serena",
-  "tech-anchor": "Chelsie",
-  "documentary-male": "Ethan",
-  "mystery-noir": "Ethan",
-  "vibrant-creator": "Cherry",
-  "bilingual-en": "Cherry",
-  "bilingual-female": "Serena"
-};
-
-function resolveBailianVoice(character?: string, fallback?: string): string {
-  const selected = String(character || "").trim();
-  if (BAILIAN_VOICE_IDS.has(selected)) return selected;
-  if (EDGE_TO_BAILIAN[selected]) return EDGE_TO_BAILIAN[selected];
-  const fromSettings = String(fallback || "").trim();
-  if (BAILIAN_VOICE_IDS.has(fromSettings)) return fromSettings;
-  if (fromSettings && !EDGE_VOICE_MAP[fromSettings]) return fromSettings;
-  return "Cherry";
+function resolveBailianVoice(character?: string, fallback?: string, model?: string): string {
+  return resolveTtsVoiceId(character || fallback, {
+    enabled: true,
+    provider: "bailian",
+    endpoint: "",
+    apiKey: "x",
+    model: model || "qwen-audio-3.0-tts-flash",
+    voice: fallback || ""
+  });
 }
 
 type EdgeWordMark = { text: string; start: number; end: number };
@@ -3391,7 +3505,9 @@ function synthesizeEdgeTts(
         wordBoundaryEnabled: true,
         sentenceBoundaryEnabled: true
       });
-      const { audioStream, metadataStream } = tts.toStream(text, {
+      const { audioStream, metadataStream } = tts.toStream(
+        text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+        {
         rate: rateStr,
         pitch: character === "mystery-noir" ? "-5Hz" : "+0Hz"
       });
@@ -3453,13 +3569,15 @@ async function synthesizeNarrationAudio(opts: {
   const rate = typeof opts.rate === "number" ? opts.rate : 1.0;
 
   if (isUsableBailianTts(opts.ttsApi)) {
-    const voice = resolveBailianVoice(character, opts.ttsApi.voice);
+    const model = String(opts.ttsApi.model || "qwen-audio-3.0-tts-flash");
+    const voice = resolveBailianVoice(character, opts.ttsApi.voice, model);
     const result = await callBailianTts({
       endpoint: String(opts.ttsApi.endpoint),
       apiKey: String(opts.ttsApi.apiKey),
-      model: String(opts.ttsApi.model || "qwen3-tts-flash"),
+      model,
       voice,
-      text
+      text,
+      rate
     });
     if (result.ok && result.audioUrl) {
       return {
@@ -3516,7 +3634,8 @@ app.post("/api/audio/tts", async (req, res) => {
       voice: result.voice,
       format: result.format,
       character,
-      provider: result.provider
+      provider: result.provider,
+      words: Array.isArray(result.words) ? result.words : []
     });
   } catch (err: any) {
     console.error("TTS endpoint error:", err);
@@ -3567,6 +3686,14 @@ app.post("/api/audio/store", (req, res) => {
   return res.json({ audioUrl });
 });
 
+app.post("/api/image-store", (req, res) => {
+  const imageUrl = materializeClientImageUrl(String(req.body?.imageUrl || ""));
+  if (!imageUrl) {
+    return res.status(400).json({ error: "没有可保存的图片" });
+  }
+  return res.json({ imageUrl });
+});
+
 app.post("/api/audio/tts-utterances", async (req, res) => {
   try {
     const { character = "magnetic-male", rate = 1.0, ttsApi, clips } = req.body || {};
@@ -3581,23 +3708,35 @@ app.post("/api/audio/tts-utterances", async (req, res) => {
       return res.status(400).json({ error: "没有可合成的旁白文案" });
     }
 
-    const segments: { text: string; audioUrl: string; words: EdgeWordMark[] }[] = [];
-    for (const text of fromClips) {
-      const result = await synthesizeNarrationAudio({
-        text,
-        character,
-        rate,
-        ttsApi
-      });
-      if (result.ok !== true) {
-        return res.status(result.status && result.status >= 400 ? result.status : 500).json({
-          error: result.error || `旁白句合成失败：${text.slice(0, 18)}`
+    const segments: { text: string; audioUrl: string; words: EdgeWordMark[] }[] = new Array(fromClips.length);
+    const concurrency = isUsableBailianTts(ttsApi) ? bailianTtsConcurrency(ttsApi) : 2;
+    let cursor = 0;
+    let firstError: { error: string; status?: number } | null = null;
+    const worker = async () => {
+      while (cursor < fromClips.length && !firstError) {
+        const index = cursor++;
+        const text = fromClips[index];
+        const result = await synthesizeNarrationAudio({
+          text,
+          character,
+          rate,
+          ttsApi
         });
+        if (result.ok !== true) {
+          firstError = { error: result.error || `旁白句合成失败：${text.slice(0, 18)}`, status: result.status };
+          return;
+        }
+        segments[index] = {
+          text,
+          audioUrl: materializeClientAudioUrl(result.audioUrl),
+          words: Array.isArray(result.words) ? result.words : []
+        };
       }
-      segments.push({
-        text,
-        audioUrl: materializeClientAudioUrl(result.audioUrl),
-        words: Array.isArray(result.words) ? result.words : []
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, fromClips.length) }, () => worker()));
+    if (firstError) {
+      return res.status(firstError.status && firstError.status >= 400 ? firstError.status : 500).json({
+        error: firstError.error
       });
     }
 
@@ -3616,7 +3755,13 @@ app.post("/api/audio/tts-utterances", async (req, res) => {
 // 6.1 Test Custom TTS provider (Bailian Qwen-TTS)
 app.post("/api/audio/tts/test", async (req, res) => {
   const startTime = Date.now();
-  const { endpoint, apiKey, model = "qwen3-tts-flash", voice = "Cherry" } = req.body || {};
+  const { endpoint, apiKey, model = "qwen-audio-3.0-tts-flash", voice } = req.body || {};
+  const resolvedModel = String(model || "qwen-audio-3.0-tts-flash");
+  const resolvedVoice = resolveBailianVoice(
+    String(voice || ""),
+    undefined,
+    resolvedModel
+  );
 
   if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
     return res.status(400).json({ ok: false, error: "请输入 API Key" });
@@ -3626,8 +3771,8 @@ app.post("/api/audio/tts/test", async (req, res) => {
     const result = await callBailianTts({
       endpoint: String(endpoint || ""),
       apiKey: String(apiKey),
-      model: String(model || "qwen3-tts-flash"),
-      voice: String(voice || "Cherry"),
+      model: resolvedModel,
+      voice: resolvedVoice,
       text: "这是阿里云百炼语音合成的测试音色，正在为你实时试听。"
     });
     const latencyMs = Date.now() - startTime;
@@ -3636,8 +3781,8 @@ app.post("/api/audio/tts/test", async (req, res) => {
       return res.json({
         ok: true,
         latencyMs,
-        model: String(model || "qwen3-tts-flash"),
-        voice: String(voice || "Cherry"),
+        model: resolvedModel,
+        voice: resolvedVoice,
         audioUrl: result.audioUrl
       });
     }
@@ -3653,6 +3798,607 @@ app.post("/api/audio/tts/test", async (req, res) => {
       latencyMs: Date.now() - startTime,
       error: err?.message || "百炼 TTS 测试请求失败"
     });
+  }
+});
+
+function countVoiceDesignChars(text: string): number {
+  let n = 0;
+  for (const ch of String(text || "")) {
+    n += /[\u4e00-\u9fff]/.test(ch) ? 2 : 1;
+  }
+  return n;
+}
+
+function sanitizeVoicePrefix(raw: string): string {
+  const ascii = String(raw || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 10);
+  if (ascii.length >= 3) return ascii.toLowerCase();
+  return `v${Date.now().toString(36).replace(/[^a-z0-9]/gi, "").slice(-8)}`.slice(0, 10);
+}
+
+function normalizeEnrollmentStatus(raw?: string | null): "deploying" | "ok" | "undeployed" {
+  const value = String(raw || "").trim().toUpperCase();
+  if (value === "OK") return "ok";
+  if (value === "UNDEPLOYED") return "undeployed";
+  return "deploying";
+}
+
+function isVoiceDesignTargetModel(model: string): boolean {
+  return isQwenAudioPlusModel(model) || isQwenAudioFlashModel(model);
+}
+
+async function callBailianVoiceEnrollment(opts: {
+  endpoint?: string;
+  apiKey: string;
+  input: Record<string, unknown>;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; status?: number; data?: any; error?: string }> {
+  const apiKey = sanitizeBearerKey(opts.apiKey);
+  const endpoint = resolveBailianVoiceDesignEndpoint(opts.endpoint);
+  const timeoutMs = opts.timeoutMs || 120000;
+  const maxAttempts = 4;
+  let lastError = "声音设计请求失败";
+  let lastStatus: number | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json"
+        },
+        body: JSON.stringify({
+          model: "voice-enrollment",
+          input: opts.input
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      const rawText = await response.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
+      }
+      const errorText = String(data?.message || data?.code || rawText.slice(0, 400) || `HTTP ${response.status}`);
+      const rateLimited =
+        response.status === 429 ||
+        /rate limit exceeded|throttl|too many requests|request rate increased/i.test(errorText);
+      if (rateLimited && attempt < maxAttempts) {
+        const waitMs = 800 * 2 ** (attempt - 1) + Math.floor(Math.random() * 400);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+      if (!response.ok) {
+        lastStatus = response.status;
+        lastError = errorText;
+        return { ok: false, status: response.status, data, error: errorText };
+      }
+      return { ok: true, status: response.status, data };
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      lastError = err?.name === "AbortError" ? "请求超时" : err?.message || "网络异常";
+      lastStatus = undefined;
+      if (attempt < maxAttempts && err?.name !== "AbortError") {
+        await new Promise((resolve) => setTimeout(resolve, 800 * 2 ** (attempt - 1)));
+        continue;
+      }
+      return { ok: false, status: lastStatus, error: lastError };
+    }
+  }
+  return { ok: false, status: lastStatus, error: lastError };
+}
+
+app.post("/api/audio/voice-design/create", async (req, res) => {
+  const { endpoint, apiKey, model, voicePrompt, previewText, prefix, language } = req.body || {};
+  const resolvedModel = String(model || "").trim();
+  const prompt = String(voicePrompt || "").trim();
+  const preview = String(previewText || "").trim();
+
+  if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+    return res.status(400).json({ ok: false, error: "请输入 API Key" });
+  }
+  if (!isVoiceDesignTargetModel(resolvedModel)) {
+    return res.status(400).json({ ok: false, error: "声音设计只支持 qwen-audio-3.0-tts-plus 或 qwen-audio-3.0-tts-flash" });
+  }
+  if (!prompt) {
+    return res.status(400).json({ ok: false, error: "请填写声音描述" });
+  }
+  if (countVoiceDesignChars(prompt) > 500) {
+    return res.status(400).json({ ok: false, error: "声音描述超长（最多约 500 字符，汉字按 2 个计）" });
+  }
+  if (preview.length < 15) {
+    return res.status(400).json({ ok: false, error: "预览文案至少 15 个字" });
+  }
+  if (preview.length > 200) {
+    return res.status(400).json({ ok: false, error: "预览文案最多 200 个字" });
+  }
+
+  const lang = language === "en" ? "en" : language === "zh" ? "zh" : /[\u4e00-\u9fa5]/.test(preview) ? "zh" : "en";
+
+  try {
+    const created = await callBailianVoiceEnrollment({
+      endpoint: String(endpoint || ""),
+      apiKey: String(apiKey),
+      input: {
+        action: "create_voice",
+        target_model: resolvedModel,
+        voice_prompt: prompt,
+        preview_text: preview,
+        prefix: sanitizeVoicePrefix(String(prefix || "voice")),
+        language_hints: [lang]
+      },
+      timeoutMs: 120000
+    });
+
+    if (!created.ok) {
+      return res.status(created.status && created.status >= 400 ? created.status : 400).json({
+        ok: false,
+        error: created.error || "创建音色失败"
+      });
+    }
+
+    const output = created.data?.output || {};
+    const voiceId = String(output.voice_id || output.voice || "").trim();
+    if (!voiceId) {
+      return res.status(400).json({ ok: false, error: "百炼未返回 voice_id" });
+    }
+
+    const previewData = output.preview_audio?.data;
+    let previewAudioUrl = "";
+    if (typeof previewData === "string" && previewData.length > 80) {
+      const format = String(output.preview_audio?.response_format || "wav").toLowerCase();
+      const ext = format.includes("mp3") ? "mp3" : format.includes("pcm") ? "wav" : "wav";
+      previewAudioUrl = materializeClientAudioUrl(`data:audio/${ext === "mp3" ? "mpeg" : "wav"};base64,${previewData}`);
+      if (previewAudioUrl.startsWith("data:")) {
+        const filename = `voice-preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        try {
+          fs.writeFileSync(path.join(generatedDir, filename), Buffer.from(previewData, "base64"));
+          previewAudioUrl = `/generated/${filename}`;
+        } catch {
+          // keep data URI as last resort
+        }
+      }
+    }
+
+    let status = normalizeEnrollmentStatus(output.status);
+    const queried = await callBailianVoiceEnrollment({
+      endpoint: String(endpoint || ""),
+      apiKey: String(apiKey),
+      input: { action: "query_voice", voice_id: voiceId },
+      timeoutMs: 30000
+    });
+    if (queried.ok) {
+      status = normalizeEnrollmentStatus(queried.data?.output?.status);
+    }
+
+    return res.json({
+      ok: true,
+      voiceId,
+      targetModel: String(output.target_model || resolvedModel),
+      status,
+      previewAudioUrl,
+      language: lang
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || "声音设计请求失败" });
+  }
+});
+
+app.post("/api/audio/voice-design/query", async (req, res) => {
+  const { endpoint, apiKey, voiceId } = req.body || {};
+  if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+    return res.status(400).json({ ok: false, error: "请输入 API Key" });
+  }
+  const id = String(voiceId || "").trim();
+  if (!id) {
+    return res.status(400).json({ ok: false, error: "缺少 voice_id" });
+  }
+
+  try {
+    const queried = await callBailianVoiceEnrollment({
+      endpoint: String(endpoint || ""),
+      apiKey: String(apiKey),
+      input: { action: "query_voice", voice_id: id },
+      timeoutMs: 30000
+    });
+    if (!queried.ok) {
+      return res.status(queried.status && queried.status >= 400 ? queried.status : 400).json({
+        ok: false,
+        error: queried.error || "查询音色失败"
+      });
+    }
+    const output = queried.data?.output || {};
+    return res.json({
+      ok: true,
+      voiceId: String(output.voice_id || id),
+      targetModel: String(output.target_model || ""),
+      status: normalizeEnrollmentStatus(output.status),
+      prompt: String(output.voice_prompt || ""),
+      previewText: String(output.preview_text || "")
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || "查询音色失败" });
+  }
+});
+
+function readProjectFile(filePath: string): { project: any; savedAt: number; bytes: number } | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const project = JSON.parse(raw);
+    if (!project || typeof project !== "object") return null;
+    const stat = fs.statSync(filePath);
+    return { project, savedAt: stat.mtimeMs, bytes: stat.size };
+  } catch (err: any) {
+    console.warn("[Project Store] Failed to read", path.basename(filePath), err?.message);
+    return null;
+  }
+}
+
+function writeProjectFile(filePath: string, project: any) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(project));
+  try {
+    fs.copyFileSync(tmp, filePath);
+    fs.unlinkSync(tmp);
+  } catch {
+    fs.writeFileSync(filePath, JSON.stringify(project));
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+  }
+}
+
+function sanitizeProjectId(id: unknown): string | null {
+  const value = String(id || "").trim();
+  if (!value || value.includes("..") || value.includes("/") || value.includes("\\")) return null;
+  if (!/^[A-Za-z0-9._-]{1,80}$/.test(value)) return null;
+  return value;
+}
+
+function projectJsonPath(id: string): string {
+  return path.join(projectsDir, id, "project.json");
+}
+
+function coverFromProject(project: any): string | undefined {
+  const clip = Array.isArray(project?.clips) ? project.clips.find((item: any) => item?.imageUrl) : null;
+  return clip?.imageUrl ? String(clip.imageUrl) : undefined;
+}
+
+function summarizeProject(project: any, savedAt: number) {
+  const clips = Array.isArray(project?.clips) ? project.clips : [];
+  return {
+    id: String(project.id || ""),
+    title: String(project.title || "未命名工程"),
+    topic: String(project.topic || ""),
+    createdAt: Number(project.createdAt) || savedAt,
+    updatedAt: Number(project.updatedAt) || savedAt,
+    savedAt,
+    clipCount: clips.length,
+    duration: clips.reduce((sum: number, clip: any) => sum + (Number(clip?.duration) || 0), 0),
+    aspectRatio: String(project.settings?.aspectRatio || "16:9"),
+    coverUrl: coverFromProject(project),
+    saveRevision: Number(project.saveRevision) || 0
+  };
+}
+
+function readPointer(): string | null {
+  try {
+    if (!fs.existsSync(currentPointerFile)) return null;
+    const raw = JSON.parse(fs.readFileSync(currentPointerFile, "utf8"));
+    return sanitizeProjectId(raw?.id);
+  } catch {
+    return null;
+  }
+}
+
+function writePointer(id: string) {
+  writeProjectFile(currentPointerFile, { id, updatedAt: Date.now() });
+}
+
+function isSampleProjectId(id?: string): boolean {
+  return id === "project-universe" || id === "project-ai-future";
+}
+
+function projectHasGeneratedAssets(project: any): boolean {
+  return (Array.isArray(project?.clips) ? project.clips : []).some((clip: any) =>
+    String(clip?.imageUrl || "").includes("/generated/")
+    || String(clip?.voiceAudioUrl || "").includes("/generated/")
+  );
+}
+
+function stripProjectSecrets(project: any) {
+  if (!project || typeof project !== "object") return project;
+  const settings = project.settings && typeof project.settings === "object" ? { ...project.settings } : {};
+  delete settings.customImageApi;
+  delete settings.customLlmApi;
+  delete settings.customTtsApi;
+  delete settings.customVideoApi;
+  delete settings.customStyleVisionApi;
+  return { ...project, settings };
+}
+
+function writeLibraryProject(project: any) {
+  const id = sanitizeProjectId(project?.id);
+  if (!id) throw new Error("工程 id 无效");
+  const next = stripProjectSecrets({ ...project, id });
+  writeProjectFile(projectJsonPath(id), next);
+  writePointer(id);
+  return readProjectFile(projectJsonPath(id));
+}
+
+function migrateLegacyCurrentProject() {
+  try {
+    const existing = fs.existsSync(projectsDir)
+      ? fs.readdirSync(projectsDir).filter((name) => fs.existsSync(projectJsonPath(name)))
+      : [];
+    if (existing.length > 0) return;
+    const legacy = readProjectFile(currentProjectFile);
+    if (!legacy?.project || !Array.isArray(legacy.project.clips)) return;
+    let id = sanitizeProjectId(legacy.project.id);
+    if (!id || isSampleProjectId(id)) {
+      if (!projectHasGeneratedAssets(legacy.project) && isSampleProjectId(String(legacy.project.id || ""))) return;
+      id = `project-migrated-${Date.now()}`;
+      legacy.project.id = id;
+    }
+    writeLibraryProject(legacy.project);
+    console.log(`[Project Store] Migrated session project to library ${id}`);
+  } catch (err: any) {
+    console.warn("[Project Store] Legacy migrate failed:", err?.message);
+  }
+}
+
+function stashCurrentProject(): boolean {
+  const pointer = readPointer();
+  const library = pointer ? readProjectFile(projectJsonPath(pointer)) : null;
+  const current = library || readProjectFile(currentProjectFile);
+  if (!current) return false;
+  writeProjectFile(previousProjectFile, current.project);
+  return true;
+}
+
+function readCurrentProject() {
+  migrateLegacyCurrentProject();
+  const session = readProjectFile(currentProjectFile);
+  if (session) return session;
+  const pointer = readPointer();
+  if (pointer) {
+    const stored = readProjectFile(projectJsonPath(pointer));
+    if (stored) return stored;
+  }
+  return null;
+}
+
+app.get("/api/project/current", (_req, res) => {
+  const stored = readCurrentProject();
+  if (!stored) {
+    return res.status(404).json({ error: "还没有磁盘工程" });
+  }
+  return res.json(stored);
+});
+
+app.put("/api/project/current", (req, res) => {
+  const project = req.body?.project && typeof req.body.project === "object"
+    ? req.body.project
+    : req.body;
+  const intoLibrary = req.body?.library !== false;
+  if (!project || typeof project !== "object" || !Array.isArray(project.clips)) {
+    return res.status(400).json({ error: "工程格式无效" });
+  }
+  try {
+    const existing = readCurrentProject();
+    if (existing?.project?.id && project.id && existing.project.id !== project.id) {
+      stashCurrentProject();
+    }
+    writeProjectFile(currentProjectFile, stripProjectSecrets(project));
+    let librarySaved = false;
+    const id = sanitizeProjectId(project.id);
+    if (intoLibrary && id && !isSampleProjectId(id)) {
+      const storedLibrary = writeLibraryProject(project);
+      librarySaved = Boolean(storedLibrary);
+    }
+    const stored = readProjectFile(currentProjectFile);
+    return res.json({
+      ok: true,
+      savedAt: stored?.savedAt || Date.now(),
+      bytes: stored?.bytes || 0,
+      saveRevision: Number(project.saveRevision) || 0,
+      currentId: readPointer(),
+      library: librarySaved
+    });
+  } catch (err: any) {
+    console.warn("[Project Store] Failed to write current project:", err?.message);
+    return res.status(500).json({ error: err?.message || "工程未能写入磁盘" });
+  }
+});
+
+app.get("/api/project/previous", (_req, res) => {
+  const stored = readProjectFile(previousProjectFile);
+  if (!stored) {
+    return res.status(404).json({ error: "没有上一份备份" });
+  }
+  return res.json({
+    savedAt: stored.savedAt,
+    bytes: stored.bytes,
+    project: stored.project
+  });
+});
+
+app.post("/api/project/stash", (_req, res) => {
+  try {
+    const ok = stashCurrentProject();
+    return res.json({ ok, savedAt: ok ? Date.now() : null });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "备份失败" });
+  }
+});
+
+app.get("/api/projects", (_req, res) => {
+  try {
+    migrateLegacyCurrentProject();
+    if (!fs.existsSync(projectsDir)) {
+      return res.json({ items: [], currentId: readPointer() });
+    }
+    const items: ReturnType<typeof summarizeProject>[] = [];
+    for (const name of fs.readdirSync(projectsDir)) {
+      const id = sanitizeProjectId(name);
+      if (!id) continue;
+      const stored = readProjectFile(projectJsonPath(id));
+      if (!stored) continue;
+      items.push(summarizeProject({ ...stored.project, id: stored.project.id || id }, stored.savedAt));
+    }
+    items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return res.json({ items, currentId: readPointer() });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "无法列出工程库" });
+  }
+});
+
+app.get("/api/projects/:id", (req, res) => {
+  const id = sanitizeProjectId(req.params.id);
+  if (!id) return res.status(400).json({ error: "工程 id 无效" });
+  const stored = readProjectFile(projectJsonPath(id));
+  if (!stored) return res.status(404).json({ error: "工程不存在" });
+  return res.json({
+    project: stored.project,
+    savedAt: stored.savedAt,
+    bytes: stored.bytes,
+    summary: summarizeProject(stored.project, stored.savedAt)
+  });
+});
+
+app.post("/api/projects", (req, res) => {
+  const incoming = req.body?.project && typeof req.body.project === "object" ? req.body.project : req.body;
+  if (!incoming || typeof incoming !== "object" || !Array.isArray(incoming.clips)) {
+    return res.status(400).json({ error: "工程格式无效" });
+  }
+  try {
+    const now = Date.now();
+    const requestedId = sanitizeProjectId(incoming.id);
+    const id = requestedId && !isSampleProjectId(requestedId) ? requestedId : `project-${now}`;
+    const project = {
+      ...incoming,
+      id,
+      createdAt: Number(incoming.createdAt) || now,
+      updatedAt: now,
+      saveRevision: Number(incoming.saveRevision) || 1
+    };
+    const stored = writeLibraryProject(project);
+    return res.json({
+      ok: true,
+      project: stored?.project || project,
+      savedAt: stored?.savedAt || now,
+      summary: summarizeProject(stored?.project || project, stored?.savedAt || now)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "无法创建工程" });
+  }
+});
+
+app.post("/api/projects/:id/duplicate", (req, res) => {
+  const id = sanitizeProjectId(req.params.id);
+  if (!id) return res.status(400).json({ error: "工程 id 无效" });
+  const stored = readProjectFile(projectJsonPath(id));
+  if (!stored) return res.status(404).json({ error: "工程不存在" });
+  try {
+    const now = Date.now();
+    const titleHint = String(req.body?.title || "").trim();
+    const project = {
+      ...stored.project,
+      id: `project-${now}`,
+      title: titleHint || `${stored.project.title || "未命名工程"} (副本)`,
+      createdAt: now,
+      updatedAt: now,
+      saveRevision: 1
+    };
+    const copied = writeLibraryProject(project);
+    return res.json({
+      ok: true,
+      project: copied?.project || project,
+      savedAt: copied?.savedAt || now,
+      summary: summarizeProject(copied?.project || project, copied?.savedAt || now)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "另存失败" });
+  }
+});
+
+app.delete("/api/projects/:id", (req, res) => {
+  const id = sanitizeProjectId(req.params.id);
+  if (!id) return res.status(400).json({ error: "工程 id 无效" });
+  const root = path.resolve(projectsDir);
+  const folder = path.resolve(root, id);
+  if (folder === root || !folder.startsWith(root + path.sep)) {
+    return res.status(400).json({ error: "工程路径无效" });
+  }
+  try {
+    if (fs.existsSync(folder)) fs.rmSync(folder, { recursive: true, force: true });
+    if (readPointer() === id) {
+      try { fs.unlinkSync(currentPointerFile); } catch { /* ignore */ }
+    }
+    return res.json({ ok: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "删除失败" });
+  }
+});
+
+app.get("/api/assets/generated", (req, res) => {
+  const kind = String(req.query.kind || "image");
+  try {
+    if (!fs.existsSync(generatedDir)) {
+      return res.json({ items: [], total: 0, dir: "public/generated" });
+    }
+    const names = fs.readdirSync(generatedDir);
+    const items: Array<{
+      name: string;
+      url: string;
+      bytes: number;
+      mtime: number;
+      kind: string;
+    }> = [];
+    for (const name of names) {
+      const ext = path.extname(name).toLowerCase();
+      const isImage = [".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext);
+      const isAudio = [".wav", ".mp3", ".ogg", ".m4a"].includes(ext);
+      if (kind === "image" && !isImage) continue;
+      if (kind === "audio" && !isAudio) continue;
+      if (kind !== "all" && kind !== "image" && kind !== "audio") continue;
+      if (kind === "all" && !isImage && !isAudio) continue;
+      const full = path.join(generatedDir, name);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(full);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      const assetKind = name.startsWith("char-ref-")
+        ? "char-ref"
+        : name.startsWith("narration-")
+          ? "narration"
+          : isAudio
+            ? "audio"
+            : "image";
+      items.push({
+        name,
+        url: `/generated/${name}`,
+        bytes: stat.size,
+        mtime: stat.mtimeMs,
+        kind: assetKind
+      });
+    }
+    items.sort((a, b) => b.mtime - a.mtime);
+    return res.json({
+      items: items.slice(0, 300),
+      total: items.length,
+      dir: "public/generated"
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "无法列出生成文件" });
   }
 });
 

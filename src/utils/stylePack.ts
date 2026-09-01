@@ -9,7 +9,7 @@ import {
   VisualContinuity,
   VisualStyle
 } from '../types';
-import { applyBibleToChineseIntent, applyBibleToEnglishPrompt } from './visualBible';
+import { applyBibleToChineseIntent, stripBiblePrefix } from './visualBible';
 
 export const DEFAULT_STYLE_VISION_API: CustomStyleVisionApiConfig = {
   enabled: false,
@@ -567,27 +567,11 @@ export function localRewriteClipPrompt(
   pack: StylePack,
   visualBible?: VisualBible | null
 ): { visualPrompt: string; chineseVisualPrompt: string } {
-  const scene = stripStyleRenders(
-    clip.chineseVisualPrompt || clip.narration || clip.visualPrompt || pack.label
-  );
-  const withBible = applyBibleToChineseIntent(scene, visualBible, clip);
-  if (usesStyleDna(pack)) {
-    const mods = new Set(activeTransferModules(pack));
-    const chinese = mods.has('world')
-      ? `${pack.world.era}。${pack.world.wardrobe}。${withBible}`.replace(/。+/g, '。')
-      : withBible;
-    return {
-      chineseVisualPrompt: chinese,
-      visualPrompt: applyBibleToEnglishPrompt(buildVisualPrompt(scene, pack), visualBible, clip.characterIds)
-    };
-  }
-  const chinese = `${pack.world.era}。${pack.world.wardrobe}。${withBible}`.replace(/。+/g, '。');
+  const raw = clip.chineseVisualPrompt || clip.narration || pack.label;
+  const scene = stripBiblePrefix(stripStyleRenders(raw));
+  const chinese = applyBibleToChineseIntent(scene, visualBible, clip);
   return {
     chineseVisualPrompt: chinese,
-    visualPrompt: applyBibleToEnglishPrompt(
-      buildVisualPrompt(`${pack.world.era}, ${pack.world.wardrobe}, ${scene}`, pack),
-      visualBible,
-      clip.characterIds
-    )
+    visualPrompt: clip.visualPrompt || ''
   };
 }

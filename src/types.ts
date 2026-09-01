@@ -20,6 +20,13 @@ export type CameraMotion =
   | 'static' 
   | 'cinematic-orbit';
 
+export type ShotSize = 'ecu' | 'cu' | 'ms' | 'ws' | 'insert';
+export type CameraAngle = 'eye' | 'low' | 'high';
+export type ShotComposition = 'center' | 'thirds' | 'silhouette' | 'negative-left' | 'negative-right';
+export type CoverageJob = 'hook' | 'establish' | 'evidence' | 'insert' | 'contrast' | 'callback';
+export type CoverageLink = 'advance' | 'contrast-cut' | 'callback' | 'same-axis';
+export type CoverageSource = 'rule' | 'llm' | 'pinned';
+
 export type TransitionType = 'crossfade' | 'fade-black' | 'slide-left' | 'zoom-in' | 'none';
 
 export type SubtitlePreset = 
@@ -73,6 +80,12 @@ export interface NarrationTrack {
   alignment?: NarrationAlignment;
 }
 
+export interface VisualBeat {
+  setting?: string;
+  subject?: string;
+  action?: string;
+}
+
 export interface StoryboardClip {
   id: string;
   order: number;
@@ -81,8 +94,16 @@ export interface StoryboardClip {
   holdDuration?: number; // extra picture hold after speech ends
   narration: string; // The spoken text / voiceover
   secondaryText?: string; // Optional English/sub text
-  visualPrompt: string; // The AI image prompt
+  visualPrompt: string; // Compiled image prompt last sent (or user-pinned)
   chineseVisualPrompt?: string;
+  visualBeat?: VisualBeat;
+  promptPinned?: boolean;
+  shotSize?: ShotSize;
+  cameraAngle?: CameraAngle;
+  shotComposition?: ShotComposition;
+  coverageJob?: CoverageJob;
+  coverageLink?: CoverageLink;
+  coverageSource?: CoverageSource;
   imageUrl?: string; // Generated image or template image
   isGeneratingImage?: boolean;
   imageStatus?: ClipImageStatus;
@@ -130,6 +151,8 @@ export interface AudioConfig {
   voiceCharacter: string;
   speechRate: number; // 0.8 - 1.5
   audioDucking: boolean; // lowers BGM when voice is active
+  /** Inter-sentence breath in seconds. Applied as unpinned hold on utterance tails. */
+  sentenceGap?: number;
   customBgmUrl?: string;
   narrationTrack?: NarrationTrack;
 }
@@ -144,6 +167,7 @@ export interface CustomImageApiConfig {
   protocol?: 'auto' | 'images' | 'chat-completions';
   quality?: 'standard' | 'hd';
   concurrency?: number; // 1 to 6 (default: 3)
+  promptProfile?: 'auto' | 'gpt-image' | 'flux';
 }
 
 export interface CustomLlmApiConfig {
@@ -165,6 +189,23 @@ export interface CustomTtsApiConfig {
   apiKey: string;
   model: string;
   voice: string;
+}
+
+export type DesignedVoiceStatus = 'deploying' | 'ok' | 'undeployed' | 'missing';
+
+export interface DesignedVoiceEntry {
+  id: string;
+  voiceId: string;
+  targetModel: string;
+  title: string;
+  prompt: string;
+  previewText: string;
+  language: 'zh' | 'en';
+  status: DesignedVoiceStatus;
+  previewAudioUrl?: string;
+  createdAt: number;
+  updatedAt: number;
+  source: 'designed';
 }
 
 export interface CustomVideoApiConfig {
@@ -460,6 +501,12 @@ export interface ForecastShot {
   characterIds?: string[];
   locationId?: string;
   continuity?: VisualContinuity;
+  shotSize?: ShotSize;
+  cameraAngle?: CameraAngle;
+  shotComposition?: ShotComposition;
+  coverageJob?: CoverageJob;
+  coverageLink?: CoverageLink;
+  coverageSource?: CoverageSource;
 }
 
 export interface DirectorNote {
@@ -509,11 +556,26 @@ export interface VideoProject {
   topic: string;
   createdAt: number;
   updatedAt: number;
+  saveRevision?: number;
   clips: StoryboardClip[];
   subtitles: SubtitleConfig;
   audio: AudioConfig;
   settings: ProjectSettings;
   scriptWorkspace?: ScriptWorkspace;
+}
+
+export interface ProjectLibraryItem {
+  id: string;
+  title: string;
+  topic: string;
+  createdAt: number;
+  updatedAt: number;
+  savedAt: number;
+  clipCount: number;
+  duration: number;
+  aspectRatio: string;
+  coverUrl?: string;
+  saveRevision?: number;
 }
 
 export type ActiveTab = 'script' | 'storyboard' | 'style' | 'subtitles' | 'audio' | 'projects' | 'settings';

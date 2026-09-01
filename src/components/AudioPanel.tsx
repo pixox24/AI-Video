@@ -1,13 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio } from 'lucide-react';
-import { AudioConfig, CustomTtsApiConfig, ScriptGenre } from '../types';
+import { AudioConfig, CustomTtsApiConfig, DesignedVoiceEntry, ScriptGenre, StoryboardClip } from '../types';
 import { BGM_GENRE_ORDER, BGM_TRACKS, DEFAULT_BGM_TRACK_ID, bgmTracksForGenre } from '../utils/presets';
 import { audioEngine } from '../utils/audioEngine';
 import { GENRE_PACKS } from '../utils/scriptBudget';
-import { ttsEngineLabel, ttsSourceKey, ttsSupportsSpeechRate, ttsVoicesForApi } from '../utils/ttsCatalog';
+import {
+  designedVoiceMatchesModel,
+  isDesignedVoiceId,
+  ttsEngineLabel,
+  ttsSourceKey,
+  ttsSupportsSpeechRate,
+  ttsVoicesForApi
+} from '../utils/ttsCatalog';
 import { hideStatusToast, showStatusToast } from '../utils/statusToast';
 import { getTtsPreviewUrl, makeVoicePreviewKey, VOICE_PREVIEW_TEXT } from '../utils/ttsPreviewCache';
+import { loadVoiceLibrary, removeDesignedVoice } from '../utils/voiceLibrary';
 import { ToolRail } from './ToolRail';
+import { SentenceGapControl } from './SentenceGapControl';
+import { resolveSentenceGap } from '../utils/sentenceGap';
+import { VoiceDesignWorkshop } from './VoiceDesignWorkshop';
 
 interface AudioPanelProps {
   config: AudioConfig;
@@ -19,9 +30,12 @@ interface AudioPanelProps {
   onGenerateFullNarration?: () => void;
   recommendedGenre?: ScriptGenre | null;
   timelinePlaying?: boolean;
+  onPauseTimeline?: () => void;
   ttsApi?: CustomTtsApiConfig;
   onVoiceChange?: (voiceId: string) => void;
   onOpenSettings?: () => void;
+  onSentenceGapChange?: (seconds: number) => void;
+  clips?: StoryboardClip[];
 }
 
 export const AudioPanel: React.FC<AudioPanelProps> = ({
@@ -34,9 +48,12 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   onGenerateFullNarration,
   recommendedGenre = null,
   timelinePlaying = false,
+  onPauseTimeline,
   ttsApi,
   onVoiceChange,
-  onOpenSettings
+  onOpenSettings,
+  onSentenceGapChange,
+  clips = []
 }) => {
   const [isPlayingPreviewVoice, setIsPlayingPreviewVoice] = useState(false);
   const [previewingBgmId, setPreviewingBgmId] = useState<string | null>(null);
@@ -44,10 +61,14 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   const [customTrackSize, setCustomTrackSize] = useState<string | null>(null);
   const [customAudioUrl, setCustomAudioUrl] = useState<string | null>(null);
   const [genreFilter, setGenreFilter] = useState<ScriptGenre | 'all'>(recommendedGenre || 'all');
+  const [voiceLibrary, setVoiceLibrary] = useState<DesignedVoiceEntry[]>(() => loadVoiceLibrary());
 
   const voiceCharacters = ttsVoicesForApi(ttsApi);
   const supportsSpeechRate = ttsSupportsSpeechRate(ttsApi);
-  const customVoice = config.voiceCharacter && !voiceCharacters.some((item) => item.id === config.voiceCharacter)
+  const libraryIds = new Set(voiceLibrary.map((item) => item.voiceId));
+  const customVoice = config.voiceCharacter
+    && !voiceCharacters.some((item) => item.id === config.voiceCharacter)
+    && !libraryIds.has(config.voiceCharacter)
     ? {
         id: config.voiceCharacter,
         name: `自定义 · ${config.voiceCharacter}`,
@@ -56,6 +77,53 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       }
     : null;
   const visibleVoices = customVoice ? [...voiceCharacters, customVoice] : voiceCharacters;
+  const currentModel = (ttsApi?.model || '').trim();
+  const matchingDesigned = voiceLibrary.filter((item) => item.targetModel === currentModel);
+  const mismatchedDesigned = voiceLibrary.filter((item) => item.targetModel !== currentModel);
+  const selectedDesigned = voiceLibrary.find((item) => item.voiceId === config.voiceCharacter);
+  const designedBlocked = Boolean(
+    (selectedDesigned && (selectedDesigned.status !== 'ok' || selectedDesigned.targetModel !== currentModel))
+    || (isDesignedVoiceId(config.voiceCharacter) && !designedVoiceMatchesModel(config.voiceCharacter, currentModel))
+  );
+
+  const refreshVoiceLibrary = () => setVoiceLibrary(loadVoiceLibrary());
+
+  const selectVoice = (voiceId: string) => {
+    if (onVoiceChange) onVoiceChange(voiceId);
+    else onChange({ ...config, voiceCharacter: voiceId });
+  };
+
+  const handleSelectDesigned = (entry: DesignedVoiceEntry) => {
+    if (entry.targetModel !== currentModel) {
+      const needPlus = entry.targetModel.includes('plus');
+      showStatusToast(needPlus ? '换回 Audio 3.0 Plus 才能用这条设计音色' : '换回 Audio 3.0 Flash 才能用这条设计音色', {
+        tone: 'warn',
+        id: 'voice-design'
+      });
+      return;
+    }
+    if (entry.status === 'deploying') {
+      showStatusToast('这条音色还在审核，通过后再选用', { tone: 'warn', id: 'voice-design' });
+      return;
+    }
+    if (entry.status !== 'ok') {
+      showStatusToast('这条音色不可用', { tone: 'warn', id: 'voice-design' });
+      return;
+    }
+    selectVoice(entry.voiceId);
+  };
+
+  const playDesignedPreview = (entry: DesignedVoiceEntry, event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (!entry.previewAudioUrl) return;
+    onPauseTimeline?.();
+    audioEngine.stopPreviewBgm();
+    audioEngine.stopNarration();
+    const audio = new Audio(entry.previewAudioUrl);
+    void audio.play().catch(() => {
+      showStatusToast('预览没播出来，请再点一次', { tone: 'warn', id: 'voice-design' });
+    });
+  };
 
   const volumePresets = [
     { label: '静音 0%', value: 0.0 },
@@ -107,6 +175,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       audioEngine.stopPreviewBgm();
       setPreviewingBgmId(null);
     }
+    onPauseTimeline?.();
 
     if (isPlayingPreviewVoice) {
       audioEngine.stopNarration();
@@ -154,6 +223,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       audioEngine.stopNarration();
       setIsPlayingPreviewVoice(false);
     }
+    onPauseTimeline?.();
 
     if (previewingBgmId === trackId) {
       // Toggle off
@@ -335,7 +405,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
             <button
               type="button"
               onClick={() => onGenerateFullNarration?.()}
-              disabled={isGeneratingNarration || !onGenerateFullNarration}
+              disabled={isGeneratingNarration || !onGenerateFullNarration || designedBlocked}
               className="w-full py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-black font-semibold rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 text-xs"
             >
               <Sparkles className={`w-3.5 h-3.5 ${isGeneratingNarration ? 'animate-spin' : ''}`} />
@@ -346,11 +416,106 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                 时长 {config.narrationTrack.duration.toFixed(1)}s
               </div>
             )}
+            {designedBlocked && (
+              <div className="text-[11px] text-amber-200/90 leading-relaxed">
+                当前设计音色还不能成片：要等审核通过，且必须和设置里的 3.0 模型一致。
+              </div>
+            )}
             {narrationError && (
               <div className="text-[11px] text-rose-300 leading-relaxed">{narrationError}</div>
             )}
           </div>
 
+          <SentenceGapControl
+            variant="panel"
+            value={resolveSentenceGap(config)}
+            clips={clips}
+            onChange={(seconds) => {
+              if (onSentenceGapChange) onSentenceGapChange(seconds);
+              else onChange({ ...config, sentenceGap: seconds });
+            }}
+          />
+
+          <VoiceDesignWorkshop
+            ttsApi={ttsApi}
+            onLibraryChange={refreshVoiceLibrary}
+            onPushAndSelect={selectVoice}
+            onNeedSettings={onOpenSettings}
+          />
+
+          {(matchingDesigned.length > 0 || mismatchedDesigned.length > 0) && (
+            <div className="space-y-2">
+              <div className="text-[11px] text-zinc-400">我的音色</div>
+              <div className="grid grid-cols-1 gap-2">
+                {[...matchingDesigned, ...mismatchedDesigned].map((entry) => {
+                  const isSelected = config.voiceCharacter === entry.voiceId;
+                  const mismatch = entry.targetModel !== currentModel;
+                  const usable = !mismatch && entry.status === 'ok';
+                  return (
+                    <div
+                      key={entry.id}
+                      id={`voice-designed-${entry.id}`}
+                      onClick={() => handleSelectDesigned(entry)}
+                      className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#252530] border-amber-500 ring-1 ring-amber-500/40 text-zinc-100'
+                          : usable
+                            ? 'bg-[#1b1b22] border-[#292934] text-zinc-400 hover:border-[#3d3d4e] hover:bg-[#1f1f28]'
+                            : 'bg-[#16161c] border-[#292934] text-zinc-500 opacity-70'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-xs text-zinc-100">{entry.title}</span>
+                            <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-amber-400 rounded-full font-medium">
+                              {entry.targetModel.includes('plus') ? 'Plus' : 'Flash'}
+                            </span>
+                            {entry.status !== 'ok' && (
+                              <span className="text-[10px] text-amber-300">
+                                {entry.status === 'deploying' ? '审核中' : entry.status === 'undeployed' ? '未通过' : '已失效'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-zinc-400 line-clamp-2">{entry.prompt}</div>
+                        </div>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          {entry.previewAudioUrl && (
+                            <button
+                              type="button"
+                              onClick={(event) => playDesignedPreview(entry, event)}
+                              className="w-6 h-6 rounded-full border border-[#3a3a4a] text-zinc-300 hover:text-amber-300 flex items-center justify-center cursor-pointer"
+                            >
+                              <Play className="w-3 h-3 fill-current" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const next = removeDesignedVoice(entry.id);
+                              setVoiceLibrary(next);
+                              showStatusToast('已从货架移除', { tone: 'ok', id: 'voice-design' });
+                            }}
+                            className="w-6 h-6 rounded-full border border-[#3a3a4a] text-zinc-500 hover:text-rose-300 flex items-center justify-center cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                          {isSelected && (
+                            <div className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center text-black">
+                              <Check className="w-2.5 h-2.5 stroke-[3]" />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <div className="text-[11px] text-zinc-400">系统音色</div>
           <div className="grid grid-cols-1 gap-2">
             {visibleVoices.map((vc) => {
               const isSelected = config.voiceCharacter === vc.id;
@@ -358,10 +523,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                 <div
                   key={vc.id}
                   id={`voice-char-${vc.id}`}
-                  onClick={() => {
-                    if (onVoiceChange) onVoiceChange(vc.id);
-                    else onChange({ ...config, voiceCharacter: vc.id });
-                  }}
+                  onClick={() => selectVoice(vc.id)}
                   className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
                     isSelected
                       ? 'bg-[#252530] border-amber-500 ring-1 ring-amber-500/40 text-zinc-100'
@@ -407,7 +569,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                 }`}
               />
               {!supportsSpeechRate && (
-                <p className="text-[10px] text-zinc-500">当前百炼模型不会吃语速滑条，之后可换 Instruct 再开。</p>
+                <p className="text-[10px] text-zinc-500">当前模型不会吃语速滑条。换 Audio 3.0 后可在合成时调语速。</p>
               )}
             </div>
 

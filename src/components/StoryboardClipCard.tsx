@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { CameraMotion, StoryboardClip, TransitionType } from '../types';
 import { clipSharesUtterance, clipShotNarration } from '../utils/narrationTrack';
+import { SentenceGapControl } from './SentenceGapControl';
 
 const CAMERA_LABEL: Record<CameraMotion, string> = {
   'zoom-in': '拉近',
@@ -48,6 +49,10 @@ interface StoryboardClipCardProps {
   onPolish: (e: React.MouseEvent) => void;
   onMove: (direction: 'up' | 'down', e: React.MouseEvent) => void;
   onDelete: (e: React.MouseEvent) => void;
+  isUtteranceTail?: boolean;
+  sentenceGap?: number;
+  onUtteranceHoldChange?: (holdDuration: number, pinned: boolean) => void;
+  imagePromptPreview?: string;
 }
 
 export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
@@ -66,7 +71,11 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
   onUpload,
   onPolish,
   onMove,
-  onDelete
+  onDelete,
+  isUtteranceTail = false,
+  sentenceGap = 0.2,
+  onUtteranceHoldChange,
+  imagePromptPreview
 }) => {
   const voText = clipShotNarration(clip);
   const linkedShot = clipSharesUtterance(clip);
@@ -121,6 +130,9 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
             <div className="flex items-center gap-1.5">
               <span className="font-mono text-[11px] text-amber-400 font-semibold">{String(clip.order).padStart(2, '0')}</span>
               <span className="text-[10px] text-zinc-500">{(clip.duration || 0).toFixed(1)}s</span>
+              {clip.shotSize && (
+                <span className="text-[9px] text-zinc-500">{clip.shotSize === 'ecu' ? '大特写' : clip.shotSize === 'cu' ? '特写' : clip.shotSize === 'ms' ? '中景' : clip.shotSize === 'ws' ? '全景' : '插入'}</span>
+              )}
               <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDot}`} />
               {generating && <span className="text-[10px] text-amber-300">绘制中</span>}
               {failed && <span className="text-[10px] text-rose-300">失败</span>}
@@ -247,13 +259,52 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
                   {clip.voRole === 'continue' ? '同一句旁白的下一张图，不在这里切开念。' : '本镜只配这半句。整句口播和后图共用，不在这里切开念。'}
                 </p>
               )}
+              {isUtteranceTail && onUtteranceHoldChange && (
+                <SentenceGapControl
+                  variant="card"
+                  value={clip.holdDuration ?? sentenceGap}
+                  globalValue={sentenceGap}
+                  pinned={Boolean(clip.holdPinned)}
+                  onChange={(seconds) => onUtteranceHoldChange(seconds, true)}
+                  onFollowGlobal={() => onUtteranceHoldChange(sentenceGap, false)}
+                />
+              )}
               <textarea
-                value={clip.visualPrompt}
+                value={clip.chineseVisualPrompt || ''}
                 onClick={(e) => e.stopPropagation()}
-                onChange={(e) => onUpdate({ visualPrompt: e.target.value })}
-                placeholder="AI 画面提示词…"
-                className="prompt-resize custom-scrollbar w-full bg-[#16161c] border border-[#2b2b36] rounded-lg p-2 text-zinc-300 text-[11px] focus:outline-none focus:border-amber-500/50 font-mono leading-relaxed"
+                onChange={(e) => onUpdate({
+                  chineseVisualPrompt: e.target.value,
+                  visualBeat: undefined,
+                  promptPinned: false
+                })}
+                placeholder="这一镜看见什么（不要写口播原句）…"
+                className="prompt-resize custom-scrollbar w-full bg-[#16161c] border border-[#2b2b36] rounded-lg p-2 text-zinc-300 text-[11px] focus:outline-none focus:border-amber-500/50 leading-relaxed"
               />
+              {imagePromptPreview && (
+                <details
+                  className="rounded-lg border border-[#2b2b36] bg-[#14141a] px-2 py-1.5"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <summary className="text-[10px] text-zinc-500 cursor-pointer select-none">
+                    {clip.promptPinned ? '已钉住英文，按此发送' : '将发送给生图模型'}
+                  </summary>
+                  <textarea
+                    value={clip.promptPinned ? clip.visualPrompt : imagePromptPreview}
+                    onChange={(e) => onUpdate({ visualPrompt: e.target.value, promptPinned: true })}
+                    rows={6}
+                    className="mt-1.5 w-full bg-[#101014] border border-[#2b2b36] rounded-md p-2 text-[10px] text-zinc-400 font-mono leading-relaxed resize-y custom-scrollbar"
+                  />
+                  {clip.promptPinned && (
+                    <button
+                      type="button"
+                      className="mt-1 text-[10px] text-amber-300 cursor-pointer"
+                      onClick={() => onUpdate({ promptPinned: false })}
+                    >
+                      取消钉住，改回自动编译
+                    </button>
+                  )}
+                </details>
+              )}
               <div className="flex gap-2">
                 <select
                   value={clip.cameraMotion}

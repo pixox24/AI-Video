@@ -9,6 +9,12 @@ import {
   StoryboardClip
 } from '../types';
 import { ttsSourceKey } from './ttsCatalog';
+import {
+  effectiveHoldDuration,
+  isUtteranceTail,
+  narrationFileIncludesHolds,
+  resolveSentenceGap
+} from './sentenceGap';
 
 type SpeechClip = Pick<StoryboardClip, 'id' | 'narration' | 'voSlice' | 'voRole' | 'voSpanId' | 'speechDuration'>;
 
@@ -86,21 +92,19 @@ function uniqueSliceConcat(slices: string[]): string {
     const trimmed = slice.trim();
     if (!trimmed) continue;
     const core = stripSpeechPunct(trimmed);
-    if (core && joined.includes(core)) continue;
+    if (core && compactSpeech(joined).includes(compactSpeech(core))) continue;
+    if (joined && !/[。！？.!?…]$/.test(joined)) joined += '。';
     joined += trimmed;
   }
   return joined;
 }
 
+/** Spoken text for one start+continue group: start sentence plus any continue slice not already in it. */
 export function utteranceText(group: Pick<StoryboardClip, 'narration' | 'voSlice' | 'voRole'>[]): string {
   if (group.length === 0) return '';
   const start = group[0];
-  const fromNarration = withSentenceEnd((start.narration || '').trim());
-  const concat = uniqueSliceConcat(group.map((clip) => clip.voSlice || ''));
-  if (fromNarration && countNarrationChars(fromNarration) >= countNarrationChars(concat)) {
-    return fromNarration;
-  }
-  return withSentenceEnd(concat || fromNarration);
+  const parts = [(start.narration || '').trim(), ...group.map((clip) => (clip.voSlice || '').trim())];
+  return withSentenceEnd(uniqueSliceConcat(parts));
 }
 
 function equalCharRanges(length: number, count: number): { start: number; end: number }[] {
@@ -376,20 +380,40 @@ export function layoutUtteranceClips(input: {
   return { ranges: monotonicRanges(cuts, duration, n), source: 'char-fallback' };
 }
 
+function coverUtteranceRanges(
+  duration: number,
+  clipCount: number,
+  ranges: { start: number; end: number }[] | undefined
+): { start: number; end: number }[] {
+  const n = Math.max(1, clipCount);
+  const span = Math.max(0.05, duration);
+  const usable = (ranges || []).filter((range) => range.end > range.start + 0.001);
+  if (usable.length === n) {
+    const next = usable.map((range) => ({ ...range }));
+    next[0].start = 0;
+    next[n - 1].end = span;
+    return next;
+  }
+  return equalCharRanges(span, n);
+}
+
 export function timingsFromUtteranceLayouts(
   utterances: SpeechUtterance[],
-  layouts: { ranges: { start: number; end: number }[]; audioOffset: number }[]
+  layouts: { ranges: { start: number; end: number }[]; audioOffset: number; duration?: number }[]
 ): NarrationClipTiming[] {
   const timings: NarrationClipTiming[] = [];
   utterances.forEach((utterance, index) => {
     const layout = layouts[index];
     const offset = layout?.audioOffset ?? 0;
+    const duration = layout?.duration
+      ?? (layout?.ranges?.length ? layout.ranges[layout.ranges.length - 1].end : 0);
+    const ranges = coverUtteranceRanges(duration, utterance.clips.length, layout?.ranges);
     utterance.clips.forEach((clip, clipIndex) => {
-      const range = layout?.ranges[clipIndex] || { start: 0, end: 0 };
+      const range = ranges[clipIndex] || ranges[ranges.length - 1] || { start: 0, end: duration };
       timings.push({
         clipId: clip.id,
         audioStart: offset + range.start,
-        audioEnd: offset + range.end
+        audioEnd: offset + Math.max(range.start + 0.05, range.end)
       });
     });
   });
@@ -406,11 +430,15 @@ export function timingsFromAlignment(
   if (groups.length === 0) return null;
   const used = new Set<number>();
   const timings: NarrationClipTiming[] = [];
+  let unmatched = false;
   groups.forEach((group, index) => {
     let markIndex = alignment.utterances.findIndex((item, itemIndex) => item.text === group.text && !used.has(itemIndex));
     if (markIndex < 0) markIndex = !used.has(index) ? index : -1;
     const mark = markIndex >= 0 ? alignment.utterances[markIndex] : undefined;
-    if (!mark) return;
+    if (!mark) {
+      unmatched = true;
+      return;
+    }
     used.add(markIndex);
     const span = Math.max(0.05, mark.audioEnd - mark.audioStart);
     const layout = layoutUtteranceClips({
@@ -427,7 +455,7 @@ export function timingsFromAlignment(
       });
     });
   });
-  if (timings.length === 0) return null;
+  if (unmatched || timings.length === 0) return null;
   const seen = new Set(timings.map((item) => item.clipId));
   clips.forEach((clip) => {
     if (!seen.has(clip.id)) {
@@ -643,13 +671,14 @@ export function allocateSpeechTimings(
 
 export function applyNarrationTimingsToClips(
   clips: StoryboardClip[],
-  timings: NarrationClipTiming[]
+  timings: NarrationClipTiming[],
+  sentenceGap?: number
 ): StoryboardClip[] {
   const resolved = clipNarrationTimings(clips, timings);
   return clips.map((clip, index) => {
     const timing = resolved[index];
     const speechDuration = timing ? Math.max(0, timing.audioEnd - timing.audioStart) : 0;
-    const holdDuration = clip.holdPinned ? Math.max(0, clip.holdDuration || 0) : 0;
+    const holdDuration = effectiveHoldDuration(clip, index, clips, sentenceGap);
     return {
       ...clip,
       speechDuration,
@@ -662,7 +691,8 @@ export function applyNarrationTimingsToClips(
 /** Keep the same VO file, re-bind unique slice timings onto the current clips. */
 export function relinkNarrationTrack(
   track: NarrationTrack | undefined,
-  clips: StoryboardClip[]
+  clips: StoryboardClip[],
+  sentenceGap?: number
 ): { track: NarrationTrack; clips: StoryboardClip[] } | null {
   if (!track?.audioUrl || !Number.isFinite(track.duration) || track.duration <= 0 || clips.length === 0) {
     return null;
@@ -679,7 +709,7 @@ export function relinkNarrationTrack(
       clips: timings,
       alignment: rewriteAlignmentClipIds(repaired, track.alignment)
     },
-    clips: applyNarrationTimingsToClips(repaired, timings)
+    clips: applyNarrationTimingsToClips(repaired, timings, sentenceGap)
   };
 }
 
@@ -689,6 +719,7 @@ export function rebindProjectNarration<T extends { clips: StoryboardClip[]; audi
   if (!track?.audioUrl || !Number.isFinite(track.duration) || track.duration <= 0 || clips.length === 0) {
     return { ...project, clips };
   }
+  const sentenceGap = resolveSentenceGap(project.audio);
   const timings = allocateSpeechTimings(clips, track.duration, {
     speechStart: track.speechStart,
     speechEnd: track.speechEnd,
@@ -696,9 +727,10 @@ export function rebindProjectNarration<T extends { clips: StoryboardClip[]; audi
   });
   return {
     ...project,
-    clips: applyNarrationTimingsToClips(clips, timings),
+    clips: applyNarrationTimingsToClips(clips, timings, sentenceGap),
     audio: {
       ...project.audio,
+      sentenceGap,
       narrationTrack: {
         ...track,
         clips: timings,
@@ -714,6 +746,7 @@ export function mapNarrationToTimeline(
   track: NarrationTrack
 ): number {
   const resolved = clipNarrationTimings(clips, track.clips);
+  const playThroughHold = narrationFileIncludesHolds(track, clips);
   let cursor = 0;
   let lastAudioEnd = 0;
 
@@ -723,11 +756,14 @@ export function mapNarrationToTimeline(
     const audioStart = timing?.audioStart ?? lastAudioEnd;
     const audioEnd = timing?.audioEnd ?? audioStart;
     const speech = Math.max(0, audioEnd - audioStart);
-    const hold = clip.holdPinned ? Math.max(0, clip.holdDuration || 0) : 0;
+    const hold = Math.max(0, clip.holdDuration || 0);
     lastAudioEnd = audioEnd;
 
     if (audioTime + 0.0005 < audioEnd) {
       return cursor + Math.max(0, audioTime - audioStart);
+    }
+    if (playThroughHold && isUtteranceTail(clips, i) && hold > 0 && audioTime < audioEnd + hold) {
+      return cursor + speech + Math.max(0, audioTime - audioEnd);
     }
     cursor += speech + hold;
   }
@@ -741,6 +777,7 @@ export function mapTimelineToNarration(
   track: NarrationTrack
 ): { audioTime: number; frozen: boolean } {
   const resolved = clipNarrationTimings(clips, track.clips);
+  const playThroughHold = narrationFileIncludesHolds(track, clips);
   let cursor = 0;
   let lastAudioEnd = 0;
 
@@ -748,7 +785,7 @@ export function mapTimelineToNarration(
     const clip = clips[i];
     const timing = resolved[i];
     const speechDuration = clip.speechDuration ?? Math.max(0, (timing?.audioEnd || 0) - (timing?.audioStart || 0));
-    const holdDuration = clip.holdPinned ? Math.max(0, clip.holdDuration || 0) : 0;
+    const holdDuration = Math.max(0, clip.holdDuration || 0);
     const clipDuration = speechDuration + holdDuration || clip.duration || 0.05;
     const local = timelineTime - cursor;
     const audioStart = timing?.audioStart ?? lastAudioEnd;
@@ -757,6 +794,9 @@ export function mapTimelineToNarration(
     if (local < clipDuration) {
       if (speechDuration > 0 && local < speechDuration) {
         return { audioTime: audioStart + local, frozen: false };
+      }
+      if (playThroughHold && isUtteranceTail(clips, i) && holdDuration > 0) {
+        return { audioTime: audioEnd + (local - speechDuration), frozen: false };
       }
       return { audioTime: audioEnd, frozen: true };
     }

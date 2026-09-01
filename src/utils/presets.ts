@@ -192,8 +192,8 @@ export const DEFAULT_CUSTOM_TTS_API: CustomTtsApiConfig = {
   provider: 'edge',
   endpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
   apiKey: '',
-  model: 'qwen3-tts-flash',
-  voice: 'Cherry'
+  model: 'qwen-audio-3.0-tts-flash',
+  voice: 'longanfengyue'
 };
 
 export function resolveTtsApi(api?: CustomTtsApiConfig): CustomTtsApiConfig {
@@ -242,22 +242,24 @@ export const TTS_PROVIDER_PRESETS: TtsProviderPreset[] = [
     name: '阿里云百炼 Qwen-TTS',
     badge: '已接入',
     description: 'DashScope 千问语音合成，中文表现力强，需北京地域 API Key',
-    defaultEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-    defaultModel: 'qwen3-tts-flash',
-    defaultVoice: 'Cherry',
+    defaultEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
+    defaultModel: 'qwen-audio-3.0-tts-flash',
+    defaultVoice: 'longanfengyue',
     popularModels: [
-      { id: 'qwen3-tts-flash', label: 'Qwen3-TTS-Flash', hint: '轻量快速，日常配音推荐' },
-      { id: 'qwen3-tts-instruct-flash', label: 'Instruct-Flash', hint: '支持指令控制语速/情感' },
+      { id: 'qwen-audio-3.0-tts-plus', label: 'Audio 3.0 Plus', hint: '旗舰音质，48kHz，适合成片配音' },
+      { id: 'qwen-audio-3.0-tts-flash', label: 'Audio 3.0 Flash', hint: '新一代更快更省，日常推荐' },
+      { id: 'qwen3-tts-flash', label: 'Qwen3-TTS-Flash', hint: '上一代轻量档，Cherry 等音色' },
+      { id: 'qwen3-tts-instruct-flash', label: 'Instruct-Flash', hint: '上一代，支持指令控制语速/情感' },
       { id: 'qwen-tts', label: 'Qwen-TTS', hint: '经典稳定版音色' }
     ],
     popularVoices: [
-      { id: 'Cherry', label: 'Cherry', hint: '甜美活力女声' },
-      { id: 'Serena', label: 'Serena', hint: '温柔知性女声' },
-      { id: 'Ethan', label: 'Ethan', hint: '沉稳磁性男声' },
-      { id: 'Chelsie', label: 'Chelsie', hint: '清晰播音女声' },
-      { id: 'Jasper', label: 'Jasper', hint: '年轻阳光男声' }
+      { id: 'longanfengyue', label: '龙安风悦', hint: '3.0 Flash 自然亲切女声' },
+      { id: 'longanlingxin', label: '龙安灵心', hint: '3.0 Plus 旗舰女声' },
+      { id: 'longanlufeng', label: '龙安鲁风', hint: '3.0 Plus 旗舰男声' },
+      { id: 'Cherry', label: 'Cherry', hint: 'Qwen3 甜美活力女声' },
+      { id: 'Ethan', label: 'Ethan', hint: 'Qwen3 沉稳磁性男声' }
     ],
-    docHint: '在百炼控制台创建北京地域 API Key（sk-...）。支持音色列表见百炼「Qwen-TTS 音色列表」文档。',
+    docHint: '在百炼控制台创建北京地域 API Key（sk-...）。3.0 与 Qwen3 接口、音色都不能混用，切换模型会自动改地址和音色目录。目录外的 voice id 可在本页或声音页自定义填写。',
     available: true
   },
   {
@@ -626,7 +628,8 @@ export const DEFAULT_AUDIO_CONFIG: AudioConfig = {
   voiceoverVolume: 0.95,
   voiceCharacter: 'magnetic-male',
   speechRate: 1.0,
-  audioDucking: true
+  audioDucking: true,
+  sentenceGap: 0.2
 };
 
 export const SAMPLE_PROJECTS: VideoProject[] = [

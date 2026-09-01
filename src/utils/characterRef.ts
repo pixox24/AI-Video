@@ -1,8 +1,8 @@
 import { VisualCharacterRef } from '../types';
 
 const MAX_BYTES = 8 * 1024 * 1024;
-const FULL_EDGE = 1024;
-const THUMB_EDGE = 256;
+const FULL_EDGE = 768;
+const THUMB_EDGE = 160;
 
 function loadImage(dataUrl: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -46,8 +46,8 @@ export async function prepareCharacterRefFile(file: File): Promise<VisualCharact
   }
   const original = await readFileAsDataUrl(file);
   const image = await loadImage(original);
-  const full = drawContain(image, FULL_EDGE, 0.88);
-  const thumb = drawContain(image, THUMB_EDGE, 0.8);
+  const full = drawContain(image, FULL_EDGE, 0.82);
+  const thumb = drawContain(image, THUMB_EDGE, 0.7);
   const res = await fetch('/api/assets/image', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
