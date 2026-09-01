@@ -43,6 +43,12 @@ export function getTtsPreviewUrl(key: string): string | null {
   return found.url;
 }
 
+export function removeTtsPreviewUrl(key: string) {
+  if (!key) return;
+  memory.delete(key);
+  saveEntries(loadEntries().filter((item) => item.key !== key));
+}
+
 export function setTtsPreviewUrl(key: string, url: string) {
   if (!key || !url) return;
   memory.set(key, url);

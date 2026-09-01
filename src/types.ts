@@ -157,17 +157,25 @@ export interface AudioConfig {
   narrationTrack?: NarrationTrack;
 }
 
+export type ImageApiProvider = 'siliconflow' | 'openai' | 'midjourney' | 'oneapi' | 'custom';
+
 export interface CustomImageApiConfig {
   enabled: boolean;
-  provider: 'builtin' | 'siliconflow' | 'openai' | 'midjourney' | 'oneapi' | 'custom';
-  endpoint: string; // e.g. https://api.siliconflow.cn/v1/images/generations or https://api.change2pro.com
+  provider: ImageApiProvider | 'builtin';
+  endpoint: string;
   apiKey: string;
-  model: string; // e.g. black-forest-labs/FLUX.1-schnell, dall-e-3
+  model: string;
   size: 'auto' | '1024x1024' | '1024x1792' | '1792x1024' | '512x512';
   protocol?: 'auto' | 'images' | 'chat-completions';
   quality?: 'standard' | 'hd';
-  concurrency?: number; // 1 to 6 (default: 3)
-  promptProfile?: 'auto' | 'gpt-image' | 'flux';
+  concurrency?: number;
+  promptProfile?: 'auto' | 'gpt-image';
+}
+
+export interface ImageRetryConfig {
+  enabled: boolean;
+  maxRetries: number;
+  useBackup: boolean;
 }
 
 export interface CustomLlmApiConfig {
@@ -311,13 +319,15 @@ export interface ProjectSettings {
   exportQuality: '1080p' | '720p' | '4k';
   frameRate: 30 | 60;
   customImageApi?: CustomImageApiConfig;
+  backupImageApi?: CustomImageApiConfig;
+  imageRetry?: ImageRetryConfig;
   customLlmApi?: CustomLlmApiConfig;
   customTtsApi?: CustomTtsApiConfig;
   customVideoApi?: CustomVideoApiConfig;
 }
 
 export type ScriptStage = 'intent' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
-export type ScriptIntent = 'blank' | 'direction' | 'product' | 'reference' | 'have-script';
+export type ScriptIntent = 'have-title' | 'blank' | 'direction' | 'product' | 'reference' | 'have-script';
 export type ScriptGenre = '科普' | '反常识' | '故事' | '教程' | '带货' | '情绪' | '热点解读' | '口播金句';
 export type ScriptPace = 'ultrafast' | 'fast' | 'medium' | 'slow' | 'cinematic';
 export type ScriptPlatform = 'douyin' | 'shipinhao' | 'reels' | 'bilibili' | 'youtube';
@@ -528,6 +538,8 @@ export interface ScriptWorkspace {
   gate: ScriptGate;
   intent: ScriptIntent | null;
   intentNotes: string;
+  lockedTitle: string;
+  draftedTitle?: string;
   topicCards: TopicCard[];
   selectedTopicId: string | null;
   researchNotes: ResearchNotes;

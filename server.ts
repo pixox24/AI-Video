@@ -902,7 +902,7 @@ function fallbackTopicCardsServer(seed: string, intent: string) {
   return [
     {
       id: `topic-fb-1-${Date.now()}`,
-      title: topic.slice(0, 18),
+      title: intent === "have-title" ? topic : topic.slice(0, 18),
       hook: `${topic.replace(/[。！？!?]$/, "")}，但大多数人搞反了顺序。`,
       insight: "先拆一个常见误解，再给一个能带走的机制。",
       genre: intent === "product" ? "带货" : "反常识",
@@ -1145,6 +1145,7 @@ app.post("/api/script/topics", async (req, res) => {
   const {
     intent = "blank",
     intentNotes = "",
+    lockedTitle = "",
     platform = "douyin",
     pace = "medium",
     researchNotes,
@@ -1152,21 +1153,28 @@ app.post("/api/script/topics", async (req, res) => {
     genrePackId,
     llmApi
   } = req.body || {};
-  const seed = String(intentNotes || "").trim();
+  const seed = String(lockedTitle || intentNotes || "").trim();
   const fallback = () => ({ cards: fallbackTopicCardsServer(seed, String(intent || "blank")) });
+  const pinFirstCard = (cards: any[]) => {
+    if (String(intent) !== "have-title" || !seed || !Array.isArray(cards) || cards.length === 0) return cards;
+    return [{ ...cards[0], title: seed }, ...cards.slice(1)];
+  };
+  const haveTitleRule = String(intent) === "have-title" && seed
+    ? `\n- 用户已有标题「${seed}」。第一张卡的 title 必须逐字等于该标题；另两张必须换 insight 和钩子结构，主题词保持一致。禁止把用户标题改成更「爆」的同义句。`
+    : "";
 
   const prompt = `你是短视频选题导演。根据用户入口、备注和调研，给出恰好 3 张选题卡。
 规则：
 - 三张卡的 insight 必须不同，钩子结构必须不同（分别用 misconception / outcome / mystery 或 stakes）
 - whyNow 必须具体，禁止写「这个话题很火」「很有意义」
 - hook 不超过 22 个汉字
-- title 不超过 18 个汉字
+- title 不超过 18 个汉字${haveTitleRule ? "（第一张卡除外，必须等于用户原标题）" : ""}
 - genre 只能是：科普、反常识、故事、教程、带货、情绪、热点解读、口播金句
 - paceHint 只能是：ultrafast、fast、medium、slow、cinematic
 - durationHint 只能是 15、21、30、45、60、90 之一
 - conceptCount 为 1 或 2
 - structure 只能是 myth_busting / problem_solution / story / tutorial / contrast / reveal，三张必须不同
-- whyThisWorks 一句话，必须引用调研里的具体点（若有）
+- whyThisWorks 一句话，必须引用调研里的具体点（若有）${haveTitleRule}
 
 【入口】${intent}
 【平台】${platform}
@@ -1195,7 +1203,7 @@ app.post("/api/script/topics", async (req, res) => {
         const parsed = cleanAndParseJSON<any>(llmResult.text);
         if (Array.isArray(parsed?.cards) && parsed.cards.length >= 3) {
           return res.json({
-            cards: parsed.cards.slice(0, 3).map((card: any, index: number) => ({
+            cards: pinFirstCard(parsed.cards.slice(0, 3).map((card: any, index: number) => ({
               id: card.id || `topic-${index + 1}-${Date.now()}`,
               title: String(card.title || "").slice(0, 24) || `选题 ${index + 1}`,
               hook: String(card.hook || ""),
@@ -1208,7 +1216,7 @@ app.post("/api/script/topics", async (req, res) => {
               risk: String(card.risk || ""),
               completionFit: String(card.completionFit || ""),
               hookType: String(card.hookType || "question")
-            }))
+            })))
           });
         }
       }
@@ -1223,7 +1231,7 @@ app.post("/api/script/topics", async (req, res) => {
       });
       const parsed = cleanAndParseJSON<any>(response.text);
       if (Array.isArray(parsed?.cards) && parsed.cards.length >= 3) {
-        return res.json({ cards: parsed.cards.slice(0, 3) });
+        return res.json({ cards: pinFirstCard(parsed.cards.slice(0, 3)) });
       }
     }
     return res.json(fallback());
@@ -1239,18 +1247,28 @@ app.post("/api/script/draft", async (req, res) => {
     topicCard,
     intent,
     intentNotes,
+    lockedTitle,
     researchNotes,
     budget,
     genrePack,
     llmApi,
     stylePack
   } = req.body || {};
-  const title = String(topicCard?.title || topic || intentNotes || "这件事").trim();
+  const title = String(
+    (intent === "have-title" ? lockedTitle : "") || topicCard?.title || topic || intentNotes || "这件事"
+  ).trim();
   const maxChars = Math.max(24, Number(budget?.maxChars) || 110);
   const targetSeconds = Number(budget?.targetSeconds) || 30;
   const pace = budget?.pace || "medium";
   const fallback = () => fallbackDraftServer(title, String(topicCard?.hook || ""), maxChars);
   const beatPlan = Array.isArray(genrePack?.beatPlan) ? genrePack.beatPlan.join(" → ") : "";
+  const haveTitleRule = intent === "have-title"
+    ? `\n- 输出 title 必须逐字等于「${title}」，不得改写、不得加修饰\n- 口播是展开题目，禁止只换说法把标题重复三遍\n- 若备注为空，把推断的「要讲清什么」写在第二节拍的 intent，不要写进 title`
+    : "";
+  const pinDraftTitle = (parsed: any) => {
+    if (intent === "have-title" && parsed && typeof parsed === "object") parsed.title = title;
+    return parsed;
+  };
 
   const styleContract = incomingStyleContract(stylePack);
 
@@ -1266,7 +1284,7 @@ app.post("/api/script/draft", async (req, res) => {
 - 不要改口播去迁就风格
 - beats 4 到 8 个，优先按体裁包节拍：${beatPlan || "hook → setup → turn → proof → cta"}
 - energy 只能是 fast / medium / slow / hold
-- function 只能是 hook / setup / turn / proof / reveal / cta
+- function 只能是 hook / setup / turn / proof / reveal / cta${haveTitleRule}
 
 ${styleContract}
 
@@ -1301,7 +1319,7 @@ ${styleContract}
           if (countChars(parsed.fullNarration) > maxChars * 1.15) {
             parsed.fullNarration = String(parsed.fullNarration).replace(/\s+/g, "").slice(0, maxChars);
           }
-          return res.json(parsed);
+          return res.json(pinDraftTitle(parsed));
         }
       }
     }
@@ -1315,7 +1333,7 @@ ${styleContract}
       });
       const parsed = cleanAndParseJSON<any>(response.text);
       if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
-        return res.json(parsed);
+        return res.json(pinDraftTitle(parsed));
       }
     }
     return res.json(fallback());
@@ -1890,7 +1908,7 @@ ${cleanText}
   }
 });
 
-// 3. Generate individual visual frame using AI Image Generation Engine (Custom Provider API / Pollinations FLUX.1 / Procedural Fallback)
+// 3. Generate individual visual frame using the configured image provider.
 app.post("/api/style/vision-test", async (req, res) => {
   const visionApi = req.body?.visionApi || {};
   const endpoint = String(visionApi.endpoint || "").trim();
@@ -2167,25 +2185,33 @@ app.post("/api/visual/generate", async (req, res) => {
     // PRIORITY 1: User-configured Custom Image Generation Provider API
     // (SiliconFlow / OpenAI DALL-E / OneAPI / NewAPI / Midjourney / Chat-to-Image)
     // =========================================================================
-    const isCustomProvider =
+    const hasProvider = Boolean(
       customApi &&
       customApi.provider !== "builtin" &&
-      customApi.enabled !== false;
+      customApi.enabled !== false &&
+      customApi.apiKey?.trim() &&
+      customApi.endpoint?.trim()
+    );
 
-    if (isCustomProvider) {
-      if (!customApi.apiKey?.trim() || !customApi.endpoint?.trim()) {
-        return res.status(400).json({
-          ok: false,
-          error: "请先填写所选生图供应商的接口地址和 API Key",
-          diagnosis: "当前已选择自定义生图供应商。请补全凭证，或改选「内置 FLUX」。"
-        });
-      }
+    if (!hasProvider) {
+      return res.status(400).json({
+        ok: false,
+        error: "请先在设置里配置生图供应商和 API Key",
+        diagnosis: "已取消内置免费引擎。主通道填好接口地址、密钥和模型后才能出图。"
+      });
     }
 
-    if (isCustomProvider && customApi.apiKey && customApi.endpoint) {
+    if (hasProvider) {
       try {
         const chosenSize = customApi.size === 'auto' || !customApi.size ? standardSize : customApi.size;
-        const targetModel = customApi.model ? customApi.model.trim() : 'black-forest-labs/FLUX.1-schnell';
+        const targetModel = customApi.model ? customApi.model.trim() : '';
+        if (!targetModel) {
+          return res.status(400).json({
+            ok: false,
+            error: "请填写生图模型名称",
+            diagnosis: "可在设置里拉取模型列表，或手动填入供应商提供的模型 id。"
+          });
+        }
 
         console.log(`[Custom Image API] Requesting ${customApi.endpoint} with model "${targetModel}"...`);
         const customResult = await executeCustomImageRequest({
@@ -2231,53 +2257,17 @@ app.post("/api/visual/generate", async (req, res) => {
       }
     }
 
-    // =========================================================================
-    // PRIORITY 2: Built-in Pollinations FLUX.1 Schnell Engine (Free Default)
-    // =========================================================================
-    const randomSeed = seed || Math.floor(Math.random() * 9999999);
-    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(finalPrompt)}?width=${width}&height=${height}&seed=${randomSeed}&model=flux&nologo=true`;
-
-    // Try fetching direct image stream from Pollinations FLUX with 8s timeout
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-      const imgResponse = await fetch(pollinationsUrl, {
-        signal: controller.signal,
-        headers: {
-          'Accept': 'image/jpeg,image/png,image/webp,*/*'
-        }
-      });
-      clearTimeout(timeoutId);
-
-      if (imgResponse.ok) {
-        const arrayBuffer = await imgResponse.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
-        const base64Image = `data:${contentType};base64,${buffer.toString('base64')}`;
-
-        return res.json({ 
-          imageUrl: materializeClientImageUrl(base64Image),
-          source: 'flux-pollinations',
-          model: 'FLUX.1-schnell'
-        });
-      }
-    } catch {
-      // Proceed to server-side proxied image fallback
-    }
-
-    // Return direct Pollinations CDN URL with safe proxy wrapper fallback
-    return res.json({ 
-      imageUrl: materializeClientImageUrl(pollinationsUrl),
-      source: 'flux-pollinations-cdn',
-      model: 'FLUX.1-schnell'
+    return res.status(400).json({
+      ok: false,
+      error: "请先在设置里配置生图供应商和 API Key",
+      diagnosis: "已取消内置免费引擎。主通道填好接口地址、密钥和模型后才能出图。"
     });
   } catch (error: any) {
     console.error("Visual generation error:", error);
-    const fallbackPrompt = encodeURIComponent(req.body?.prompt || 'cinematic scenery');
-    return res.json({
-      imageUrl: materializeClientImageUrl(`https://image.pollinations.ai/prompt/${fallbackPrompt}?width=1280&height=720&model=flux&nologo=true`),
-      source: 'flux-pollinations-cdn'
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || "生图失败",
+      diagnosis: "请求未能完成。请检查供应商接口或稍后重试。"
     });
   }
 });
@@ -3049,7 +3039,7 @@ app.post("/api/llm/test", async (req, res) => {
 // 3.1 Test Custom Image Provider API endpoint
 app.post("/api/visual/test-custom-api", async (req, res) => {
   const startTime = Date.now();
-  const { endpoint, apiKey, model = 'black-forest-labs/FLUX.1-schnell', size = '1024x1024', protocol = 'auto' } = req.body || {};
+  const { endpoint, apiKey, model = '', size = '1024x1024', protocol = 'auto' } = req.body || {};
 
   if (!endpoint || typeof endpoint !== 'string' || !endpoint.trim()) {
     return res.status(400).json({ ok: false, error: '请输入 API 接口地址 (Endpoint URL)' });
@@ -3709,7 +3699,7 @@ app.post("/api/audio/tts-utterances", async (req, res) => {
     }
 
     const segments: { text: string; audioUrl: string; words: EdgeWordMark[] }[] = new Array(fromClips.length);
-    const concurrency = isUsableBailianTts(ttsApi) ? bailianTtsConcurrency(ttsApi) : 2;
+    const concurrency = isUsableBailianTts(ttsApi) ? bailianTtsConcurrency(ttsApi as any) : 2;
     let cursor = 0;
     let firstError: { error: string; status?: number } | null = null;
     const worker = async () => {

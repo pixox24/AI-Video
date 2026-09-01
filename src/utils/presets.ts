@@ -3,26 +3,56 @@ import { SYSTEM_FONT_ID, SYSTEM_FONT_STACK } from './subtitleFonts';
 
 export const DEFAULT_CUSTOM_IMAGE_API: CustomImageApiConfig = {
   enabled: false,
-  provider: 'builtin',
-  endpoint: '',
+  provider: 'siliconflow',
+  endpoint: 'https://api.siliconflow.cn/v1/images/generations',
   apiKey: '',
-  model: 'FLUX.1-schnell',
+  model: '',
   size: 'auto',
   protocol: 'auto',
   quality: 'standard',
   concurrency: 3
 };
 
+export const DEFAULT_IMAGE_RETRY = {
+  enabled: true,
+  maxRetries: 2,
+  useBackup: true
+};
+
 export function resolveImageApi(api?: CustomImageApiConfig): CustomImageApiConfig {
-  if (!api) return { ...DEFAULT_CUSTOM_IMAGE_API };
-  if (api.provider === 'builtin' || api.enabled === false) {
-    return { ...DEFAULT_CUSTOM_IMAGE_API, ...api, provider: 'builtin', enabled: false };
+  const merged: CustomImageApiConfig = { ...DEFAULT_CUSTOM_IMAGE_API, ...(api || {}) };
+  if ((merged.provider as string) === 'builtin') {
+    return { ...DEFAULT_CUSTOM_IMAGE_API, enabled: false };
   }
-  return { ...DEFAULT_CUSTOM_IMAGE_API, ...api, enabled: true };
+  const ready = Boolean(merged.endpoint?.trim() && merged.apiKey?.trim());
+  return {
+    ...merged,
+    enabled: merged.enabled !== false && ready
+  };
+}
+
+export function isImageApiReady(api?: CustomImageApiConfig): boolean {
+  const resolved = resolveImageApi(api);
+  return Boolean(resolved.enabled && resolved.endpoint.trim() && resolved.apiKey.trim());
 }
 
 export function isCustomImageProvider(api?: CustomImageApiConfig): boolean {
-  return resolveImageApi(api).provider !== 'builtin';
+  return isImageApiReady(api);
+}
+
+export function imageApiLabel(api?: CustomImageApiConfig): string {
+  const resolved = resolveImageApi(api);
+  if (!isImageApiReady(resolved)) return '未配置';
+  return resolved.model || resolved.provider;
+}
+
+export function resolveImageRetry(retry?: { enabled?: boolean; maxRetries?: number; useBackup?: boolean } | null) {
+  const maxRetries = Number(retry?.maxRetries);
+  return {
+    enabled: retry?.enabled !== false,
+    maxRetries: Number.isFinite(maxRetries) ? Math.max(0, Math.min(4, Math.round(maxRetries))) : DEFAULT_IMAGE_RETRY.maxRetries,
+    useBackup: retry?.useBackup !== false
+  };
 }
 
 export const DEFAULT_CUSTOM_LLM_API: CustomLlmApiConfig = {
@@ -121,69 +151,54 @@ export interface ImageApiProviderPreset {
 
 export const IMAGE_API_PROVIDER_PRESETS: ImageApiProviderPreset[] = [
   {
-    id: 'builtin',
-    name: '内置 FLUX',
-    badge: '无需密钥',
-    description: '免费默认引擎，适合快速出图和草稿预览',
-    defaultEndpoint: '',
-    defaultModel: 'FLUX.1-schnell',
-    popularModels: [],
-    docHint: '使用内置 Pollinations FLUX，无需填写密钥。需要更稳定或指定模型时，直接改选其他供应商即可。'
-  },
-  {
     id: 'siliconflow',
-    name: '硅基流动 (SiliconFlow)',
-    badge: '极速推荐',
-    description: '国内高速低延迟，支持 FLUX.1、SD3 等主流开源文生图大模型',
+    name: '硅基流动',
+    badge: '国内直连',
+    description: 'OpenAI 兼容生图接口，适合日常分镜出图',
     defaultEndpoint: 'https://api.siliconflow.cn/v1/images/generations',
-    defaultModel: 'black-forest-labs/FLUX.1-schnell',
-    popularModels: [
-      'black-forest-labs/FLUX.1-schnell',
-      'black-forest-labs/FLUX.1-dev',
-      'stabilityai/stable-diffusion-3-medium',
-      'Pro/black-forest-labs/FLUX.1-schnell'
-    ],
-    docHint: '可在硅基流动控制台创建 API 密钥 (sk-...)，请求格式完全兼容 OpenAI。'
+    defaultModel: '',
+    popularModels: ['stabilityai/stable-diffusion-3-medium'],
+    docHint: '在硅基流动控制台创建 API Key。模型请拉取列表后选择。'
   },
   {
     id: 'oneapi',
-    name: 'OneAPI / NewAPI / Change2Pro 中转',
-    badge: '智能自适应',
-    description: '自动兼容中转站的 Images 接口与 Chat 对话生图模式',
+    name: '中转站',
+    badge: 'OneAPI / NewAPI',
+    description: '自动兼容 Images 与 Chat 生图通道',
     defaultEndpoint: 'https://api.change2pro.com',
     defaultModel: 'dall-e-3',
-    popularModels: ['dall-e-3', 'flux-schnell', 'flux-dev', 'midjourney', 'mj-chat', 'gpt-4o'],
-    docHint: '支持各大聚合中转站。系统已内置双通道自适应（标准生图与 Chat 对话生图自动切换）。'
+    popularModels: ['dall-e-3', 'gpt-4o', 'midjourney', 'mj-chat'],
+    docHint: '填中转站根地址和密钥。系统会按协议自适应 Images 或 Chat Completions。'
   },
   {
     id: 'openai',
-    name: 'OpenAI (DALL·E 3)',
-    badge: '顶级画质',
-    description: '全球顶尖语义理解与超清画面构图，完美还原细致 Prompt',
+    name: 'OpenAI',
+    badge: '官方',
+    description: 'DALL·E / GPT Image 官方或官方兼容代理',
     defaultEndpoint: 'https://api.openai.com/v1/images/generations',
     defaultModel: 'dall-e-3',
-    popularModels: ['dall-e-3', 'dall-e-2'],
-    docHint: '需填入官方 OpenAI API Key (sk-...) 或对应的官方中转反向代理地址。'
+    popularModels: ['dall-e-3', 'gpt-image-1'],
+    docHint: '使用官方 Key 或兼容代理。GPT Image 类模型建议协议选 Chat。'
   },
   {
     id: 'midjourney',
     name: 'Midjourney 代理',
-    badge: '艺术质感',
-    description: '支持 Midjourney-Proxy 或 NewAPI Midjourney 渠道',
+    badge: '艺术向',
+    description: 'Midjourney-Proxy / NewAPI 的 MJ 通道',
     defaultEndpoint: 'https://api.openai-proxy.org/v1/images/generations',
     defaultModel: 'midjourney',
-    popularModels: ['midjourney', 'mj-chat', 'flux-1-schnell'],
-    docHint: '适用于第三方聚合站或 Midjourney 协议代理服务。'
+    popularModels: ['midjourney', 'mj-chat'],
+    docHint: '适用于第三方 MJ 协议代理。出图较慢，并发建议开 1。'
   },
   {
     id: 'custom',
-    name: '自定义 API 接口',
-    badge: '自由配置',
-    description: '支持任意兼容 OpenAI /v1/images/generations 或 ChatCompletions 的服务端',
-    defaultEndpoint: 'https://your-api-domain.com/v1/images/generations',
-    defaultModel: 'flux-1-schnell',
-    popularModels: ['flux-1-schnell', 'stable-diffusion-xl', 'dall-e-3'],
-    docHint: '支持任意符合 OpenAI 规范的私有部署或第三方中转服务，支持自动通道识别。'
+    name: '自定义兼容接口',
+    badge: '自建',
+    description: '任意 OpenAI Images 或 Chat Completions 兼容服务',
+    defaultEndpoint: '',
+    defaultModel: '',
+    popularModels: ['dall-e-3', 'gpt-image-1', 'stable-diffusion-xl'],
+    docHint: '自己填接口地址和模型名。不会走任何内置免费引擎。'
   }
 ];
 

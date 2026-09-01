@@ -12,6 +12,7 @@ const APP_SETTINGS_KEY = 'ai_video_app_settings';
 
 export interface AppSecretSettings {
   customImageApi?: CustomImageApiConfig;
+  backupImageApi?: CustomImageApiConfig;
   customLlmApi?: CustomLlmApiConfig;
   customTtsApi?: CustomTtsApiConfig;
   customVideoApi?: CustomVideoApiConfig;
@@ -48,6 +49,7 @@ export function persistAppSettingsFromProject(project: VideoProject): boolean {
   const settings = project.settings || ({} as ProjectSettings);
   const next: AppSecretSettings = {
     customImageApi: settings.customImageApi,
+    backupImageApi: settings.backupImageApi,
     customLlmApi: settings.customLlmApi,
     customTtsApi: settings.customTtsApi,
     customVideoApi: settings.customVideoApi,
@@ -56,6 +58,7 @@ export function persistAppSettingsFromProject(project: VideoProject): boolean {
   const existing = loadAppSettings();
   return persistAppSettings({
     customImageApi: next.customImageApi || existing.customImageApi,
+    backupImageApi: next.backupImageApi || existing.backupImageApi,
     customLlmApi: next.customLlmApi || existing.customLlmApi,
     customTtsApi: next.customTtsApi || existing.customTtsApi,
     customVideoApi: next.customVideoApi || existing.customVideoApi,
@@ -67,6 +70,7 @@ export function captureAppSettingsIfEmpty(project: VideoProject): void {
   const existing = loadAppSettings();
   if (
     hasKey(existing.customImageApi)
+    || hasKey(existing.backupImageApi)
     || hasKey(existing.customLlmApi)
     || hasKey(existing.customTtsApi)
     || hasKey(existing.customVideoApi)
@@ -87,6 +91,7 @@ export function stripProjectSecrets(project: VideoProject): VideoProject {
     settings: {
       ...settings,
       customImageApi: undefined,
+      backupImageApi: undefined,
       customLlmApi: undefined,
       customTtsApi: undefined,
       customVideoApi: undefined,
@@ -103,6 +108,7 @@ export function mergeAppSettings(project: VideoProject): VideoProject {
     settings: {
       ...settings,
       customImageApi: app.customImageApi || settings.customImageApi,
+      backupImageApi: app.backupImageApi || settings.backupImageApi,
       customLlmApi: app.customLlmApi || settings.customLlmApi,
       customTtsApi: app.customTtsApi || settings.customTtsApi,
       customVideoApi: app.customVideoApi || settings.customVideoApi,

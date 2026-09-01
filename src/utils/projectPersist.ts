@@ -332,6 +332,8 @@ function settingsFrom(project?: VideoProject): ProjectSettings {
     exportQuality: settings?.exportQuality || '1080p',
     frameRate: settings?.frameRate || 30,
     customImageApi: settings?.customImageApi,
+    backupImageApi: settings?.backupImageApi,
+    imageRetry: settings?.imageRetry,
     customLlmApi: settings?.customLlmApi,
     customTtsApi: settings?.customTtsApi,
     customVideoApi: settings?.customVideoApi

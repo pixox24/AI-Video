@@ -1,7 +1,7 @@
 import { CustomTtsApiConfig } from '../types';
 import { DEFAULT_BGM_TRACK_ID, bgmById, resolveBgmTrackId } from './presets';
 import { ttsSourceKey } from './ttsCatalog';
-import { getTtsPreviewUrl, makeVoicePreviewKey, setTtsPreviewUrl } from './ttsPreviewCache';
+import { getTtsPreviewUrl, makeVoicePreviewKey, removeTtsPreviewUrl, setTtsPreviewUrl } from './ttsPreviewCache';
 
 export type AudioPreviewListener = (previewTrackId: string | null) => void;
 export type VoicePreviewListener = (playing: boolean) => void;
@@ -30,6 +30,7 @@ class AudioEngine {
   
   // Voiceover instance & session
   private activeAudioElement: HTMLAudioElement | null = null;
+  private activeBufferSource: AudioBufferSourceNode | null = null;
   private voiceSessionToken: number = 0;
   private voicePreviewActive = false;
   private ttsCache: Map<string, string> = new Map();
@@ -73,6 +74,19 @@ class AudioEngine {
     return this.voicePreviewActive;
   }
 
+  /** True once the voice preview is actually producing sound (element, buffer, or WebSpeech). */
+  public isVoicePreviewAudible(): boolean {
+    if (this.activeBufferSource) return true;
+    const audio = this.activeAudioElement;
+    if (audio && !audio.paused && audio.src && audio.src !== SILENT_WAV) return true;
+    try {
+      if ('speechSynthesis' in window && window.speechSynthesis.speaking) return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
   private setVoicePreviewActive(playing: boolean) {
     if (this.voicePreviewActive === playing) return;
     this.voicePreviewActive = playing;
@@ -83,6 +97,33 @@ class AudioEngine {
         console.error('Error in voice preview listener:', e);
       }
     });
+  }
+
+  private async playViaUnlockedContext(
+    audioUrl: string,
+    session: number,
+    onEnd?: () => void
+  ): Promise<boolean> {
+    const ctx = this.audioUnlockCtx;
+    if (!ctx || this.voiceSessionToken !== session) return false;
+    try {
+      if (ctx.state === 'suspended') await ctx.resume();
+      const res = await fetch(audioUrl);
+      if (!res.ok || this.voiceSessionToken !== session) return false;
+      const buffer = await ctx.decodeAudioData(await res.arrayBuffer());
+      if (this.voiceSessionToken !== session) return false;
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.connect(ctx.destination);
+      node.onended = () => {
+        if (this.voiceSessionToken !== session) return;
+        onEnd?.();
+      };
+      node.start(0);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private unlockPlaybackFromUserGesture() {
@@ -419,7 +460,7 @@ class AudioEngine {
     if (!audioUrl && persistPreview) {
       audioUrl = getTtsPreviewUrl(previewKey) || undefined;
     }
-    const fromCache = Boolean(audioUrl);
+    let fromCache = Boolean(audioUrl);
 
     // Hold one HTMLAudioElement from the click so play() after TTS still counts as a user gesture.
     let previewPlayer: HTMLAudioElement | null = null;
@@ -433,7 +474,7 @@ class AudioEngine {
       void previewPlayer.play().catch(() => {});
     }
 
-    if (!audioUrl) {
+    const fetchTtsUrl = async (): Promise<string | undefined> => {
       try {
         const res = await fetch('/api/audio/tts', {
           method: 'POST',
@@ -446,26 +487,32 @@ class AudioEngine {
           })
         });
 
-        if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
+        if (this.voiceSessionToken !== session) return undefined;
 
         if (res.ok) {
           const data = await res.json();
           if (data && data.audioUrl) {
-            audioUrl = data.audioUrl;
-            this.ttsCache.set(cacheKey, audioUrl);
-            if (persistPreview) setTtsPreviewUrl(previewKey, audioUrl);
+            this.ttsCache.set(cacheKey, data.audioUrl);
+            if (persistPreview) setTtsPreviewUrl(previewKey, data.audioUrl);
+            return data.audioUrl as string;
           }
         }
       } catch (err) {
         console.warn('TTS request failed, fallback to WebSpeech:', err);
       }
+      return undefined;
+    };
+
+    if (!audioUrl) {
+      audioUrl = await fetchTtsUrl();
     }
 
     if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
 
     // Play high-quality neural voice if retrieved
+    let played = false;
     if (audioUrl) {
-      const played = await this.playVoiceUrl(
+      played = await this.playVoiceUrl(
         audioUrl,
         session,
         text,
@@ -477,12 +524,38 @@ class AudioEngine {
       if (this.voiceSessionToken !== session) {
         return { fromCache, played: false, cancelled: true };
       }
-      if (played) {
-        return { fromCache, played: true };
+      if (!played && fromCache) {
+        // Cached URL went stale (e.g. /generated file cleared): drop it and re-synthesize once.
+        this.ttsCache.delete(cacheKey);
+        removeTtsPreviewUrl(previewKey);
+        const freshUrl = await fetchTtsUrl();
+        if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
+        if (freshUrl) {
+          audioUrl = freshUrl;
+          fromCache = false;
+          played = await this.playVoiceUrl(
+            freshUrl,
+            session,
+            text,
+            character,
+            persistPreview ? 1 : rate,
+            handleVoiceEnd,
+            null
+          );
+          if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
+        }
+      }
+      if (!played) {
+        // Strict autoplay policies reject the element play() after the async TTS round-trip;
+        // the AudioContext resumed inside the click gesture is still unlocked, so play there.
+        played = await this.playViaUnlockedContext(audioUrl, session, handleVoiceEnd);
+        if (this.voiceSessionToken !== session) return { fromCache, played: false, cancelled: true };
       }
     }
 
-    if (this.voiceSessionToken !== session) return { fromCache: false, played: false, cancelled: true };
+    if (played) {
+      return { fromCache, played: true };
+    }
 
     if (previewPlayer && this.activeAudioElement === previewPlayer) {
       this.teardownAudio(previewPlayer);

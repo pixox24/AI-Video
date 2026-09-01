@@ -84,7 +84,7 @@ export function genrePackById(id: ScriptGenre | null | undefined): GenrePack | n
 
 export const STAGE_META: { id: import('../types').ScriptStage; label: string; hint: string }[] = [
   { id: 'intent', label: '意图', hint: '从哪开始' },
-  { id: 'topic', label: '选题', hint: '三张角度卡' },
+  { id: 'topic', label: '选题', hint: '锁题 / 角度卡' },
   { id: 'research', label: '调研', hint: '四刀浅调研' },
   { id: 'duration', label: '时长', hint: '字数与停留' },
   { id: 'beats', label: '节拍', hint: '叙事骨架' },

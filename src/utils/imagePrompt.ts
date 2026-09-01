@@ -13,7 +13,7 @@ import { dnaTransferText, renderLine, usesStyleDna } from './stylePack';
 import { leadCharacter, stripBiblePrefix } from './visualBible';
 import { coverageFramingLine } from './shotCoverage';
 
-export type ImagePromptProfile = 'gpt-image' | 'flux';
+export type ImagePromptProfile = 'gpt-image';
 
 export type ImagePromptClip = Pick<
   StoryboardClip,
@@ -65,10 +65,8 @@ export function resolveImagePromptProfile(
   model?: string,
   override?: CustomImageApiConfig['promptProfile']
 ): ImagePromptProfile {
-  if (override === 'gpt-image' || override === 'flux') return override;
-  const hay = (model || '').toLowerCase();
-  if (/gpt-image|gpt-4o|gpt-4\.1|chatgpt-image|dall-?e-3/.test(hay)) return 'gpt-image';
-  return /flux|sd-|stable-diffusion|schnell/.test(hay) ? 'flux' : 'gpt-image';
+  if (override === 'gpt-image') return override;
+  return 'gpt-image';
 }
 
 function compact(text: string): string {
@@ -213,17 +211,6 @@ export function compileImagePrompt(input: {
   const subject = [identity, beat.subject].filter(Boolean).join('；');
   const details = styleDetails(input.pack);
   const constraints = constraintsFor(input.bible, input.pack, input.clip.continuity);
-
-  if (profile === 'flux') {
-    const prompt = [
-      subject || beat.action,
-      setting,
-      beat.action,
-      details,
-      constraints[0]
-    ].filter(Boolean).join(', ');
-    return { prompt, profile, beat };
-  }
 
   const prompt = [
     `Use: ${useLine(input.aspectRatio, input.genre, input.clipIndex, input.clipCount)}.`,

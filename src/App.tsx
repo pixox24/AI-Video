@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry, ProjectLibraryItem } from './types';
-import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, resolveLlmApi, resolveTtsApi } from './utils/presets';
+import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, isImageApiReady, resolveLlmApi, resolveTtsApi } from './utils/presets';
+import { generateImageWithRetry } from './utils/imageGenerateClient';
+import { classifyImageError } from './utils/imageGenerateRetry';
 import { resolveSubtitleFontId } from './utils/subtitleFonts';
 import { applyTtsSettingsToProject, applyVoiceToProject, bailianTtsConcurrency, designedVoiceMatchesModel, isDesignedVoiceId, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
 import { findDesignedVoice } from './utils/voiceLibrary';
@@ -829,6 +831,11 @@ export default function App() {
   const handleGenerateSingleClipImage = useCallback(async (clipId: string) => {
     const targetClip = project.clips.find(c => c.id === clipId);
     if (!targetClip) return;
+    if (!isImageApiReady(project.settings.customImageApi)) {
+      showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
+      setActiveTab('settings');
+      return;
+    }
     recordHistory(project);
     warnIfMissingLeadRef();
 
@@ -839,41 +846,44 @@ export default function App() {
     }));
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 360000);
     const clipIndex = Math.max(0, project.clips.findIndex((item) => item.id === clipId));
     const compiled = compiledPromptFor(targetClip, clipIndex);
 
     try {
-      const res = await fetch('/api/visual/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const result = await generateImageWithRetry(
+        {
           prompt: compiled.prompt,
           visualStyle: project.settings.visualStyle,
           styleRender: renderLine(hydrateActiveStylePack(project.settings)),
           aspectRatio: project.settings.aspectRatio,
           seed: targetClip.order * 1000 + Date.now(),
-          customApi: resolveImageApi(project.settings.customImageApi),
           characterRef: characterRefPayload(targetClip)
-        }),
-        signal: controller.signal
-      });
-
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok || !data?.imageUrl) {
-        const errorMsg = data?.diagnosis || data?.error || `HTTP ${res.status}: 生图接口未返回有效画面`;
-        throw new Error(errorMsg);
-      }
+        },
+        {
+          primary: project.settings.customImageApi,
+          backup: project.settings.backupImageApi,
+          retry: project.settings.imageRetry,
+          signal: controller.signal,
+          onAttempt: ({ attempt, max, usingBackup }) => {
+            setProject((prev) => ({
+              ...prev,
+              clips: prev.clips.map((c) => c.id === clipId ? {
+                ...c,
+                imageError: usingBackup ? '主通道失败，改走备用…' : `自动重试 ${attempt}/${max}`
+              } : c)
+            }));
+          }
+        }
+      );
 
       setProject(prev => ({
         ...prev,
         clips: prev.clips.map(c => c.id === clipId ? {
           ...c,
-          imageUrl: data.imageUrl,
+          imageUrl: result.imageUrl,
           imageStatus: 'success',
           isGeneratingImage: false,
-          imageError: undefined,
+          imageError: result.usedBackup ? '备用通道出图' : undefined,
           visualPrompt: c.promptPinned ? c.visualPrompt : compiled.prompt,
           visualBeat: c.visualBeat || compiled.beat,
           chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(compiled.beat)
@@ -881,7 +891,7 @@ export default function App() {
         updatedAt: Date.now()
       }));
     } catch (err: any) {
-      const aborted = err?.name === 'AbortError';
+      const aborted = err?.name === 'AbortError' || err?.message === '已停止';
       setProject(prev => ({
         ...prev,
         clips: prev.clips.map(c => c.id === clipId ? {
@@ -889,13 +899,11 @@ export default function App() {
           imageStatus: 'failed',
           isGeneratingImage: false,
           imageError: aborted
-            ? '等待超时：供应商后台可能已出图，但接口未在时限内返回。请重试。'
+            ? (err?.message === '已停止' ? '已停止' : '等待超时：供应商后台可能已出图，但接口未在时限内返回。请重试。')
             : (err?.message || '生成失败，请检查服务商 API 配置')
         } : c),
         updatedAt: Date.now()
       }));
-    } finally {
-      window.clearTimeout(timeoutId);
     }
   }, [project.clips, project.settings, project.scriptWorkspace, project, recordHistory]);
 
@@ -903,6 +911,11 @@ export default function App() {
   const handleGenerateAllImages = async (clipsOverride?: StoryboardClip[]) => {
     const sourceClips = Array.isArray(clipsOverride) ? clipsOverride : project.clips;
     if (sourceClips.length === 0) return;
+    if (!isImageApiReady(project.settings.customImageApi)) {
+      showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
+      setActiveTab('settings');
+      return;
+    }
     warnIfMissingLeadRef();
 
     // Create new abort controller
@@ -938,105 +951,116 @@ export default function App() {
     );
 
     try {
-      await runConcurrencyPool<StoryboardClip, { clipId: string; imageUrl: string; prompt: string; beat: StoryboardClip['visualBeat'] }>(
-        sourceClips,
-        async (clip: StoryboardClip, index: number, signal?: AbortSignal) => {
-          const timeoutController = new AbortController();
-          const timeoutId = window.setTimeout(() => timeoutController.abort(), 360000);
-          const onAbort = () => timeoutController.abort();
-          signal?.addEventListener('abort', onAbort);
-          const compiled = compiledPromptFor(clip, Math.max(0, project.clips.findIndex((item) => item.id === clip.id)));
-
-          let res: Response;
-          try {
-            res = await fetch('/api/visual/generate', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                prompt: compiled.prompt,
-                visualStyle: project.settings.visualStyle,
-                styleRender: renderLine(hydrateActiveStylePack(project.settings)),
-                aspectRatio: project.settings.aspectRatio,
-                seed: index * 1000 + Date.now(),
-                customApi: resolveImageApi(project.settings.customImageApi),
-                characterRef: characterRefPayload(clip)
-              }),
-              signal: timeoutController.signal
-            });
-          } catch (err: any) {
-            if (err?.name === 'AbortError') {
-              throw new Error('等待超时：供应商后台可能已出图，但接口未在时限内返回。请重试。');
+      const runShot = async (clip: StoryboardClip, index: number, signal?: AbortSignal) => {
+        const compiled = compiledPromptFor(clip, Math.max(0, project.clips.findIndex((item) => item.id === clip.id)));
+        const result = await generateImageWithRetry(
+          {
+            prompt: compiled.prompt,
+            visualStyle: project.settings.visualStyle,
+            styleRender: renderLine(hydrateActiveStylePack(project.settings)),
+            aspectRatio: project.settings.aspectRatio,
+            seed: index * 1000 + Date.now(),
+            characterRef: characterRefPayload(clip)
+          },
+          {
+            primary: project.settings.customImageApi,
+            backup: project.settings.backupImageApi,
+            retry: project.settings.imageRetry,
+            signal,
+            onAttempt: ({ attempt, max, usingBackup }) => {
+              setProject((prev) => ({
+                ...prev,
+                clips: prev.clips.map((c) => c.id === clip.id ? {
+                  ...c,
+                  imageError: usingBackup ? '主通道失败，改走备用…' : `自动重试 ${attempt}/${max}`
+                } : c)
+              }));
             }
-            throw err;
-          } finally {
-            window.clearTimeout(timeoutId);
-            signal?.removeEventListener('abort', onAbort);
           }
+        );
+        return {
+          clipId: clip.id,
+          imageUrl: result.imageUrl,
+          prompt: compiled.prompt,
+          beat: compiled.beat,
+          usedBackup: result.usedBackup
+        };
+      };
 
-          if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData?.diagnosis || errData?.error || `HTTP ${res.status}`);
-          }
-
-          const data = await res.json().catch(() => ({}));
-          if (!data?.imageUrl) {
-            throw new Error(data?.error || '生图接口未返回有效画面');
-          }
-
-          return { clipId: clip.id, imageUrl: data.imageUrl, prompt: compiled.prompt, beat: compiled.beat };
+      const poolOptions = {
+        concurrency,
+        signal: controller.signal,
+        getId: (clip: StoryboardClip) => clip.id,
+        onItemStart: (task: { item: StoryboardClip }) => {
+          setProject(prev => ({
+            ...prev,
+            clips: prev.clips.map(c => c.id === task.item.id ? {
+              ...c,
+              imageStatus: 'generating' as const,
+              isGeneratingImage: true
+            } : c)
+          }));
         },
-        {
-          concurrency,
-          signal: controller.signal,
-          getId: (clip: StoryboardClip) => clip.id,
-          onItemStart: (task) => {
-            setProject(prev => ({
-              ...prev,
-              clips: prev.clips.map(c => c.id === task.item.id ? {
-                ...c,
-                imageStatus: 'generating' as const,
-                isGeneratingImage: true
-              } : c)
-            }));
-          },
-          onItemSuccess: (task, result) => {
-            setProject(prev => ({
-              ...prev,
-              clips: prev.clips.map(c => c.id === task.item.id ? {
-                ...c,
-                imageUrl: result.imageUrl,
-                visualPrompt: c.promptPinned ? c.visualPrompt : result.prompt,
-                visualBeat: c.visualBeat || result.beat,
-                chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(result.beat || {}),
-                imageStatus: 'success' as const,
-                isGeneratingImage: false,
-                imageError: undefined
-              } : c),
-              updatedAt: Date.now()
-            }));
-          },
-          onItemError: (task, error) => {
-            if (controller.signal.aborted) return;
-            setProject(prev => ({
-              ...prev,
-              clips: prev.clips.map(c => c.id === task.item.id ? {
-                ...c,
-                imageStatus: 'failed' as const,
-                isGeneratingImage: false,
-                imageError: error?.message || '生成失败'
-              } : c),
-              updatedAt: Date.now()
-            }));
-          },
-          onProgress: (completed, total) => {
-            setBatchGenerationProgress({
-              completed,
-              total,
-              activeCount: Math.min(concurrency, total - completed)
-            });
-          }
+        onItemSuccess: (task: { item: StoryboardClip }, result: { imageUrl: string; prompt: string; beat: StoryboardClip['visualBeat']; usedBackup: boolean }) => {
+          setProject(prev => ({
+            ...prev,
+            clips: prev.clips.map(c => c.id === task.item.id ? {
+              ...c,
+              imageUrl: result.imageUrl,
+              visualPrompt: c.promptPinned ? c.visualPrompt : result.prompt,
+              visualBeat: c.visualBeat || result.beat,
+              chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(result.beat || {}),
+              imageStatus: 'success' as const,
+              isGeneratingImage: false,
+              imageError: result.usedBackup ? '备用通道出图' : undefined
+            } : c),
+            updatedAt: Date.now()
+          }));
+        },
+        onItemError: (task: { item: StoryboardClip }, error: any) => {
+          if (controller.signal.aborted) return;
+          setProject(prev => ({
+            ...prev,
+            clips: prev.clips.map(c => c.id === task.item.id ? {
+              ...c,
+              imageStatus: 'failed' as const,
+              isGeneratingImage: false,
+              imageError: error?.message || '生成失败'
+            } : c),
+            updatedAt: Date.now()
+          }));
+        },
+        onProgress: (completed: number, total: number) => {
+          setBatchGenerationProgress({
+            completed,
+            total,
+            activeCount: Math.min(concurrency, total - completed)
+          });
         }
-      );
+      };
+
+      const firstPass = await runConcurrencyPool(sourceClips, runShot, poolOptions);
+      if (!controller.signal.aborted) {
+        const leftover = firstPass
+          .filter((item) => !item.ok)
+          .filter((item) => {
+            const kind = classifyImageError(item.error, false);
+            return kind === 'retry' || kind === 'timeout' || kind === 'ratelimit' || kind === 'unsupported';
+          })
+          .map((item) => sourceClips.find((clip) => clip.id === item.id))
+          .filter((clip): clip is StoryboardClip => Boolean(clip));
+        if (leftover.length > 0) {
+          showStatusToast(`还有 ${leftover.length} 镜失败，正在再收一口`, { tone: 'progress', id: 'image-sweep' });
+          leftover.forEach((clip) => {
+            setProject((prev) => ({
+              ...prev,
+              clips: prev.clips.map((c) => c.id === clip.id ? { ...c, imageStatus: 'queued' as const, isGeneratingImage: false } : c)
+            }));
+          });
+          await runConcurrencyPool(leftover, runShot, poolOptions);
+        }
+        showStatusToast('画面生成结束', { tone: leftover.length ? 'warn' : 'ok', id: 'image-sweep' });
+      }
     } catch (err: any) {
       console.warn('Batch generation interrupted or failed:', err?.message);
     } finally {

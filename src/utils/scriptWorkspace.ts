@@ -1,10 +1,14 @@
 import {
   AspectRatio,
   ConceptMix,
+  DirectorNote,
   ForecastShot,
+  NarrativeStructure,
   ResearchNotes,
   ScriptBeat,
   ScriptGenre,
+  ScriptIntent,
+  ScriptPace,
   ScriptWorkspace,
   StoryboardClip,
   TopicCard,
@@ -36,6 +40,7 @@ import {
   estimatedShotCount,
   genrePackById,
   narrationFromBeats,
+  PLATFORM_OPTIONS,
   predictShots,
   validateForecast
 } from './scriptBudget';
@@ -50,6 +55,9 @@ export const EMPTY_RESEARCH: ResearchNotes = {
 
 export const EMPTY_MIX: ConceptMix = { hookFromId: null, structureFromId: null };
 
+export const TITLE_MIN_CHARS = 2;
+export const TITLE_MAX_CHARS = 24;
+
 export function createDefaultScriptWorkspace(): ScriptWorkspace {
   const durationBudget = buildDurationBudget({ platform: 'douyin', pace: 'medium', targetSeconds: 30 });
   return {
@@ -57,6 +65,7 @@ export function createDefaultScriptWorkspace(): ScriptWorkspace {
     gate: 'deep',
     intent: null,
     intentNotes: '',
+    lockedTitle: '',
     topicCards: [],
     selectedTopicId: null,
     researchNotes: { ...EMPTY_RESEARCH },
@@ -91,33 +100,42 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
   });
 
   const topicTitle = (project.topic || project.title || '').trim();
-  const card = topicTitle ? seedTopicCard(topicTitle) : null;
   const beats = hasCopy ? beatsFromClips(project.clips) : [];
   const forecastShots = hasCopy
     ? (project.clips.length >= 2 ? shotsFromClips(project.clips) : predictShots({ narration, beats, budget: durationBudget }))
     : [];
 
-  const workspace: ScriptWorkspace = {
-    stage: hasCopy ? 'copy' : 'intent',
-    gate: 'deep',
-    intent: hasCopy ? 'have-script' : topicTitle ? 'direction' : null,
-    intentNotes: topicTitle,
-    topicCards: card ? [card] : [],
-    selectedTopicId: card?.id || null,
-    researchNotes: { ...EMPTY_RESEARCH },
-    durationBudget,
-    beats,
-    fullNarration: narration,
-    speechSpans: [],
-    forecastShots,
-    directorNotes: [],
-    referenceUrl: '',
-    researchBrief: null,
-    referenceBreakdown: null,
-    conceptMix: { ...EMPTY_MIX },
-    genrePackId: null
-  };
-  return refreshWorkspaceDerived(workspace);
+  if (hasCopy) {
+    const card = topicTitle ? seedTopicCard(topicTitle) : null;
+    return refreshWorkspaceDerived({
+      ...createDefaultScriptWorkspace(),
+      stage: 'copy',
+      gate: 'deep',
+      intent: 'have-script',
+      intentNotes: topicTitle,
+      topicCards: card ? [card] : [],
+      selectedTopicId: card?.id || null,
+      durationBudget,
+      beats,
+      fullNarration: narration,
+      forecastShots
+    });
+  }
+
+  if (topicTitle) {
+    return refreshWorkspaceDerived(lockTitleFromIntent({
+      ...createDefaultScriptWorkspace(),
+      intent: 'have-title',
+      lockedTitle: topicTitle,
+      durationBudget,
+      stage: 'intent'
+    }, { jumpToDuration: false }));
+  }
+
+  return refreshWorkspaceDerived({
+    ...createDefaultScriptWorkspace(),
+    durationBudget
+  });
 }
 
 export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace {
@@ -140,6 +158,8 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     directorNotes: Array.isArray(raw.directorNotes) ? raw.directorNotes : [],
     fullNarration: raw.fullNarration || '',
     intentNotes: raw.intentNotes || '',
+    lockedTitle: raw.lockedTitle || '',
+    draftedTitle: raw.draftedTitle,
     referenceUrl: raw.referenceUrl || '',
     researchBrief: raw.researchBrief || null,
     referenceBreakdown: raw.referenceBreakdown || null,
@@ -158,11 +178,14 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
     usedChars,
     conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed
   });
-  const directorNotes = validateForecast({
-    budget: durationBudget,
-    shots: workspace.forecastShots,
-    beats: workspace.beats
-  });
+  const directorNotes = [
+    ...titleDirectorNotes({ ...workspace, durationBudget }),
+    ...validateForecast({
+      budget: durationBudget,
+      shots: workspace.forecastShots,
+      beats: workspace.beats
+    })
+  ];
   return { ...workspace, durationBudget, directorNotes };
 }
 
@@ -214,7 +237,9 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
     workspace.visualBible,
     workspace.forecastShots
   );
+  const next = { ...workspace, durationBudget, speechSpans, forecastShots };
   const directorNotes = [
+    ...titleDirectorNotes(next),
     ...validateForecast({ budget: durationBudget, shots: forecastShots, beats: workspace.beats }),
     ...gateSpeechSpans(speechSpans).map((message, index) => ({
       id: `span-gate-${index}`,
@@ -223,7 +248,7 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
       message
     }))
   ];
-  return { ...workspace, durationBudget, speechSpans, forecastShots, directorNotes };
+  return { ...next, directorNotes };
 }
 
 export function applyHoldToWorkspace(workspace: ScriptWorkspace, shotId: string, holdDuration: number): ScriptWorkspace {
@@ -378,6 +403,190 @@ export function seedTopicCard(title: string): TopicCard {
     completionFit: '沿用已有旁白',
     hookType: 'existing'
   };
+}
+
+export function titleCharCount(text: string): number {
+  return (text || '').trim().length;
+}
+
+export function isLockedTitleValid(title: string | undefined): boolean {
+  const n = titleCharCount(title || '');
+  return n >= TITLE_MIN_CHARS && n <= TITLE_MAX_CHARS;
+}
+
+export function looksLikeScript(text: string | undefined): boolean {
+  const value = (text || '').trim();
+  if (countNarrationChars(value) >= 40) return true;
+  return (value.match(/[。！？!?]/g) || []).length >= 2;
+}
+
+export function isShortTitleCandidate(text: string | undefined): boolean {
+  const value = (text || '').trim();
+  return value.length > 0 && value.length < TITLE_MAX_CHARS && !/[。！？!?]/.test(value);
+}
+
+export function waitingForTitleAngles(workspace: ScriptWorkspace): boolean {
+  if (workspace.intent !== 'have-title' || workspace.selectedTopicId) return false;
+  return workspace.topicCards.filter((card) => card.hookType !== 'locked-title').length >= 2;
+}
+
+export function hasUsableDraftTopic(workspace: ScriptWorkspace): boolean {
+  if (workspace.topicCards.some((card) => card.id === workspace.selectedTopicId)) return true;
+  if (workspace.intent === 'have-script' && (workspace.fullNarration || workspace.intentNotes).trim()) return true;
+  if (workspace.intent === 'have-title' && isLockedTitleValid(workspace.lockedTitle)) return true;
+  return Boolean(workspace.intentNotes.trim());
+}
+
+export function lockedTitleDurationReason(workspace: ScriptWorkspace): string {
+  const plat = PLATFORM_OPTIONS.find((item) => item.id === workspace.durationBudget.platform);
+  const label = plat?.label || workspace.durationBudget.platform;
+  return `建议 ${workspace.durationBudget.targetSeconds} 秒，因为平台「${label}」。标题已锁定，改秒数不会改标题。`;
+}
+
+export function seedLockedTopicCard(title: string, opts?: {
+  insight?: string;
+  genre?: ScriptGenre;
+  durationHint?: number;
+  paceHint?: ScriptPace;
+  conceptCount?: number;
+  structure?: NarrativeStructure;
+}): TopicCard {
+  const trimmed = title.trim();
+  return {
+    id: `topic-locked-${slugId(trimmed)}`,
+    title: trimmed,
+    hook: trimmed,
+    insight: (opts?.insight || '').trim() || trimmed,
+    genre: opts?.genre || '科普',
+    whyNow: '用户锁定标题，按这句展开，不换角度。',
+    durationHint: opts?.durationHint || 30,
+    paceHint: opts?.paceHint || 'medium',
+    conceptCount: opts?.conceptCount || 1,
+    risk: '标题还不是洞察；若口播只是复述标题，要补一句机制。',
+    completionFit: '锁题后定时长再写稿，不经过三张角度卡。',
+    hookType: 'locked-title',
+    structure: opts?.structure,
+    whyThisWorks: '用户已提交标题，写稿不得改题。'
+  };
+}
+
+export function lockTitleFromIntent(
+  workspace: ScriptWorkspace,
+  options?: { jumpToDuration?: boolean }
+): ScriptWorkspace {
+  const title = (workspace.lockedTitle || '').trim();
+  if (!isLockedTitleValid(title)) return workspace;
+  const pack = genrePackById(workspace.genrePackId);
+  const genre = pack?.id || '科普';
+  const durationHint = pack?.durationHint || workspace.durationBudget.targetSeconds || 30;
+  const paceHint = pack?.pace || workspace.durationBudget.pace || 'medium';
+  const card = seedLockedTopicCard(title, {
+    insight: workspace.intentNotes,
+    genre,
+    durationHint,
+    paceHint,
+    conceptCount: pack?.maxConcepts || 1,
+    structure: pack?.structure
+  });
+  const durationBudget = buildDurationBudget({
+    platform: workspace.durationBudget.platform,
+    pace: paceHint,
+    targetSeconds: durationHint,
+    usedChars: countNarrationChars(workspace.fullNarration),
+    conceptUsed: card.conceptCount,
+    lockedShotCount: workspace.durationBudget.lockedShotCount
+  });
+  return {
+    ...workspace,
+    lockedTitle: title,
+    topicCards: [card],
+    selectedTopicId: card.id,
+    durationBudget,
+    stage: options?.jumpToDuration === false ? workspace.stage : 'duration',
+    gate: workspace.gate
+  };
+}
+
+export function applyLockedTitleEdit(workspace: ScriptWorkspace, nextTitle: string): ScriptWorkspace {
+  const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId);
+  const trimmed = nextTitle.trim();
+  const topicCards = selected?.hookType === 'locked-title'
+    ? workspace.topicCards.map((card) => {
+      if (card.id !== selected.id) return card;
+      const insight = card.insight === selected.title ? (trimmed || card.insight) : card.insight;
+      const hook = card.hook === selected.title ? (trimmed || card.hook) : card.hook;
+      return { ...card, title: trimmed || card.title, hook, insight };
+    })
+    : workspace.topicCards;
+  return { ...workspace, lockedTitle: nextTitle, topicCards };
+}
+
+export function switchScriptIntent(workspace: ScriptWorkspace, intent: ScriptIntent): ScriptWorkspace {
+  let lockedTitle = workspace.lockedTitle || '';
+  let selectedTopicId = workspace.selectedTopicId;
+  let topicCards = workspace.topicCards;
+  if (intent === 'have-title') {
+    if (!lockedTitle.trim() && isShortTitleCandidate(workspace.intentNotes)) {
+      lockedTitle = workspace.intentNotes.trim();
+    }
+    const selected = topicCards.find((card) => card.id === selectedTopicId);
+    if (selected?.hookType === 'locked-title') {
+      if (!lockedTitle.trim()) lockedTitle = selected.title;
+    } else {
+      selectedTopicId = null;
+      topicCards = topicCards.filter((card) => card.hookType === 'locked-title');
+    }
+  }
+  return { ...workspace, intent, lockedTitle, selectedTopicId, topicCards };
+}
+
+export function adoptPastedScriptFromTitle(workspace: ScriptWorkspace): ScriptWorkspace {
+  const pasted = (workspace.lockedTitle || '').trim();
+  if (!pasted) return workspace;
+  return {
+    ...workspace,
+    intent: 'have-script',
+    intentNotes: pasted,
+    fullNarration: pasted,
+    lockedTitle: '',
+    selectedTopicId: null,
+    topicCards: [],
+    stage: 'intent'
+  };
+}
+
+function titleDirectorNotes(workspace: ScriptWorkspace): DirectorNote[] {
+  if (workspace.intent !== 'have-title') return [];
+  const notes: DirectorNote[] = [];
+  const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId);
+  const title = (selected?.title || workspace.lockedTitle || '').trim();
+  if (selected?.hookType === 'locked-title' && title) {
+    notes.push({
+      id: 'title-locked',
+      level: 'info',
+      target: 'hook',
+      message: `已锁定标题「${title}」，写稿不会改这句。`
+    });
+  }
+  if (looksLikeScript(workspace.lockedTitle)) {
+    notes.push({
+      id: 'title-looks-script',
+      level: 'warn',
+      target: 'hook',
+      message: '这更像口播。可改走「已有文案」做诊断拆分。'
+    });
+  }
+  const drafted = (workspace.draftedTitle || '').trim();
+  const current = (workspace.lockedTitle || '').trim();
+  if (countNarrationChars(workspace.fullNarration) >= 8 && drafted && current && current !== drafted) {
+    notes.push({
+      id: 'title-dirty',
+      level: 'warn',
+      target: 'hook',
+      message: '标题已改，口播还是旧的。要点「按预算写稿」才会按新标题重写。'
+    });
+  }
+  return notes;
 }
 
 function beatsFromClips(clips: StoryboardClip[]): ScriptBeat[] {
@@ -607,7 +816,7 @@ export function forecastToClips(
 
 export function workspaceTopicTitle(workspace: ScriptWorkspace, fallback = ''): string {
   const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId);
-  return selected?.title || workspace.intentNotes.trim() || fallback;
+  return selected?.title || (workspace.lockedTitle || '').trim() || workspace.intentNotes.trim() || fallback;
 }
 
 export function canApplyStoryboard(workspace: ScriptWorkspace): boolean {
@@ -666,7 +875,7 @@ export function fallbackTopicCards(seed: string, intent: ScriptWorkspace['intent
   const topic = seed.trim() || '一个值得拍的短视频主题';
   const variants: Array<Omit<TopicCard, 'id'>> = [
     {
-      title: topic.length > 18 ? topic.slice(0, 18) : topic,
+      title: intent === 'have-title' ? topic : (topic.length > 18 ? topic.slice(0, 18) : topic),
       hook: `${topic.replace(/[。！？!?]$/, '')}，但大多数人搞反了顺序。`,
       insight: '先拆一个常见误解，再给一个能带走的机制。',
       genre: intent === 'product' ? '带货' : '反常识',
