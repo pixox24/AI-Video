@@ -4,7 +4,7 @@ import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolve
 import { generateImageWithRetry } from './utils/imageGenerateClient';
 import { classifyImageError } from './utils/imageGenerateRetry';
 import { resolveSubtitleFontId } from './utils/subtitleFonts';
-import { applyTtsSettingsToProject, applyVoiceToProject, bailianTtsConcurrency, designedVoiceMatchesModel, isDesignedVoiceId, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
+import { applyTtsSettingsToProject, applyVoiceToProject, bailianTtsConcurrency, customVoiceBelongsToModel, isEnrollmentVoiceId, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
 import { findDesignedVoice } from './utils/voiceLibrary';
 import { hydrateActiveStylePack, localRewriteClipPrompt, presetStylePack, renderLine } from './utils/stylePack';
 import { beatToChinese, clipImagePromptArgs } from './utils/imagePrompt';
@@ -313,7 +313,7 @@ export default function App() {
       showStatusToast(message, { tone: 'warn', id: 'narration' });
       return;
     }
-    if (isDesignedVoiceId(project.audio.voiceCharacter) && !designedVoiceMatchesModel(project.audio.voiceCharacter, ttsForVoice.model)) {
+    if (isEnrollmentVoiceId(project.audio.voiceCharacter) && !customVoiceBelongsToModel(project.audio.voiceCharacter, ttsForVoice.model)) {
       const message = '这条设计音色不属于当前 3.0 模型';
       setNarrationError(message);
       showStatusToast(message, { tone: 'warn', id: 'narration' });

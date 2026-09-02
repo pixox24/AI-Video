@@ -37,6 +37,7 @@ class AudioEngine {
   private audioDuckingEnabled: boolean = true;
   private duckingAnimFrame: number | null = null;
   private ttsApi: unknown = null;
+  private urlPreviewSrc: string | null = null;
   private fullNarrationAudio: HTMLAudioElement | null = null;
   private fullNarrationUrl: string | null = null;
   private narrationForceSeek = false;
@@ -663,10 +664,50 @@ class AudioEngine {
     }
   }
 
+  /**
+   * Play a ready audio URL as the single voice preview. A second click on the same URL stops it.
+   * Always stops TTS preview, BGM preview, and any previous URL preview first.
+   */
+  public playUrlPreview(url: string, onEnd?: () => void): boolean {
+    const src = String(url || '').trim();
+    if (!src) return false;
+    const current = this.activeAudioElement;
+    if (current && this.urlPreviewSrc === src && !current.paused && !current.ended) {
+      this.stopNarration();
+      return false;
+    }
+    this.stopPreviewBgm();
+    this.stopNarration();
+    const session = this.voiceSessionToken;
+    const audio = new Audio(src);
+    audio.preload = 'auto';
+    this.activeAudioElement = audio;
+    this.urlPreviewSrc = src;
+    this.setVoicePreviewActive(true);
+    this.applyDucking(true);
+    const finish = () => {
+      if (this.voiceSessionToken !== session) return;
+      this.setVoicePreviewActive(false);
+      this.applyDucking(false);
+      this.urlPreviewSrc = null;
+      if (this.activeAudioElement === audio) this.activeAudioElement = null;
+      if (onEnd) onEnd();
+    };
+    audio.onended = finish;
+    audio.onerror = finish;
+    void audio.play().then(() => {
+      if (this.voiceSessionToken !== session) return;
+    }).catch(() => {
+      finish();
+    });
+    return true;
+  }
+
   public stopNarration() {
     this.voiceSessionToken++;
     this.setVoicePreviewActive(false);
     this.applyDucking(false);
+    this.urlPreviewSrc = null;
 
     if (this.activeAudioElement) {
       const audio = this.activeAudioElement;

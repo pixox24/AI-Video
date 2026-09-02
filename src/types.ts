@@ -213,7 +213,7 @@ export interface DesignedVoiceEntry {
   previewAudioUrl?: string;
   createdAt: number;
   updatedAt: number;
-  source: 'designed';
+  source: 'designed' | 'imported' | 'cloned';
 }
 
 export interface CustomVideoApiConfig {

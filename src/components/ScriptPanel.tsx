@@ -69,6 +69,7 @@ import {
   applyResearchNoteToTopic,
   canApplyStoryboard,
   diagnoseExistingScript,
+  narrationForDiagnose,
   fallbackDraft,
   fallbackTopicCards,
   forecastScriptHash,
@@ -207,7 +208,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   onTogglePlay,
   sentenceGap = 0.2
 }) => {
-  const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | 'bible' | null>(null);
+  const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | 'bible' | 'diagnose' | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [previewPlaying, setPreviewPlaying] = useState(false);
@@ -563,28 +564,36 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   };
 
   const handleDiagnose = async () => {
-    const pasted = (workspace.fullNarration || workspace.intentNotes || '').trim();
+    const pasted = narrationForDiagnose(workspace);
     if (countNarrationChars(pasted) < 8) {
       setError('先把已有口播粘贴进来');
       return;
     }
-    const diagnosed = diagnoseExistingScript({
-      ...workspace,
-      fullNarration: pasted,
-      intentNotes: workspace.intentNotes || pasted,
-      speechSpans: [],
-      gate: 'fast'
-    });
-    const withBible = await ensureVisualBible(diagnosed, pasted);
-    const spanned = await refineSpeechSpans(withBible, pasted);
-    const next = await refineCoverage(spanned);
-    onChange(next);
-    setStatus(
-      withBible.visualBible?.mode === 'story'
-        ? '已按整句切口播，并编了画面圣经。'
-        : '已按整句切口播；一句里若有对照，会切两张图。'
-    );
+    const previous = (workspace.fullNarration || '').replace(/\s+/g, '');
+    const scriptChanged = previous !== pasted.replace(/\s+/g, '');
+    setBusy('diagnose');
     setError(null);
+    try {
+      const diagnosed = diagnoseExistingScript({
+        ...workspace,
+        fullNarration: pasted,
+        intentNotes: pasted,
+        speechSpans: [],
+        visualBible: scriptChanged && !workspace.visualBible?.pinned ? null : workspace.visualBible,
+        gate: 'fast'
+      });
+      const withBible = await ensureVisualBible(diagnosed, pasted);
+      const spanned = await refineSpeechSpans(withBible, pasted);
+      const next = await refineCoverage(spanned);
+      onChange(next);
+      setStatus(
+        withBible.visualBible?.mode === 'story'
+          ? '已按整句切口播，并编了画面圣经。'
+          : '已按整句切口播；一句里若有对照，会切两张图。'
+      );
+    } finally {
+      setBusy(null);
+    }
   };
 
   const applyMode = resolveStoryboardApplyMode({
@@ -972,7 +981,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           {workspace.stage === 'intent' && (
             <IntentStage
               workspace={workspace}
-              busy={busy === 'topics' || busy === 'reference'}
+              busy={busy === 'topics' || busy === 'reference' || busy === 'diagnose'}
               focusTitle={focusTitle}
               onIntent={(intent) => commit(switchScriptIntent(workspace, intent))}
               onNotes={(intentNotes) => commit({ ...workspace, intentNotes })}

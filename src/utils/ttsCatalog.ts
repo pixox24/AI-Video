@@ -1,5 +1,6 @@
 import { AudioConfig, CustomTtsApiConfig, ProjectSettings, VideoProject } from '../types';
 import { resolveTtsApi } from './presets';
+import { findDesignedVoice } from './voiceLibrary';
 
 export interface TtsVoiceOption {
   id: string;
@@ -183,12 +184,62 @@ export function isDesignedVoiceId(id?: string | null): boolean {
   return /^qwen-audio-3\.0-tts-(plus|flash)-vd-/i.test((id || '').trim());
 }
 
+/** 声音设计 `-vd-`，或复刻 `{prefix}-{unique}`（余下部分带连字符）。 */
+export function isEnrollmentVoiceId(id?: string | null): boolean {
+  const match = (id || '').trim().match(/^qwen-audio-3\.0-tts-(plus|flash)-(.+)$/i);
+  if (!match) return false;
+  const rest = match[2];
+  return rest.toLowerCase().startsWith('vd-') || rest.includes('-');
+}
+
+export function inferTargetModelFromVoiceId(id?: string | null): string {
+  const value = (id || '').trim();
+  if (/^qwen-audio-3\.0-tts-plus-/i.test(value)) return 'qwen-audio-3.0-tts-plus';
+  if (/^qwen-audio-3\.0-tts-flash-/i.test(value)) return 'qwen-audio-3.0-tts-flash';
+  return '';
+}
+
+export function sanitizePastedVoiceId(raw: string): string {
+  const text = String(raw || '').trim().replace(/^['"`]|['"`]$/g, '');
+  const full = text.match(/qwen-audio-3\.0-tts-(?:plus|flash)-[A-Za-z0-9_-]+/i);
+  if (full) return full[0];
+  const system = text.match(/\b(longan[a-z0-9_]+|loong[a-z0-9_]+)\b/i);
+  if (system) return system[1];
+  return text.replace(/^voice\s*[=:：]\s*/i, '').trim();
+}
+
+export function isMissingEnrollmentError(error?: string | null): boolean {
+  return /required resource not exist|resource not exist|not exist|不存在/i.test(String(error || ''));
+}
+
+/** 控制台音色库是官方基础音色，plus/flash 同一后缀可互转。 */
+export function libraryVoiceCandidates(voiceId: string, model?: string | null): string[] {
+  const id = sanitizePastedVoiceId(voiceId);
+  if (!id) return [];
+  const ids: string[] = [];
+  const push = (value: string) => {
+    if (value && !ids.includes(value)) ids.push(value);
+  };
+  const match = id.match(/^qwen-audio-3\.0-tts-(plus|flash)-(.+)$/i);
+  const suffix = match?.[2] || (/^[A-Za-z0-9_]+$/.test(id) ? id : '');
+  if (isQwenAudioPlusModel(model) && suffix) push(`qwen-audio-3.0-tts-plus-${suffix}`);
+  if (isQwenAudioFlashModel(model) && suffix) push(`qwen-audio-3.0-tts-flash-${suffix}`);
+  push(id);
+  return ids;
+}
+
+export function customVoiceBelongsToModel(voiceId?: string | null, model?: string | null): boolean {
+  const id = (voiceId || '').trim();
+  if (!id) return false;
+  if (isQwenAudioPlusModel(model)) return /^qwen-audio-3\.0-tts-plus-/i.test(id);
+  if (isQwenAudioFlashModel(model)) return /^qwen-audio-3\.0-tts-flash-/i.test(id);
+  return false;
+}
+
 export function designedVoiceMatchesModel(voiceId?: string | null, model?: string | null): boolean {
   const id = (voiceId || '').trim();
-  if (!isDesignedVoiceId(id)) return false;
-  if (isQwenAudioPlusModel(model)) return /^qwen-audio-3\.0-tts-plus-vd-/i.test(id);
-  if (isQwenAudioFlashModel(model)) return /^qwen-audio-3\.0-tts-flash-vd-/i.test(id);
-  return false;
+  if (!customVoiceBelongsToModel(id, model)) return false;
+  return isDesignedVoiceId(id) || isEnrollmentVoiceId(id);
 }
 
 export function isVoiceDesignAvailable(api?: CustomTtsApiConfig): boolean {
@@ -205,12 +256,33 @@ export function resolveBailianVoiceDesignEndpoint(endpoint?: string | null): str
 }
 
 function remapAudio30BaseVoice(voice: string, model?: string | null): string | null {
-  if (isDesignedVoiceId(voice)) return null;
+  if (isEnrollmentVoiceId(voice) || isDesignedVoiceId(voice)) return null;
   const match = voice.match(/^qwen-audio-3\.0-tts-(plus|flash)-(.+)$/i);
   if (!match) return null;
   if (isQwenAudioPlusModel(model)) return `qwen-audio-3.0-tts-plus-${match[2]}`;
   if (isQwenAudioFlashModel(model) || isQwenAudioTtsModel(model)) return `qwen-audio-3.0-tts-flash-${match[2]}`;
   return null;
+}
+
+export function remapLibraryVoiceForModel(voiceId: string, model?: string | null): string | null {
+  return remapAudio30BaseVoice(voiceId, model);
+}
+
+export function shelfVoiceForModel(
+  voiceId: string,
+  model?: string | null,
+  targetModel?: string | null
+): { ok: boolean; voiceId: string } {
+  const id = (voiceId || '').trim();
+  if (!id) return { ok: false, voiceId: id };
+  if (customVoiceBelongsToModel(id, model)) return { ok: true, voiceId: id };
+  if (voicesForTtsModel(model).some((item) => item.id === id)) return { ok: true, voiceId: id };
+  const remapped = remapLibraryVoiceForModel(id, model);
+  if (remapped) return { ok: true, voiceId: remapped };
+  if ((targetModel || '').trim() && (targetModel || '').trim() === (model || '').trim()) {
+    return { ok: true, voiceId: id };
+  }
+  return { ok: false, voiceId: id };
 }
 
 function mapVoiceToModel(voiceId: string, model?: string | null): string {
@@ -302,8 +374,8 @@ export function resolveTtsVoiceId(voiceId: string | null | undefined, api?: Cust
   const usingBailian = resolved.provider === 'bailian' && resolved.enabled !== false && resolved.apiKey.trim();
   if (usingBailian) {
     if (trimmed) {
-      if (designedVoiceMatchesModel(trimmed, resolved.model)) return trimmed;
-      if (isDesignedVoiceId(trimmed)) return defaultVoiceForModel(resolved.model);
+      if (customVoiceBelongsToModel(trimmed, resolved.model)) return trimmed;
+      if (isEnrollmentVoiceId(trimmed) || isDesignedVoiceId(trimmed)) return defaultVoiceForModel(resolved.model);
       const mapped = mapVoiceToModel(trimmed, resolved.model);
       if (catalog.some((item) => item.id === mapped)) return mapped;
       const remappedBase = remapAudio30BaseVoice(trimmed, resolved.model);
@@ -339,7 +411,16 @@ export function applyVoiceToProject(project: Pick<VideoProject, 'audio' | 'setti
   settings: ProjectSettings;
 } {
   const api = resolveTtsApi(project.settings.customTtsApi);
-  const voice = resolveTtsVoiceId(voiceId, api);
+  const trimmed = (voiceId || '').trim();
+  const libraryHit = findDesignedVoice(trimmed);
+  const resolved = libraryHit
+    ? shelfVoiceForModel(libraryHit.voiceId, api.model, libraryHit.targetModel)
+    : { ok: false, voiceId: trimmed };
+  const voice = resolved.ok
+    ? resolved.voiceId
+    : libraryHit && libraryHit.status === 'ok'
+      ? libraryHit.voiceId
+      : resolveTtsVoiceId(trimmed, api);
   return {
     audio: { ...project.audio, voiceCharacter: voice },
     settings: {

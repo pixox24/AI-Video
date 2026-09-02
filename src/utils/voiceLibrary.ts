@@ -24,7 +24,10 @@ function loadRaw(): DesignedVoiceEntry[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item) => item && typeof item.voiceId === 'string' && item.source === 'designed');
+    return parsed.filter((item) => {
+      if (!item || typeof item.voiceId !== 'string' || !item.voiceId.trim()) return false;
+      return !item.source || item.source === 'designed' || item.source === 'imported' || item.source === 'cloned';
+    });
   } catch {
     return [];
   }
@@ -77,7 +80,7 @@ export function normalizeDesignedVoiceStatus(raw?: string | null): DesignedVoice
 }
 
 export function saveDesignedVoice(
-  input: Omit<DesignedVoiceEntry, 'id' | 'createdAt' | 'updatedAt' | 'source'> & { id?: string }
+  input: Omit<DesignedVoiceEntry, 'id' | 'createdAt' | 'updatedAt'> & { id?: string; source?: DesignedVoiceEntry['source'] }
 ): DesignedVoiceEntry[] {
   const now = Date.now();
   const current = loadRaw();
@@ -91,7 +94,7 @@ export function saveDesignedVoice(
             ...item,
             ...input,
             id: existing.id,
-            source: 'designed' as const,
+            source: input.source || existing.source,
             updatedAt: now
           }
         : item
@@ -114,7 +117,7 @@ export function saveDesignedVoice(
     previewAudioUrl: input.previewAudioUrl,
     createdAt: now,
     updatedAt: now,
-    source: 'designed'
+    source: input.source || 'designed'
   };
   const next = [entry, ...current];
   persist(next);

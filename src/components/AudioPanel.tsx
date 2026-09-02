@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio } from 'lucide-react';
+import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio, Loader2 } from 'lucide-react';
 import { AudioConfig, CustomTtsApiConfig, DesignedVoiceEntry, ScriptGenre, StoryboardClip } from '../types';
 import { BGM_GENRE_ORDER, BGM_TRACKS, DEFAULT_BGM_TRACK_ID, bgmTracksForGenre } from '../utils/presets';
 import { audioEngine } from '../utils/audioEngine';
 import { GENRE_PACKS } from '../utils/scriptBudget';
 import {
-  designedVoiceMatchesModel,
-  isDesignedVoiceId,
+  customVoiceBelongsToModel,
+  isEnrollmentVoiceId,
+  shelfVoiceForModel,
   ttsEngineLabel,
   ttsSourceKey,
   ttsSupportsSpeechRate,
@@ -19,6 +20,38 @@ import { ToolRail } from './ToolRail';
 import { SentenceGapControl } from './SentenceGapControl';
 import { resolveSentenceGap } from '../utils/sentenceGap';
 import { VoiceDesignWorkshop } from './VoiceDesignWorkshop';
+
+function VoicePlayButton({
+  active,
+  busy,
+  onClick
+}: {
+  active: boolean;
+  busy?: boolean;
+  onClick: (event: React.MouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy && !active}
+      className={`w-8 h-8 rounded-full border flex items-center justify-center flex-shrink-0 cursor-pointer ${
+        active
+          ? 'border-amber-500 bg-amber-500/20 text-amber-300'
+          : 'border-[#3a3a4a] text-zinc-300 hover:text-amber-300 hover:border-amber-500/40'
+      } disabled:opacity-60`}
+      aria-label={active ? '停止试听' : '试听'}
+    >
+      {busy && !active ? (
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+      ) : active ? (
+        <Pause className="w-3.5 h-3.5" />
+      ) : (
+        <Play className="w-3.5 h-3.5 fill-current" />
+      )}
+    </button>
+  );
+}
 
 interface AudioPanelProps {
   config: AudioConfig;
@@ -56,6 +89,8 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   clips = []
 }) => {
   const [isPlayingPreviewVoice, setIsPlayingPreviewVoice] = useState(false);
+  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
+  const [previewBusyVoiceId, setPreviewBusyVoiceId] = useState<string | null>(null);
   const [previewingBgmId, setPreviewingBgmId] = useState<string | null>(null);
   const [customTrackName, setCustomTrackName] = useState<string | null>(null);
   const [customTrackSize, setCustomTrackSize] = useState<string | null>(null);
@@ -82,8 +117,12 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   const mismatchedDesigned = voiceLibrary.filter((item) => item.targetModel !== currentModel);
   const selectedDesigned = voiceLibrary.find((item) => item.voiceId === config.voiceCharacter);
   const designedBlocked = Boolean(
-    (selectedDesigned && (selectedDesigned.status !== 'ok' || selectedDesigned.targetModel !== currentModel))
-    || (isDesignedVoiceId(config.voiceCharacter) && !designedVoiceMatchesModel(config.voiceCharacter, currentModel))
+    (selectedDesigned && selectedDesigned.status !== 'ok')
+    || (
+      isEnrollmentVoiceId(config.voiceCharacter)
+      && !customVoiceBelongsToModel(config.voiceCharacter, currentModel)
+      && !shelfVoiceForModel(config.voiceCharacter, currentModel, selectedDesigned?.targetModel).ok
+    )
   );
 
   const refreshVoiceLibrary = () => setVoiceLibrary(loadVoiceLibrary());
@@ -94,14 +133,6 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   };
 
   const handleSelectDesigned = (entry: DesignedVoiceEntry) => {
-    if (entry.targetModel !== currentModel) {
-      const needPlus = entry.targetModel.includes('plus');
-      showStatusToast(needPlus ? '换回 Audio 3.0 Plus 才能用这条设计音色' : '换回 Audio 3.0 Flash 才能用这条设计音色', {
-        tone: 'warn',
-        id: 'voice-design'
-      });
-      return;
-    }
     if (entry.status === 'deploying') {
       showStatusToast('这条音色还在审核，通过后再选用', { tone: 'warn', id: 'voice-design' });
       return;
@@ -110,18 +141,84 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       showStatusToast('这条音色不可用', { tone: 'warn', id: 'voice-design' });
       return;
     }
-    selectVoice(entry.voiceId);
+    const usable = shelfVoiceForModel(entry.voiceId, currentModel, entry.targetModel);
+    selectVoice(usable.ok ? usable.voiceId : entry.voiceId);
   };
 
-  const playDesignedPreview = (entry: DesignedVoiceEntry, event: React.MouseEvent) => {
-    event.stopPropagation();
-    if (!entry.previewAudioUrl) return;
-    onPauseTimeline?.();
-    audioEngine.stopPreviewBgm();
+  const stopVoicePreview = () => {
     audioEngine.stopNarration();
-    const audio = new Audio(entry.previewAudioUrl);
-    void audio.play().catch(() => {
-      showStatusToast('预览没播出来，请再点一次', { tone: 'warn', id: 'voice-design' });
+    setIsPlayingPreviewVoice(false);
+    setPreviewingVoiceId(null);
+    setPreviewBusyVoiceId(null);
+    hideStatusToast('voice-preview');
+  };
+
+  const handlePreviewVoice = (voiceId: string, cachedUrl?: string, event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    if (previewingBgmId) {
+      audioEngine.stopPreviewBgm();
+      setPreviewingBgmId(null);
+    }
+    onPauseTimeline?.();
+
+    if (previewingVoiceId === voiceId && isPlayingPreviewVoice) {
+      stopVoicePreview();
+      return;
+    }
+
+    setPreviewingVoiceId(voiceId);
+    setIsPlayingPreviewVoice(true);
+
+    if (cachedUrl) {
+      setPreviewBusyVoiceId(null);
+      const started = audioEngine.playUrlPreview(cachedUrl, () => {
+        setIsPlayingPreviewVoice(false);
+        setPreviewingVoiceId(null);
+      });
+      if (!started) {
+        setIsPlayingPreviewVoice(false);
+        setPreviewingVoiceId(null);
+      }
+      return;
+    }
+
+    const previewKey = makeVoicePreviewKey(ttsSourceKey(ttsApi, voiceId), 1);
+    const cached = getTtsPreviewUrl(previewKey);
+    if (!cached) {
+      setPreviewBusyVoiceId(voiceId);
+      showStatusToast('正在合成试听…', { tone: 'progress', id: 'voice-preview', durationMs: 0 });
+    }
+    void audioEngine.speakNarration(
+      VOICE_PREVIEW_TEXT,
+      voiceId,
+      config.speechRate,
+      () => {
+        setIsPlayingPreviewVoice(false);
+        setPreviewingVoiceId(null);
+        setPreviewBusyVoiceId(null);
+      },
+      { persistPreview: true }
+    ).then((result) => {
+      setPreviewBusyVoiceId(null);
+      if (result?.cancelled) {
+        hideStatusToast('voice-preview');
+        return;
+      }
+      if (!result?.played) {
+        hideStatusToast('voice-preview');
+        setIsPlayingPreviewVoice(false);
+        setPreviewingVoiceId(null);
+        showStatusToast('试听合成了，但没有播出来，请再点一次', { tone: 'warn', id: 'voice-preview' });
+        return;
+      }
+      if (result.fromCache) {
+        hideStatusToast('voice-preview');
+        return;
+      }
+      showStatusToast('试听已缓存，同一音色下次不再请求', { tone: 'ok', id: 'voice-preview' });
+    }).catch(() => {
+      hideStatusToast('voice-preview');
+      stopVoicePreview();
     });
   };
 
@@ -153,6 +250,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
     });
     const unsubscribeVoice = audioEngine.subscribeVoicePreview((playing) => {
       setIsPlayingPreviewVoice(playing);
+      if (!playing) {
+        setPreviewingVoiceId(null);
+        setPreviewBusyVoiceId(null);
+      }
     });
 
     return () => {
@@ -168,61 +269,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
     audioEngine.setAudioDucking(config.audioDucking !== false);
   }, [config.audioDucking]);
 
-  // Test Voiceover (exclusive)
-  const handleTestVoice = () => {
-    // Stop any ongoing BGM preview to keep voice crystal clear
-    if (previewingBgmId) {
-      audioEngine.stopPreviewBgm();
-      setPreviewingBgmId(null);
-    }
-    onPauseTimeline?.();
-
-    if (isPlayingPreviewVoice) {
-      audioEngine.stopNarration();
-      setIsPlayingPreviewVoice(false);
-    } else {
-      setIsPlayingPreviewVoice(true);
-      const previewKey = makeVoicePreviewKey(ttsSourceKey(ttsApi, config.voiceCharacter), 1);
-      const cached = getTtsPreviewUrl(previewKey);
-      if (!cached) {
-        showStatusToast('正在合成试听音色…', { tone: 'progress', id: 'voice-preview', durationMs: 0 });
-      }
-      void audioEngine.speakNarration(
-        VOICE_PREVIEW_TEXT,
-        config.voiceCharacter,
-        config.speechRate,
-        () => setIsPlayingPreviewVoice(false),
-        { persistPreview: true }
-      ).then((result) => {
-        if (result?.cancelled) {
-          hideStatusToast('voice-preview');
-          return;
-        }
-        if (!result?.played) {
-          hideStatusToast('voice-preview');
-          setIsPlayingPreviewVoice(false);
-          showStatusToast('试听合成了，但没有播出来，请再点一次', { tone: 'warn', id: 'voice-preview' });
-          return;
-        }
-        if (result.fromCache) {
-          hideStatusToast('voice-preview');
-          return;
-        }
-        showStatusToast('试听已缓存，同一音色下次不再请求', { tone: 'ok', id: 'voice-preview' });
-      }).catch(() => {
-        hideStatusToast('voice-preview');
-        setIsPlayingPreviewVoice(false);
-      });
-    }
-  };
-
   // Exclusively Audition / Preview a BGM track (Only plays sample, does NOT force select)
   const handleAuditionTrack = (trackId: string, customUrl?: string) => {
     // If voiceover preview is playing, stop it
-    if (isPlayingPreviewVoice) {
-      audioEngine.stopNarration();
-      setIsPlayingPreviewVoice(false);
-    }
+    if (isPlayingPreviewVoice) stopVoicePreview();
     onPauseTimeline?.();
 
     if (previewingBgmId === trackId) {
@@ -256,10 +306,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       bgmEnabled: true
     });
 
-    if (isPlayingPreviewVoice) {
-      audioEngine.stopNarration();
-      setIsPlayingPreviewVoice(false);
-    }
+    if (isPlayingPreviewVoice) stopVoicePreview();
 
     if (timelinePlaying) {
       audioEngine.stopPreviewBgm();
@@ -443,14 +490,18 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
             onNeedSettings={onOpenSettings}
           />
 
+          <p className="text-[11px] text-zinc-500">点卡片选用，点圆形播放键试听。试听不必先选中。</p>
+
           {(matchingDesigned.length > 0 || mismatchedDesigned.length > 0) && (
             <div className="space-y-2">
               <div className="text-[11px] text-zinc-400">我的音色</div>
               <div className="grid grid-cols-1 gap-2">
                 {[...matchingDesigned, ...mismatchedDesigned].map((entry) => {
-                  const isSelected = config.voiceCharacter === entry.voiceId;
-                  const mismatch = entry.targetModel !== currentModel;
-                  const usable = !mismatch && entry.status === 'ok';
+                  const usableVoice = shelfVoiceForModel(entry.voiceId, currentModel, entry.targetModel);
+                  const isSelected = config.voiceCharacter === entry.voiceId || config.voiceCharacter === usableVoice.voiceId;
+                  const usable = entry.status === 'ok';
+                  const playId = usableVoice.ok ? usableVoice.voiceId : entry.voiceId;
+                  const isPreviewing = previewingVoiceId === playId || previewingVoiceId === entry.voiceId;
                   return (
                     <div
                       key={entry.id}
@@ -479,16 +530,12 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                           </div>
                           <div className="text-[10px] text-zinc-400 line-clamp-2">{entry.prompt}</div>
                         </div>
-                        <div className="flex items-center gap-1 flex-shrink-0">
-                          {entry.previewAudioUrl && (
-                            <button
-                              type="button"
-                              onClick={(event) => playDesignedPreview(entry, event)}
-                              className="w-6 h-6 rounded-full border border-[#3a3a4a] text-zinc-300 hover:text-amber-300 flex items-center justify-center cursor-pointer"
-                            >
-                              <Play className="w-3 h-3 fill-current" />
-                            </button>
-                          )}
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <VoicePlayButton
+                            active={isPreviewing && isPlayingPreviewVoice}
+                            busy={previewBusyVoiceId === playId || previewBusyVoiceId === entry.voiceId}
+                            onClick={(event) => handlePreviewVoice(playId, entry.previewAudioUrl, event)}
+                          />
                           <button
                             type="button"
                             onClick={(event) => {
@@ -497,9 +544,10 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                               setVoiceLibrary(next);
                               showStatusToast('已从货架移除', { tone: 'ok', id: 'voice-design' });
                             }}
-                            className="w-6 h-6 rounded-full border border-[#3a3a4a] text-zinc-500 hover:text-rose-300 flex items-center justify-center cursor-pointer"
+                            className="w-8 h-8 rounded-full border border-[#3a3a4a] text-zinc-500 hover:text-rose-300 flex items-center justify-center cursor-pointer"
+                            aria-label="从货架移除"
                           >
-                            <Trash2 className="w-3 h-3" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                           {isSelected && (
                             <div className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center text-black">
@@ -519,18 +567,19 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
           <div className="grid grid-cols-1 gap-2">
             {visibleVoices.map((vc) => {
               const isSelected = config.voiceCharacter === vc.id;
+              const isPreviewing = previewingVoiceId === vc.id;
               return (
                 <div
                   key={vc.id}
                   id={`voice-char-${vc.id}`}
                   onClick={() => selectVoice(vc.id)}
-                  className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                  className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-2 ${
                     isSelected
                       ? 'bg-[#252530] border-amber-500 ring-1 ring-amber-500/40 text-zinc-100'
                       : 'bg-[#1b1b22] border-[#292934] text-zinc-400 hover:border-[#3d3d4e] hover:bg-[#1f1f28]'
                   }`}
                 >
-                  <div className="space-y-0.5">
+                  <div className="min-w-0 space-y-0.5">
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-xs text-zinc-100">{vc.name}</span>
                       <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-amber-400 rounded-full font-medium">
@@ -539,12 +588,18 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                     </div>
                     <div className="text-[10px] text-zinc-400">{vc.desc}</div>
                   </div>
-
-                  {isSelected && (
-                    <div className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center text-black flex-shrink-0">
-                      <Check className="w-2.5 h-2.5 stroke-[3]" />
-                    </div>
-                  )}
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <VoicePlayButton
+                      active={isPreviewing && isPlayingPreviewVoice}
+                      busy={previewBusyVoiceId === vc.id}
+                      onClick={(event) => handlePreviewVoice(vc.id, undefined, event)}
+                    />
+                    {isSelected && (
+                      <div className="w-4 h-4 rounded-full bg-amber-500 flex items-center justify-center text-black">
+                        <Check className="w-2.5 h-2.5 stroke-[3]" />
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -572,23 +627,6 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                 <p className="text-[10px] text-zinc-500">当前模型不会吃语速滑条。换 Audio 3.0 后可在合成时调语速。</p>
               )}
             </div>
-
-            <button
-              onClick={handleTestVoice}
-              className="w-full py-2 bg-[#22222c] hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer text-xs font-medium"
-            >
-              {isPlayingPreviewVoice ? (
-                <>
-                  <Pause className="w-3.5 h-3.5" />
-                  停止试听配音
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  试听当前音色
-                </>
-              )}
-            </button>
           </div>
         </div>
 

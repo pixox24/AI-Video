@@ -18,6 +18,7 @@ import type { ScriptGenre, StylePack, VisualBible } from "./src/types";
 import { joinClipsForTts as joinClipsForTtsShared, utterancesFromClips } from "./src/utils/narrationTrack";
 import {
   bailianTtsConcurrency,
+  inferTargetModelFromVoiceId,
   isQwenAudioFlashModel,
   isQwenAudioPlusModel,
   isQwenAudioTtsModel,
@@ -4003,10 +4004,11 @@ app.post("/api/audio/voice-design/query", async (req, res) => {
       });
     }
     const output = queried.data?.output || {};
+    const voiceId = String(output.voice_id || id);
     return res.json({
       ok: true,
-      voiceId: String(output.voice_id || id),
-      targetModel: String(output.target_model || ""),
+      voiceId,
+      targetModel: String(output.target_model || inferTargetModelFromVoiceId(voiceId) || ""),
       status: normalizeEnrollmentStatus(output.status),
       prompt: String(output.voice_prompt || ""),
       previewText: String(output.preview_text || "")

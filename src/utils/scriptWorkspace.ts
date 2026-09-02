@@ -189,8 +189,18 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
   return { ...workspace, durationBudget, directorNotes };
 }
 
+/** Intent-stage paste lives in intentNotes; the copy editor is fullNarration. */
+export function narrationForDiagnose(workspace: ScriptWorkspace): string {
+  const notes = (workspace.intentNotes || '').trim();
+  const full = (workspace.fullNarration || '').trim();
+  const lateStage = workspace.stage === 'copy' || workspace.stage === 'beats' || workspace.stage === 'rhythm';
+  if (lateStage) return full || notes;
+  if (countNarrationChars(notes) >= 8) return notes;
+  return full || notes;
+}
+
 export function diagnoseExistingScript(workspace: ScriptWorkspace): ScriptWorkspace {
-  const narration = (workspace.fullNarration || workspace.intentNotes || '').trim();
+  const narration = (workspace.fullNarration || narrationForDiagnose(workspace)).trim();
   const chars = countNarrationChars(narration);
   const durationBudget = budgetFromWordCount(
     Math.max(chars, 8),
@@ -537,7 +547,11 @@ export function switchScriptIntent(workspace: ScriptWorkspace, intent: ScriptInt
       topicCards = topicCards.filter((card) => card.hookType === 'locked-title');
     }
   }
-  return { ...workspace, intent, lockedTitle, selectedTopicId, topicCards };
+  let intentNotes = workspace.intentNotes;
+  if (intent === 'have-script' && countNarrationChars(intentNotes) < 8 && countNarrationChars(workspace.fullNarration) >= 8) {
+    intentNotes = workspace.fullNarration;
+  }
+  return { ...workspace, intent, lockedTitle, selectedTopicId, topicCards, intentNotes };
 }
 
 export function adoptPastedScriptFromTitle(workspace: ScriptWorkspace): ScriptWorkspace {
