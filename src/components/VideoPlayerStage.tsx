@@ -12,18 +12,17 @@ import {
   Camera,
   Layers
 } from 'lucide-react';
-import { StoryboardClip, SubtitleConfig, AudioConfig, ProjectSettings } from '../types';
+import { StoryboardClip, SubtitleConfig, AudioConfig, ProjectSettings, OutroConfig } from '../types';
 import { audioEngine } from '../utils/audioEngine';
-import { calculateSubtitleLayout } from '../utils/subtitleFormatter';
+import { drawClipSubtitles } from '../utils/subtitleRenderer';
+import { outroFadeAlpha, outroTimeline, resolveOutro } from '../utils/outro';
 import { clipShotNarration, isNarrationTrackFresh, mapNarrationToTimeline, mapTimelineToNarration } from '../utils/narrationTrack';
 import { setPlayhead } from '../utils/playhead';
 import { resolveTtsApi } from '../utils/presets';
 import { showStatusToast } from '../utils/statusToast';
 import {
   loadStudioFont,
-  resolveSubtitleFontId,
-  resolveSubtitleTypeface,
-  subtitleCanvasFont
+  resolveSubtitleFontId
 } from '../utils/subtitleFonts';
 
 function formatTimecode(sec: number) {
@@ -73,6 +72,11 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   const timeRef = useRef<number>(currentTime);
   const lastUiPushRef = useRef<number>(0);
   const wasPlayingRef = useRef<boolean>(isPlaying);
+  const outroConfigRef = useRef<OutroConfig>(resolveOutro(settings));
+
+  useEffect(() => {
+    outroConfigRef.current = resolveOutro(settings);
+  }, [settings]);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const overlayTimeRef = useRef<HTMLSpanElement | null>(null);
 
@@ -293,7 +297,15 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
     // Draw Subtitles on Canvas
     if (subtitles.enabled && clipShotNarration(clip)) {
-      drawSubtitles(ctx, width, height, clip, subtitles, progress);
+      drawClipSubtitles(ctx, width, height, clip, subtitles, progress, clipShotNarration(clip));
+    }
+
+    // Outro fade-to-black: 最后一镜收束，字幕随画面一起沉入黑场
+    const outro = outroTimeline(clips, resolveOutro(settings));
+    const alpha = outroFadeAlpha(outro, time);
+    if (alpha > 0) {
+      ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+      ctx.fillRect(0, 0, width, height);
     }
 
     // Draw Safe Zone Margins if enabled
@@ -302,103 +314,6 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     }
 
   }, [clips, subtitles, settings, getClipAtTime]);
-
-  // Subtitle drawing function with smart multi-line anti-overflow layout
-  const drawSubtitles = (
-    ctx: CanvasRenderingContext2D,
-    w: number,
-    h: number,
-    clip: StoryboardClip,
-    config: SubtitleConfig,
-    progress: number
-  ) => {
-    const baseFontSize = Math.round(config.fontSize * (w / 950));
-    const posY = (h * config.positionY) / 100;
-    const maxWidthRatio = config.maxWidthRatio || 0.84;
-    const maxLines = config.maxLines || 3;
-    const typeface = resolveSubtitleTypeface(config);
-
-    // Calculate smart multi-line layout
-    const layout = calculateSubtitleLayout(
-      ctx,
-      clipShotNarration(clip),
-      clip.secondaryText,
-      w,
-      baseFontSize,
-      config.bilingual,
-      maxWidthRatio,
-      maxLines,
-      typeface
-    );
-
-    if (layout.lines.length === 0) return;
-
-    // Pop scale animation
-    let scale = 1.0;
-    if (config.animation === 'pop') {
-      scale = progress < 0.15 ? 0.92 + (progress / 0.15) * 0.08 : 1.0;
-    }
-
-    ctx.save();
-    ctx.translate(w / 2, posY);
-    ctx.scale(scale, scale);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-
-    // Draw background box / capsule
-    if (config.showBackground) {
-      ctx.fillStyle = config.backgroundColor;
-      const radius = Math.min(layout.boxHeight * 0.35, layout.fontSize * 0.5);
-      ctx.beginPath();
-      ctx.roundRect(-layout.boxWidth / 2, -layout.boxHeight / 2, layout.boxWidth, layout.boxHeight, radius);
-      ctx.fill();
-    }
-
-    // Starting Y offset for lines within the block
-    const primaryBlockHeight = layout.lines.length * layout.lineHeight;
-    const startY = -layout.totalHeight / 2 + layout.lineHeight / 2;
-
-    // Render Primary Chinese Narration Lines
-    ctx.font = subtitleCanvasFont(typeface.primaryFamily, layout.fontSize, typeface.primaryWeight);
-
-    layout.lines.forEach((line, idx) => {
-      const lineY = startY + idx * layout.lineHeight;
-
-      // Text stroke
-      if (config.showStroke) {
-        ctx.strokeStyle = config.strokeColor || '#000000';
-        ctx.lineWidth = Math.max(3, layout.fontSize * 0.16);
-        ctx.lineJoin = 'round';
-        ctx.strokeText(line, 0, lineY);
-      }
-
-      // Text Fill
-      ctx.fillStyle = config.primaryColor || '#ffffff';
-      ctx.fillText(line, 0, lineY);
-    });
-
-    // Render Secondary Bilingual English Lines
-    if (config.bilingual && layout.secondaryLines.length > 0) {
-      ctx.font = subtitleCanvasFont(typeface.secondaryFamily, layout.secondaryFontSize, typeface.secondaryWeight);
-      const secondaryStartY = -layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;
-
-      layout.secondaryLines.forEach((secLine, idx) => {
-        const secLineY = secondaryStartY + idx * layout.secondaryLineHeight;
-
-        if (config.showStroke) {
-          ctx.strokeStyle = '#000000';
-          ctx.lineWidth = Math.max(2, layout.secondaryFontSize * 0.15);
-          ctx.lineJoin = 'round';
-          ctx.strokeText(secLine, 0, secLineY);
-        }
-
-        ctx.fillStyle = config.highlightColor || '#facc15';
-        ctx.fillText(secLine, 0, secLineY);
-      });
-    }
-
-    ctx.restore();
-  };
 
   // Draw Social Media Safe Zones overlay
   const drawSafeZones = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
@@ -502,6 +417,13 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
           }
         } else {
           syncNarrationAt(next, true);
+        }
+        // 片尾音乐淡出：进入淡出窗口开始收弱，回跳则恢复
+        const outro = outroTimeline(clips, outroConfigRef.current);
+        if (outro && outro.musicFadeDuration > 0 && next >= outro.musicFadeStart) {
+          audioEngine.beginTimelineBgmOutro(Math.max(120, (outro.totalDuration - next) * 1000));
+        } else {
+          audioEngine.cancelTimelineBgmOutro();
         }
         if (next >= totalDuration) {
           next = 0;

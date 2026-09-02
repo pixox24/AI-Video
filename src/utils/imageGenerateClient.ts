@@ -21,6 +21,9 @@ export interface VisualGenerateBody {
 export interface VisualGenerateResult {
   imageUrl: string;
   source?: string;
+  referenceSent?: boolean;
+  referenceAccepted?: boolean;
+  referenceDropped?: boolean;
   usedBackup: boolean;
   attempts: number;
 }
@@ -29,7 +32,13 @@ export async function postVisualGenerate(
   body: VisualGenerateBody,
   api: CustomImageApiConfig,
   signal?: AbortSignal
-): Promise<{ imageUrl: string; source?: string }> {
+): Promise<{
+  imageUrl: string;
+  source?: string;
+  referenceSent?: boolean;
+  referenceAccepted?: boolean;
+  referenceDropped?: boolean;
+}> {
   const timeoutController = new AbortController();
   const timeoutId = window.setTimeout(() => timeoutController.abort(), 360000);
   const onAbort = () => timeoutController.abort();
@@ -46,9 +55,22 @@ export async function postVisualGenerate(
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data?.imageUrl) {
-      throw new Error(data?.diagnosis || data?.error || `HTTP ${res.status}: 生图接口未返回有效画面`);
+      throw Object.assign(
+        new Error(data?.diagnosis || data?.error || `HTTP ${res.status}: 生图接口未返回有效画面`),
+        {
+          referenceSent: Boolean(data?.referenceSent),
+          referenceAccepted: Boolean(data?.referenceAccepted),
+          referenceDropped: Boolean(data?.referenceDropped)
+        }
+      );
     }
-    return { imageUrl: data.imageUrl, source: data.source };
+    return {
+      imageUrl: data.imageUrl,
+      source: data.source,
+      referenceSent: Boolean(data.referenceSent),
+      referenceAccepted: Boolean(data.referenceAccepted),
+      referenceDropped: Boolean(data.referenceDropped)
+    };
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       if (signal?.aborted) {

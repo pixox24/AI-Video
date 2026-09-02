@@ -22,10 +22,11 @@ export type UtteranceSegment = {
 async function assembleFromBuffers(
   sourceClips: StoryboardClip[],
   items: { text: string; buffer: AudioBuffer; words?: NarrationWordMark[] }[],
-  sentenceGap?: number
+  sentenceGap?: number,
+  outroHold?: number
 ) {
   const gap = clampSentenceGap(sentenceGap);
-  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), gap);
+  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), gap, outroHold);
   const utterances = utterancesFromClips(clips);
   if (utterances.length === 0) {
     throw new Error('没有可对齐的旁白句');
@@ -116,9 +117,10 @@ async function assembleFromBuffers(
 export async function assembleAlignedNarration(
   sourceClips: StoryboardClip[],
   segments: UtteranceSegment[],
-  sentenceGap?: number
+  sentenceGap?: number,
+  outroHold?: number
 ) {
-  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), sentenceGap);
+  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), sentenceGap, outroHold);
   const utterances = utterancesFromClips(clips);
   if (utterances.length === 0) {
     throw new Error('没有可对齐的旁白句');
@@ -138,17 +140,18 @@ export async function assembleAlignedNarration(
     items.push({ text: utterance.text, buffer, words: segment.words });
   }
 
-  return assembleFromBuffers(clips, items, sentenceGap);
+  return assembleFromBuffers(clips, items, sentenceGap, outroHold);
 }
 
 /** Re-pad an existing aligned VO file without calling TTS. */
 export async function reassembleNarrationWithHolds(
   sourceClips: StoryboardClip[],
   track: NarrationTrack,
-  sentenceGap?: number
+  sentenceGap?: number,
+  outroHold?: number
 ) {
   if (!track.audioUrl || !track.alignment?.utterances?.length) return null;
-  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), sentenceGap);
+  const clips = stampSentenceGaps(ensureUniqueClipIds(repairClipSlices(sourceClips)), sentenceGap, outroHold);
   const utterances = utterancesFromClips(clips);
   if (utterances.length === 0) return null;
   if (utterances.length !== track.alignment.utterances.length) return null;
@@ -171,5 +174,5 @@ export async function reassembleNarrationWithHolds(
     items.push({ text: utterance.text, buffer: slice });
   }
 
-  return assembleFromBuffers(clips, items, sentenceGap);
+  return assembleFromBuffers(clips, items, sentenceGap, outroHold);
 }

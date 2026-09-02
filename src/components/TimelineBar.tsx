@@ -39,6 +39,7 @@ interface TimelineBarProps {
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
   sentenceGap?: number;
+  outroHold?: number;
   onUtteranceHoldChange?: (clipId: string, holdDuration: number, pinned: boolean) => void;
   onHoldCommit?: () => void;
 }
@@ -500,7 +501,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
       order: newOrder,
       duration: 3.5,
       narration: `镜头 ${newOrder}：解说旁白文案`,
-      secondaryText: `Shot ${newOrder}`,
+      secondaryText: '',
       visualPrompt: `Cinematic visual scene ${newOrder}`,
       cameraMotion: 'zoom-in',
       transition: 'crossfade',

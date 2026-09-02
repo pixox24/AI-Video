@@ -60,6 +60,7 @@ import {
   recommendDuration,
   usageRatio
 } from '../utils/scriptBudget';
+import { translateClipsSecondary } from '../utils/secondaryText';
 import {
   adoptPastedScriptFromTitle,
   applyGenrePack,
@@ -105,6 +106,7 @@ import {
   clearCharacterRef,
   continuityShortLabel,
   fallbackVisualBible,
+  groundVisualBible,
   isVisualBibleStale,
   leadCharacter,
   mergeVisualBible,
@@ -142,6 +144,7 @@ interface ScriptPanelProps {
   currentTime?: number;
   onTogglePlay?: () => void;
   sentenceGap?: number;
+  outroHold?: number;
 }
 
 const INTENT_CARDS: {
@@ -206,9 +209,10 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   isPlaying = false,
   currentTime = 0,
   onTogglePlay,
-  sentenceGap = 0.2
+  sentenceGap = 0.2,
+  outroHold = 0
 }) => {
-  const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | 'bible' | 'diagnose' | null>(null);
+  const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | 'bible' | 'diagnose' | 'apply' | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [previewPlaying, setPreviewPlaying] = useState(false);
@@ -447,13 +451,13 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       const data = await res.json().catch(() => ({}));
       const incoming = normalizeVisualBible(data?.bible, visualBibleModeForGenre(genre));
       const bible = incoming
-        ? mergeVisualBible(base.visualBible, incoming)
-        : mergeVisualBible(base.visualBible, fallbackVisualBible({ narration, genre, title: bibleTitle }));
+        ? groundVisualBible(mergeVisualBible(base.visualBible, incoming), narration)
+        : groundVisualBible(mergeVisualBible(base.visualBible, fallbackVisualBible({ narration, genre, title: bibleTitle })), narration);
       return { ...base, visualBible: bible };
     } catch {
       return {
         ...base,
-        visualBible: mergeVisualBible(base.visualBible, fallbackVisualBible({ narration, genre, title: bibleTitle }))
+        visualBible: groundVisualBible(mergeVisualBible(base.visualBible, fallbackVisualBible({ narration, genre, title: bibleTitle })), narration)
       };
     }
   };
@@ -623,20 +627,36 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     }
   };
 
-  const handleApply = () => {
+  const handleApply = async () => {
     if (!applyReady) return;
-    const clips = forecastToClips(
-      workspace.forecastShots,
-      visualStyle,
-      aspectRatio,
-      stylePack,
-      existingClips,
-      workspace.visualBible,
-      sentenceGap
-    );
-    commit(stampAppliedWorkspace(workspace, workspace.forecastShots, stylePack, clips.length));
-    onNeedFullNarration?.(clips);
-    setStatus(`已写入 ${clips.length} 镜。机位已按全片设计，对照句同一口气配两图。`);
+    setBusy('apply');
+    try {
+      const clips = forecastToClips(
+        workspace.forecastShots,
+        visualStyle,
+        aspectRatio,
+        stylePack,
+        existingClips,
+        workspace.visualBible,
+        sentenceGap,
+        outroHold
+      );
+      // 双语字幕：写入分镜时顺手把缺失/过期的英文行按当前旁白补齐
+      const translated = await translateClipsSecondary(clips, customLlmApi);
+      const finalClips = translated.clips;
+      commit(stampAppliedWorkspace(workspace, workspace.forecastShots, stylePack, finalClips.length));
+      onNeedFullNarration?.(finalClips);
+      if (translated.error) {
+        setStatus(`已写入 ${finalClips.length} 镜。英文双语行没生成全（${translated.error}），可在字幕面板补齐。`);
+      } else if (translated.translated > 0) {
+        setStatus(`已写入 ${finalClips.length} 镜，并生成英文双语行（${translated.translated} 镜）。对照句同一口气配两图。`);
+      } else {
+        setStatus(`已写入 ${finalClips.length} 镜。机位已按全片设计，对照句同一口气配两图。`);
+      }
+      setError(null);
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handleStyleOnly = () => {
@@ -1097,22 +1117,24 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         <button
           id="btn-apply-storyboard"
           type="button"
-          onClick={applyMode.mode === 'style-only' ? handleStyleOnly : handleApply}
-          disabled={!applyReady || isGeneratingNarration || isApplyingStyle || applyMode.mode === 'current'}
+          onClick={applyMode.mode === 'style-only' ? handleStyleOnly : () => { void handleApply(); }}
+          disabled={!applyReady || isGeneratingNarration || isApplyingStyle || applyMode.mode === 'current' || busy === 'apply'}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-[12px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-black disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
           <Clapperboard className="w-4 h-4" />
-          {applyMode.mode === 'style-only'
-            ? '只更新画面，旁白沿用'
-            : applyMode.mode === 'current'
-              ? '已是当前稿'
-              : '写入分镜'}
+          {busy === 'apply'
+            ? '正在写入并补英文…'
+            : applyMode.mode === 'style-only'
+              ? '只更新画面，旁白沿用'
+              : applyMode.mode === 'current'
+                ? '已是当前稿'
+                : '写入分镜'}
         </button>
         {applyMode.mode === 'style-only' && (
           <button
             type="button"
-            onClick={handleApply}
-            disabled={!applyReady || isGeneratingNarration}
+            onClick={() => { void handleApply(); }}
+            disabled={!applyReady || isGeneratingNarration || busy === 'apply'}
             className="text-[12px] text-zinc-400 hover:text-zinc-200 cursor-pointer disabled:opacity-40"
           >
             整表重写并重新配音
@@ -2173,7 +2195,10 @@ function DirectorRail({
   const showCards = !compact || compactOpen;
   const patchBible = (next: VisualBible) => {
     if (!onChange) return;
-    onChange(rebuildForecast({ ...workspace, visualBible: next }));
+    const grounded = workspace.fullNarration.trim()
+      ? groundVisualBible(next, workspace.fullNarration)
+      : next;
+    onChange(rebuildForecast({ ...workspace, visualBible: grounded }));
   };
   const handlePickRef = async (characterId: string, file: File) => {
     if (!bible) return;
@@ -2285,6 +2310,14 @@ function DirectorRail({
                   </button>
                 </div>
                 <p className="text-[10px] text-zinc-500">{character.role === 'lead' ? '主角' : '配角'} · {character.ageBand}</p>
+                {character.sourceEvidence?.length ? (
+                  <p className="text-[10px] text-emerald-300/80 leading-relaxed">文案依据：{character.sourceEvidence[0]}</p>
+                ) : (
+                  <p className="text-[10px] text-amber-300/80 leading-relaxed">未找到明确文案依据，请先核对角色</p>
+                )}
+                {typeof character.confidence === 'number' && (
+                  <p className="text-[10px] text-zinc-600">文案匹配度 {Math.round(character.confidence * 100)}%</p>
+                )}
                 <textarea
                   value={character.look}
                   onChange={(e) => patchBible(updateCharacterField(bible, character.id, { look: e.target.value }))}
@@ -2315,6 +2348,11 @@ function DirectorRail({
                 场景 {bible.locations[0].name} · {bible.locations[0].timeOfDay}
               </div>
             )}
+            {bible?.validation?.warnings?.length ? (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] text-amber-200 leading-relaxed">
+                {bible.validation.warnings.map((warning) => <div key={warning}>角色校验：{warning}</div>)}
+              </div>
+            ) : null}
             {bible?.mode === 'expository' && bible.paletteLock && (
               <p className="text-[11px] text-zinc-400 leading-relaxed">{bible.paletteLock}</p>
             )}
@@ -2402,4 +2440,3 @@ function MiniStat({ label, value, warn }: { label: string; value: string; warn?:
     </div>
   );
 }
-

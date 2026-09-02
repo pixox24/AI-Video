@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Subtitles, Sparkles, Type, ChevronDown } from 'lucide-react';
-import { SubtitleConfig, SubtitlePreset } from '../types';
+import { Subtitles, Sparkles, Type, ChevronDown, Loader2 } from 'lucide-react';
+import { StoryboardClip, SubtitleConfig, SubtitlePreset } from '../types';
 import { ToolRail } from './ToolRail';
 import { showStatusToast } from '../utils/statusToast';
+import { secondaryCoverage, translateClipsSecondary } from '../utils/secondaryText';
 import {
   STUDIO_FONTS,
   StudioFont,
@@ -17,6 +18,9 @@ import {
 interface SubtitlePanelProps {
   config: SubtitleConfig;
   onChange: (config: SubtitleConfig) => void;
+  clips?: StoryboardClip[];
+  onUpdateClips?: (clips: StoryboardClip[]) => void;
+  llmApi?: unknown;
 }
 
 const FONT_PREVIEW_TEXT = '这是当前字幕字体';
@@ -81,12 +85,35 @@ function FontSpecimenCard({
   );
 }
 
-export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange }) => {
+export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, clips, onUpdateClips, llmApi }) => {
   const [, setFontTick] = useState(0);
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
   const selectedFontId = resolveSubtitleFontId(config);
   const selectedFont = studioFontById(selectedFontId);
   const otherFonts = STUDIO_FONTS.filter((font) => font.id !== selectedFontId);
+  const coverage = secondaryCoverage(clips || []);
+
+  const handleBackfillEnglish = async () => {
+    if (!clips || !onUpdateClips || backfilling) return;
+    setBackfilling(true);
+    try {
+      const result = await translateClipsSecondary(clips, llmApi);
+      if (result.translated > 0) {
+        onUpdateClips(result.clips);
+        showStatusToast(
+          result.failed > 0
+            ? `已补齐 ${result.translated} 镜英文，${result.failed} 镜未译出，可再点一次`
+            : `已补齐 ${result.translated} 镜英文`,
+          { tone: result.failed > 0 ? 'warn' : 'ok', id: 'subtitle-english' }
+        );
+      } else {
+        showStatusToast(result.error || '英文没生成出来，请检查模型设置', { tone: 'warn', id: 'subtitle-english' });
+      }
+    } finally {
+      setBackfilling(false);
+    }
+  };
 
   useEffect(() => {
     const unsubscribe = subscribeStudioFonts(() => setFontTick((tick) => tick + 1));
@@ -305,17 +332,40 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange }
         </div>
 
         {/* Bilingual Switch */}
-        <div className="p-3 bg-[#1e1e26] border border-[#2b2b38] rounded-xl flex items-center justify-between">
-          <div className="space-y-0.5">
-            <span className="font-medium text-zinc-200 block text-xs">中英双语字幕显示</span>
-            <span className="text-[10px] text-zinc-400">自动同步分镜的英文对照翻译</span>
+        <div className="p-3 bg-[#1e1e26] border border-[#2b2b38] rounded-xl space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <span className="font-medium text-zinc-200 block text-xs">中英双语字幕显示</span>
+              <span className="text-[10px] text-zinc-400">自动同步分镜的英文对照翻译</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={config.bilingual}
+              onChange={(e) => onChange({ ...config, bilingual: e.target.checked })}
+              className="w-4 h-4 accent-amber-500 rounded cursor-pointer"
+            />
           </div>
-          <input
-            type="checkbox"
-            checked={config.bilingual}
-            onChange={(e) => onChange({ ...config, bilingual: e.target.checked })}
-            className="w-4 h-4 accent-amber-500 rounded cursor-pointer"
-          />
+          {config.bilingual && clips && onUpdateClips && coverage.total > 0 && (
+            <div className="pt-1 border-t border-[#2b2b38] space-y-1.5">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-zinc-400">
+                  英文行 <span className="font-mono text-zinc-200">{coverage.fresh}/{coverage.total}</span> 镜与旁白对齐
+                </span>
+                {coverage.stale > 0 && <span className="text-amber-400">{coverage.stale} 镜待更新</span>}
+              </div>
+              {coverage.stale > 0 && (
+                <button
+                  id="btn-backfill-english"
+                  type="button"
+                  onClick={() => { void handleBackfillEnglish(); }}
+                  disabled={backfilling}
+                  className="w-full py-1.5 rounded-xl border border-amber-500/30 text-amber-300 hover:bg-amber-500/10 cursor-pointer disabled:opacity-50 text-[11px]"
+                >
+                  {backfilling ? '正在生成英文…' : `补齐英文（${coverage.stale} 镜）`}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Typography Controls */}

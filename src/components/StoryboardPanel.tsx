@@ -57,6 +57,7 @@ interface StoryboardPanelProps {
   narrationFresh?: boolean;
   onRetryFailedImages?: () => void;
   sentenceGap?: number;
+  outroHold?: number;
   onUtteranceHoldChange?: (clipId: string, holdDuration: number, pinned: boolean) => void;
   stylePack?: StylePack;
   visualBible?: VisualBible | null;
@@ -142,8 +143,9 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
               order: index + 1,
               duration: typeof shot.duration === 'number' ? shot.duration : Number(shot.duration) || 3.5,
               narration: shot.narration,
-              secondaryText: shot.secondaryText || `Scene ${index + 1}`,
+              secondaryText: typeof shot.secondaryText === 'string' ? shot.secondaryText : '',
               visualPrompt: '',
+              visualBibleHash: visualBible?.sourceHash,
               chineseVisualPrompt: shot.chineseVisualPrompt || '',
               cameraMotion: (shot.cameraMotion as CameraMotion) || 'zoom-in',
               transition: (shot.transition as TransitionType) || 'crossfade',
@@ -202,8 +204,9 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           order: idx + 1,
           duration,
           narration: chunk,
-          secondaryText: `Scene ${idx + 1}: ${chunk.slice(0, 35)}`,
+          secondaryText: '',
           visualPrompt: '',
+          visualBibleHash: visualBible?.sourceHash,
           chineseVisualPrompt: '',
           cameraMotion: cameraMotions[idx % cameraMotions.length],
           transition: transitions[idx % transitions.length],
@@ -356,7 +359,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
         duration: 3.5 + sentenceGap,
         holdDuration: sentenceGap,
         narration: `镜头 ${newOrder}：请在此输入旁白与画面描述`,
-        secondaryText: `Scene ${newOrder}: Describe what unfolds on screen.`,
+        secondaryText: '',
         visualPrompt: compileClip({
           id: addedId,
           order: newOrder,
@@ -368,6 +371,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           transition: 'crossfade'
         }, prev.length, prev.length + 1).prompt,
         chineseVisualPrompt: `第 ${newOrder} 幕画面`,
+        visualBibleHash: visualBible?.sourceHash,
         cameraMotion: 'zoom-in',
         transition: 'crossfade',
         imageUrl: generateProceduralArtwork(`镜头 ${newOrder}`, visualStyle, aspectRatio, newOrder)

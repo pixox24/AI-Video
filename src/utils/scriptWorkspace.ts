@@ -24,13 +24,14 @@ import { beatToChinese, compileImagePrompt } from './imagePrompt';
 import { cameraMotionForCoverage, withCoverage } from './shotCoverage';
 import {
   applyBibleToChineseIntent,
+  groundVisualBible,
   normalizeVisualBible,
   stampShotsWithBible,
   stripBiblePrefix,
   visualBibleModeForGenre
 } from './visualBible';
 import { countNarrationChars, ensureUniqueClipIds, joinClipNarrations, newClipId, repairClipSlices } from './narrationTrack';
-import { clampSentenceGap, SENTENCE_GAP_DEFAULT } from './sentenceGap';
+import { clampOutroHold, clampSentenceGap, SENTENCE_GAP_DEFAULT } from './sentenceGap';
 import {
   applyHoldToShots,
   applyPinnedHolds,
@@ -166,7 +167,12 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     conceptMix: { ...EMPTY_MIX, ...(raw.conceptMix || {}) },
     genrePackId: raw.genrePackId || null,
     hookPreviewUrl: raw.hookPreviewUrl,
-    visualBible: normalizeVisualBible(raw.visualBible, visualBibleModeForGenre(raw.genrePackId))
+    visualBible: (() => {
+      const bible = normalizeVisualBible(raw.visualBible, visualBibleModeForGenre(raw.genrePackId));
+      return bible && raw.fullNarration
+        ? groundVisualBible(bible, raw.fullNarration)
+        : bible;
+    })()
   };
 }
 
@@ -737,7 +743,8 @@ export function forecastToClips(
   stylePack?: StylePack,
   previousClips: StoryboardClip[] = [],
   visualBible?: VisualBible | null,
-  sentenceGap: number = SENTENCE_GAP_DEFAULT
+  sentenceGap: number = SENTENCE_GAP_DEFAULT,
+  outroHold: number = 0
 ): StoryboardClip[] {
   const pack = stylePack || presetStylePack(visualStyle);
   const prevByKey = new Map<string, StoryboardClip>();
@@ -749,7 +756,8 @@ export function forecastToClips(
   const usedIds = new Set<string>();
   const clips = shots.map((shot, index) => {
     const motion = cameraMotionForCoverage(shot);
-    const transition: TransitionType = index === shots.length - 1 ? 'fade-black' : 'crossfade';
+    // 片尾渐隐由 Outro 收束负责，尾镜入镜统一 crossfade，避免结尾双黑场
+    const transition: TransitionType = 'crossfade';
     const visual = stripBiblePrefix(shot.visualIntent || shot.sliceText || shot.narration || `scene ${index + 1}`);
     const chineseVisual = applyBibleToChineseIntent(visual, visualBible, shot);
     const voRole = shot.voRole || 'start';
@@ -757,14 +765,16 @@ export function forecastToClips(
     // Only reuse a previous clip when this exact utterance-visual slot matches.
     // Positional previousClips[index] collides once a continue shot is inserted.
     const prev = prevByKey.get(`${span}#${shot.visualIndex ?? 0}`);
+    const previousPromptMatchesBible = !visualBible || prev?.visualBibleHash === visualBible.sourceHash;
     const id = prev?.id && !usedIds.has(prev.id) ? prev.id : newClipId(index, usedIds);
     usedIds.add(id);
     const nextShot = shots[index + 1];
     const isTail = !nextShot || nextShot.voRole !== 'continue';
+    const isFilmTail = index === shots.length - 1;
     const holdDuration = shot.holdPinned
       ? shot.holdDuration
       : isTail
-        ? clampSentenceGap(sentenceGap)
+        ? Math.max(clampSentenceGap(sentenceGap), isFilmTail ? clampOutroHold(outroHold) : 0)
         : 0;
     const draft = {
       narration: voRole === 'start' ? shot.narration : '',
@@ -775,14 +785,15 @@ export function forecastToClips(
       continuity: shot.continuity,
       cameraMotion: prev?.cameraMotion || motion,
       order: index + 1,
-      promptPinned: Boolean(prev?.promptPinned),
-      visualPrompt: prev?.promptPinned ? (prev.visualPrompt || '') : '',
+      promptPinned: Boolean(prev?.promptPinned && previousPromptMatchesBible),
+      visualPrompt: prev?.promptPinned && previousPromptMatchesBible ? (prev.visualPrompt || '') : '',
       shotSize: shot.shotSize,
       cameraAngle: shot.cameraAngle,
       shotComposition: shot.shotComposition,
       coverageJob: shot.coverageJob,
       coverageLink: shot.coverageLink,
-      coverageSource: shot.coverageSource
+      coverageSource: shot.coverageSource,
+      visualBibleHash: visualBible?.sourceHash
     };
     const compiled = compileImagePrompt({
       clip: draft,
@@ -803,10 +814,14 @@ export function forecastToClips(
       continuity: shot.continuity,
       duration: Math.max(0.05, shot.speechDuration + holdDuration),
       narration: draft.narration,
-      secondaryText: shot.sliceText || shot.narration,
+      // Reuse the previous English line for the same utterance slot; the zh-hash check
+      // in secondaryText.ts will flag it stale if the narration actually changed.
+      secondaryText: prev?.secondaryText ?? (shot.sliceText || shot.narration),
+      secondaryHash: prev?.secondaryHash,
       voSpanId: shot.spanId,
       voRole,
       voSlice: shot.sliceText,
+      visualBibleHash: visualBible?.sourceHash,
       visualBeat: compiled.beat,
       visualPrompt: compiled.prompt,
       chineseVisualPrompt: beatToChinese(compiled.beat) || chineseVisual,

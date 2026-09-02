@@ -1,4 +1,5 @@
 import { AudioConfig, StoryboardClip } from '../types';
+import { OUTRO_HOLD_MAX } from './outro';
 
 export const SENTENCE_GAP_DEFAULT = 0.2;
 export const SENTENCE_GAP_MIN = 0;
@@ -16,6 +17,10 @@ export type SentenceGapPresetId = (typeof SENTENCE_GAP_PRESETS)[number]['id'];
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function round1(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 export function clampSentenceGap(value: number | undefined | null): number {
@@ -51,24 +56,37 @@ export function effectiveHoldDuration(
   clip: Pick<StoryboardClip, 'holdDuration' | 'holdPinned'>,
   index: number,
   clips: Pick<StoryboardClip, 'voRole' | 'holdDuration' | 'holdPinned'>[],
-  sentenceGap?: number
+  sentenceGap?: number,
+  outroHold?: number
 ): number {
   if (clip.holdPinned) {
     return round2(Math.max(0, Math.min(8, clip.holdDuration || 0)));
   }
   if (!isUtteranceTail(clips, index)) return 0;
-  return sentenceGap == null
+  let base = sentenceGap == null
     ? clampSentenceGap(clip.holdDuration ?? SENTENCE_GAP_DEFAULT)
     : clampSentenceGap(sentenceGap);
+  // 片尾停留只作用于全片最后一镜：钉住且更长时以钉住为准
+  if (outroHold != null && index === clips.length - 1) {
+    base = round2(Math.max(base, clampOutroHold(outroHold)));
+  }
+  return base;
+}
+
+export function clampOutroHold(value: number | undefined | null): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return round1(Math.max(0, Math.min(OUTRO_HOLD_MAX, n)));
 }
 
 export function stampSentenceGaps(
   clips: StoryboardClip[],
-  sentenceGap?: number
+  sentenceGap?: number,
+  outroHold?: number
 ): StoryboardClip[] {
   const gap = clampSentenceGap(sentenceGap);
   return clips.map((clip, index) => {
-    const holdDuration = effectiveHoldDuration(clip, index, clips, gap);
+    const holdDuration = effectiveHoldDuration(clip, index, clips, gap, outroHold);
     const speechDuration = clip.speechDuration ?? Math.max(
       0.05,
       (clip.duration || 3.5) - (clip.holdDuration || 0)

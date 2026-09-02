@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio, Loader2 } from 'lucide-react';
-import { AudioConfig, CustomTtsApiConfig, DesignedVoiceEntry, ScriptGenre, StoryboardClip } from '../types';
+import { AudioConfig, CustomTtsApiConfig, DesignedVoiceEntry, ScriptGenre, StoryboardClip, OutroConfig } from '../types';
 import { BGM_GENRE_ORDER, BGM_TRACKS, DEFAULT_BGM_TRACK_ID, bgmTracksForGenre } from '../utils/presets';
 import { audioEngine } from '../utils/audioEngine';
 import { GENRE_PACKS } from '../utils/scriptBudget';
@@ -18,6 +18,7 @@ import { getTtsPreviewUrl, makeVoicePreviewKey, VOICE_PREVIEW_TEXT } from '../ut
 import { loadVoiceLibrary, removeDesignedVoice } from '../utils/voiceLibrary';
 import { ToolRail } from './ToolRail';
 import { SentenceGapControl } from './SentenceGapControl';
+import { OutroControl } from './OutroControl';
 import { resolveSentenceGap } from '../utils/sentenceGap';
 import { VoiceDesignWorkshop } from './VoiceDesignWorkshop';
 
@@ -69,6 +70,8 @@ interface AudioPanelProps {
   onOpenSettings?: () => void;
   onSentenceGapChange?: (seconds: number) => void;
   clips?: StoryboardClip[];
+  outro?: OutroConfig;
+  onOutroChange?: (outro: OutroConfig) => void;
 }
 
 export const AudioPanel: React.FC<AudioPanelProps> = ({
@@ -86,7 +89,9 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   onVoiceChange,
   onOpenSettings,
   onSentenceGapChange,
-  clips = []
+  clips = [],
+  outro,
+  onOutroChange
 }) => {
   const [isPlayingPreviewVoice, setIsPlayingPreviewVoice] = useState(false);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
@@ -482,6 +487,13 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
               else onChange({ ...config, sentenceGap: seconds });
             }}
           />
+
+          {outro && onOutroChange && (
+            <OutroControl
+              value={outro}
+              onChange={(next) => onOutroChange(next)}
+            />
+          )}
 
           <VoiceDesignWorkshop
             ttsApi={ttsApi}

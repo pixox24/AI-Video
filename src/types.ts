@@ -94,7 +94,10 @@ export interface StoryboardClip {
   holdDuration?: number; // extra picture hold after speech ends
   narration: string; // The spoken text / voiceover
   secondaryText?: string; // Optional English/sub text
+  secondaryHash?: string; // Hash of the Chinese display text when secondaryText was produced; stale hash = wrong pairing
   visualPrompt: string; // Compiled image prompt last sent (or user-pinned)
+  /** Bible source hash used when the prompt was compiled. */
+  visualBibleHash?: string;
   chineseVisualPrompt?: string;
   visualBeat?: VisualBeat;
   promptPinned?: boolean;
@@ -108,6 +111,8 @@ export interface StoryboardClip {
   isGeneratingImage?: boolean;
   imageStatus?: ClipImageStatus;
   imageError?: string;
+  /** Whether a character reference was sent to and accepted by the provider. */
+  referenceStatus?: 'accepted' | 'dropped';
   cameraMotion: CameraMotion;
   transition: TransitionType;
   voiceAudioUrl?: string;
@@ -308,6 +313,12 @@ export interface StyleShelfConfig {
   hiddenPresetIds: VisualStyle[];
 }
 
+export interface OutroConfig {
+  hold: number; // seconds of moving picture after the last narration ends (0-5)
+  pictureFade: number; // seconds of fade-to-black at the very end (0-3)
+  musicFade: number; // requested BGM fade-out length; clamped to the outro window (0-5)
+}
+
 export interface ProjectSettings {
   aspectRatio: AspectRatio;
   canvasBackground: string; // hex or 'blur'
@@ -318,6 +329,7 @@ export interface ProjectSettings {
   safeMargin: boolean;
   exportQuality: '1080p' | '720p' | '4k';
   frameRate: 30 | 60;
+  outro?: OutroConfig;
   customImageApi?: CustomImageApiConfig;
   backupImageApi?: CustomImageApiConfig;
   imageRetry?: ImageRetryConfig;
@@ -356,6 +368,10 @@ export interface VisualCharacter {
   look: string;
   wardrobe: string;
   signature?: string;
+  /** Short quotes or phrases from the narration that justify this character. */
+  sourceEvidence?: string[];
+  /** LLM/heuristic confidence that this card is grounded in the narration. */
+  confidence?: number;
   locked: boolean;
   refs: VisualCharacterRef[];
   seedHint?: string;
@@ -388,6 +404,11 @@ export interface VisualBible {
   continuityRule: string;
   sourceHash: string;
   pinned?: boolean;
+  validation?: {
+    status: 'ok' | 'warning';
+    warnings: string[];
+    checkedAt: number;
+  };
   generatedAt: number;
 }
 

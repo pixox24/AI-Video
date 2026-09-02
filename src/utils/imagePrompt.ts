@@ -20,6 +20,7 @@ export type ImagePromptClip = Pick<
   | 'narration'
   | 'voSlice'
   | 'visualPrompt'
+  | 'visualBibleHash'
   | 'chineseVisualPrompt'
   | 'visualBeat'
   | 'promptPinned'
@@ -135,9 +136,12 @@ function styleDetails(pack: StylePack): string {
 
 function bibleSubjectLock(bible: VisualBible | null | undefined, clip: ImagePromptClip): string {
   if (!bible || bible.mode !== 'story') return '';
-  const char = (clip.characterIds?.length
+  // `undefined` means the shot has no explicit binding and may use the lead;
+  // an explicit empty array means this shot intentionally contains no character.
+  const hasExplicitCharacterSelection = Array.isArray(clip.characterIds);
+  const char = hasExplicitCharacterSelection
     ? bible.characters.find((item) => clip.characterIds!.includes(item.id))
-    : leadCharacter(bible)) || leadCharacter(bible);
+    : leadCharacter(bible);
   const loc = bible.locations.find((item) => item.id === clip.locationId) || bible.locations[0];
   const parts: string[] = [];
   if (char) {
@@ -198,11 +202,16 @@ export function compileImagePrompt(input: {
   promptProfile?: CustomImageApiConfig['promptProfile'];
 }): { prompt: string; profile: ImagePromptProfile; beat: VisualBeat } {
   const profile = resolveImagePromptProfile(input.model, input.promptProfile);
-  if (input.clip.promptPinned && (input.clip.visualPrompt || '').trim().length > 8) {
+  const bibleHashMatches = !input.bible || input.clip.visualBibleHash === input.bible.sourceHash;
+  if (input.clip.promptPinned && bibleHashMatches && (input.clip.visualPrompt || '').trim().length > 8) {
     return { prompt: input.clip.visualPrompt!.trim(), profile, beat: resolveVisualBeat(input.clip) };
   }
 
-  const beat = resolveVisualBeat(input.clip);
+  // A stale pinned prompt must not leak back through resolveVisualBeat's prose
+  // fallback when the Bible has changed. Rebuild from narration/structured beat.
+  const beat = resolveVisualBeat(bibleHashMatches
+    ? input.clip
+    : { ...input.clip, visualPrompt: '', chineseVisualPrompt: '', promptPinned: false });
   const identity = bibleSubjectLock(input.bible, input.clip);
   const framing = coverageFramingLine(input.clip);
   const setting = [framing, beat.setting, usesStyleDna(input.pack) ? '' : input.pack.world?.space]

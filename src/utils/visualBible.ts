@@ -46,6 +46,71 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
 }
 
+export interface NarrativeCharacterHints {
+  hasPerson: boolean;
+  names: string[];
+  gender: 'male' | 'female' | 'unknown';
+  ageBand?: string;
+  occupations: string[];
+  evidence: string[];
+}
+
+const GENERIC_CHARACTER_NAMES = new Set(['主角', '角色', '人物', '讲解者', '我', '他', '她']);
+const OCCUPATION_TERMS = ['程序员', '工程师', '老师', '教师', '医生', '护士', '学生', '记者', '摄影师', '律师', '厨师', '农民', '科学家'];
+
+/** Extract only high-signal character facts; this is a guardrail, not a full NER engine. */
+export function extractNarrativeCharacterHints(narration: string): NarrativeCharacterHints {
+  const text = String(narration || '').replace(/\s+/g, '').trim();
+  const sentences = text.split(/[。！？!?；;\n]+/).map((item) => item.trim()).filter(Boolean);
+  const hasMale = /男孩|男生|少年|男人|男性|小伙|他(?!们)/.test(text);
+  const hasFemale = /女孩|女生|少女|女人|女性|姑娘|她(?!们)/.test(text);
+  const occupations = OCCUPATION_TERMS.filter((term) => text.includes(term));
+  const names = Array.from(new Set(
+    [...text.matchAll(/(?:他|她|朋友|同学|孩子|人物)?(?:叫|名叫|名字是)([\u4e00-\u9fa5]{2,6})/g)]
+      .map((match) => match[1])
+      .filter((name) => name && !OCCUPATION_TERMS.includes(name))
+  ));
+  const hasPerson = Boolean(
+    names.length || occupations.length || /我(?!们)|他(?!们)|她(?!们)|男孩|女孩|男生|女生|男人|女人|少年|少女|朋友|同学|孩子|一个人/.test(text)
+  );
+  const evidenceCandidates = sentences.filter((sentence) => (
+    /我(?!们)|他(?!们)|她(?!们)|男孩|女孩|男生|女生|男人|女人|少年|少女|朋友|同学|孩子|程序员|工程师|老师|教师|医生|护士|学生|记者|摄影师|律师|厨师|农民|科学家/.test(sentence)
+  ));
+  const highSignalEvidence = evidenceCandidates.filter((sentence) => (
+    names.some((name) => sentence.includes(name))
+    || occupations.some((occupation) => sentence.includes(occupation))
+    || /男孩|女孩|男生|女生|男人|女人|少年|少女|朋友|同学|孩子/.test(sentence)
+  ));
+  const evidence = (highSignalEvidence.length ? highSignalEvidence : evidenceCandidates).slice(0, 4);
+  return {
+    hasPerson,
+    names,
+    gender: hasMale && !hasFemale ? 'male' : hasFemale && !hasMale ? 'female' : 'unknown',
+    ageBand: /男孩|女孩|孩子/.test(text) ? '儿童/未成年' : /少年|少女|高中|初中/.test(text) ? '青少年' : hasPerson ? '成年（文案未明示年龄）' : undefined,
+    occupations,
+    evidence: evidence.length ? evidence : (hasPerson && text ? [text.slice(0, 80)] : [])
+  };
+}
+
+export function narrativeEntityContract(narration: string): string {
+  const hints = extractNarrativeCharacterHints(narration);
+  if (!hints.hasPerson) {
+    return '【文案实体硬约束】未识别到明确人物。characters 必须输出 []，不得新增女孩、男孩、学生或其他主角。';
+  }
+  const facts = [
+    hints.names.length ? `人物名：${hints.names.join('、')}` : '',
+    hints.gender !== 'unknown' ? `性别线索：${hints.gender === 'male' ? '男性' : '女性'}` : '性别线索：未明确，不得擅自猜测',
+    hints.ageBand ? `年龄线索：${hints.ageBand}` : '',
+    hints.occupations.length ? `身份/职业：${hints.occupations.join('、')}` : '',
+    hints.evidence.length ? `原文证据：${hints.evidence.map((item) => `「${item}」`).join('；')}` : ''
+  ].filter(Boolean);
+  return [
+    '【文案实体硬约束】角色只能对应以下文案实体，不得凭空新增人物。',
+    ...facts,
+    '若角色卡无法给出对应原文证据，characters 输出 []。sourceEvidence 必须填写原文短句。'
+  ].join('\n');
+}
+
 function normalizeRefs(raw: unknown): VisualCharacterRef[] {
   if (!Array.isArray(raw)) return [];
   const refs: VisualCharacterRef[] = [];
@@ -79,6 +144,10 @@ function normalizeCharacter(raw: any, index: number): VisualCharacter | null {
     look: look || '可被连续认出的外形，全片不换发型',
     wardrobe: wardrobe || '全片不换装',
     signature: cleanText(raw?.signature) || undefined,
+    sourceEvidence: asStringArray(raw?.sourceEvidence || raw?.evidence).slice(0, 4),
+    confidence: Number.isFinite(Number(raw?.confidence))
+      ? Math.max(0, Math.min(1, Number(raw.confidence)))
+      : undefined,
     locked: Boolean(raw?.locked),
     refs: normalizeRefs(raw?.refs),
     seedHint: cleanText(raw?.seedHint) || undefined
@@ -161,6 +230,13 @@ export function normalizeVisualBible(raw: unknown, fallbackMode: VisualBibleMode
     ),
     sourceHash: cleanText(data.sourceHash),
     pinned: Boolean(data.pinned),
+    validation: data.validation && typeof data.validation === 'object'
+      ? {
+          status: data.validation.status === 'warning' ? 'warning' : 'ok',
+          warnings: asStringArray(data.validation.warnings).slice(0, 8),
+          checkedAt: Number(data.validation.checkedAt) || 0
+        }
+      : undefined,
     generatedAt: Number(data.generatedAt) || 0
   };
 }
@@ -180,21 +256,27 @@ export function fallbackVisualBible(opts: {
       generatedAt: Date.now()
     };
   }
+  const hints = extractNarrativeCharacterHints(opts.narration);
+  const hasPerson = hints.hasPerson;
+  const primaryName = hints.names[0] || '文案人物';
+  const evidence = hints.evidence.length ? hints.evidence : ['文案明确出现人物，但未给出更多外形信息'];
   return {
     version: 1,
     mode: 'story',
     logline: cleanText(opts.title) || '同一个人把这件事走完',
     paletteLock: '全片同一时段、同一色温',
-    characters: [{
+    characters: hasPerson ? [{
       id: 'char-lead',
-      name: '主角',
+      name: primaryName,
       role: 'lead',
-      ageBand: '成年',
-      look: '可被连续认出的同一张脸和发型，全片不改五官',
-      wardrobe: '全片不换装',
+      ageBand: hints.ageBand || '文案未明确年龄',
+      look: `${hints.gender === 'male' ? '男性' : hints.gender === 'female' ? '女性' : '性别不擅自推断'}，外形由用户确认；全片不改五官和发型`,
+      wardrobe: hints.occupations.length ? `符合${hints.occupations[0]}身份的服装，全片不换装` : '符合文案身份的服装，全片不换装',
+      sourceEvidence: evidence,
+      confidence: 0.55,
       locked: false,
       refs: []
-    }],
+    }] : [],
     locations: [{
       id: 'loc-1',
       name: '主场景',
@@ -206,8 +288,130 @@ export function fallbackVisualBible(opts: {
     motif: null,
     continuityRule: '同一人同一空间推进；对照才换主体；收束回收开场构图或物件',
     sourceHash: hash,
+    validation: {
+      status: 'warning',
+      warnings: hasPerson ? ['模型未返回可验证角色，已使用文案保守角色卡'] : ['文案未识别到明确人物，未创建角色卡'],
+      checkedAt: Date.now()
+    },
     generatedAt: Date.now()
   };
+}
+
+function characterMentionsFemale(character: VisualCharacter): boolean {
+  return /女孩|女生|少女|女人|女性|姑娘|女童|女学生|水手服|裙子/.test(
+    `${character.name} ${character.ageBand} ${character.look} ${character.wardrobe}`
+  );
+}
+
+function characterMentionsMale(character: VisualCharacter): boolean {
+  return /男孩|男生|少年|男人|男性|男童|男学生/.test(
+    `${character.name} ${character.ageBand} ${character.look} ${character.wardrobe}`
+  );
+}
+
+/** Validate model output against explicit narration facts before it becomes a hard constraint. */
+export function validateVisualBibleAgainstNarration(
+  bible: VisualBible | null | undefined,
+  narration: string
+): string[] {
+  if (!bible || bible.mode !== 'story') return [];
+  const hints = extractNarrativeCharacterHints(narration);
+  const warnings: string[] = [];
+  if (!hints.hasPerson && bible.characters.length > 0) {
+    warnings.push('文案没有明确人物，但画面圣经创建了角色卡');
+  }
+  if (hints.gender === 'male' && bible.characters.some(characterMentionsFemale)) {
+    warnings.push('文案出现男性线索，但角色卡包含女性外形/服装描述');
+  }
+  if (hints.gender === 'female' && bible.characters.some(characterMentionsMale)) {
+    warnings.push('文案出现女性线索，但角色卡包含男性外形描述');
+  }
+  if (hints.ageBand === '儿童/未成年' && bible.characters.some((item) => /成年|中年|老年/.test(item.ageBand))) {
+    warnings.push('文案出现男孩/女孩/孩子，但角色卡年龄被写成成年或以上');
+  }
+  if (hints.names.length > 0 && bible.characters.length > 0) {
+    const names = new Set(hints.names);
+    const hasNamedCard = bible.characters.some((item) => names.has(item.name));
+    if (!hasNamedCard && bible.characters.every((item) => !item.sourceEvidence?.some((evidence) => hints.names.some((name) => evidence.includes(name))))) {
+      warnings.push(`文案中的人物「${hints.names.join('、')}」没有出现在角色卡证据中`);
+    }
+  }
+  if (hints.occupations.length > 0 && bible.characters.length > 0) {
+    const hasOccupation = bible.characters.some((item) => (
+      hints.occupations.some((occupation) => `${item.name} ${item.look} ${item.wardrobe} ${item.sourceEvidence?.join(' ') || ''}`.includes(occupation))
+    ));
+    if (!hasOccupation) warnings.push(`文案职业「${hints.occupations.join('、')}」未进入角色卡`);
+  }
+  return Array.from(new Set(warnings));
+}
+
+/** Repair only unpinned model output; user-locked cards remain visible and are warned on. */
+export function groundVisualBible(
+  bible: VisualBible,
+  narration: string
+): VisualBible {
+  const warnings = validateVisualBibleAgainstNarration(bible, narration);
+  if (warnings.length === 0) {
+    return {
+      ...bible,
+      validation: { status: 'ok', warnings: [], checkedAt: Date.now() }
+    };
+  }
+  const hardWarnings = warnings.filter((warning) => (
+    /没有明确人物，但画面圣经创建了角色卡|出现男性线索，但角色卡包含女性|出现女性线索，但角色卡包含男性|年龄被写成成年/.test(warning)
+  ));
+  if (hardWarnings.length === 0) {
+    const hints = extractNarrativeCharacterHints(narration);
+    const enriched = {
+      ...bible,
+      characters: bible.characters.map((character) => {
+        const nameGrounded = hints.names.includes(character.name) || GENERIC_CHARACTER_NAMES.has(character.name);
+        if (!nameGrounded || character.sourceEvidence?.length || !hints.evidence.length) return character;
+        return {
+          ...character,
+          sourceEvidence: hints.evidence.slice(0, 4),
+          confidence: character.confidence ?? 0.65
+        };
+      })
+    };
+    const remainingWarnings = validateVisualBibleAgainstNarration(enriched, narration);
+    return {
+      ...enriched,
+      validation: { status: remainingWarnings.length ? 'warning' : 'ok', warnings: remainingWarnings, checkedAt: Date.now() }
+    };
+  }
+  const hasUserLock = bible.pinned || bible.characters.some((item) => item.locked || item.refs.length > 0);
+  if (hasUserLock) {
+    return {
+      ...bible,
+      validation: { status: 'warning', warnings, checkedAt: Date.now() }
+    };
+  }
+  const safe = fallbackVisualBible({ narration, genre: bible.mode === 'story' ? '故事' : null, title: bible.logline });
+  const repairedWarnings = validateVisualBibleAgainstNarration(safe, narration);
+  return {
+    ...bible,
+    characters: safe.characters,
+    validation: {
+      status: 'warning',
+      warnings: Array.from(new Set([
+        ...repairedWarnings,
+        '模型角色与文案实体不一致，已替换为保守角色卡；请在画面圣经中确认外形'
+      ])),
+      checkedAt: Date.now()
+    }
+  };
+}
+
+/** Only hard narrative conflicts should stop image generation. Informational
+ * warnings (for example, a conservative fallback card) remain actionable but
+ * do not make the project unusable. */
+export function visualBibleHasBlockingWarnings(bible?: VisualBible | null): boolean {
+  if (!bible?.validation?.warnings?.length) return false;
+  return bible.validation.warnings.some((warning) => {
+    if (/没有明确人物，但画面圣经创建了角色卡/.test(warning) && bible.characters.length === 0) return false;
+    return /没有明确人物，但画面圣经创建了角色卡|出现男性线索，但角色卡包含女性|出现女性线索，但角色卡包含男性|年龄被写成成年|人物「.+」没有出现在角色卡证据中|文案职业「.+」未进入角色卡/.test(warning);
+  });
 }
 
 function carryCharacter(previous: VisualCharacter | undefined, incoming: VisualCharacter): VisualCharacter {
@@ -223,6 +427,8 @@ function carryCharacter(previous: VisualCharacter | undefined, incoming: VisualC
     wardrobe: keepIdentity && previous.wardrobe ? previous.wardrobe : incoming.wardrobe,
     ageBand: keepIdentity && previous.ageBand ? previous.ageBand : incoming.ageBand,
     signature: keepIdentity ? (previous.signature || incoming.signature) : incoming.signature,
+    sourceEvidence: incoming.sourceEvidence?.length ? incoming.sourceEvidence : previous.sourceEvidence,
+    confidence: incoming.confidence ?? previous.confidence,
     seedHint: previous.seedHint || incoming.seedHint
   };
 }
@@ -274,7 +480,7 @@ export function bibleContractForPrompt(bible?: VisualBible | null): string {
     ].filter(Boolean).join('\n');
   }
   const chars = bible.characters.map((item) => (
-    `- ${item.id} ${item.name}（${item.role}，${item.ageBand}）：外形 ${item.look}；服装 ${item.wardrobe}${item.signature ? `；识别物 ${item.signature}` : ''}。禁止无故换脸、换发型、换装。`
+    `- ${item.id} ${item.name}（${item.role}，${item.ageBand}）：外形 ${item.look}；服装 ${item.wardrobe}${item.signature ? `；识别物 ${item.signature}` : ''}${item.sourceEvidence?.length ? `；文案依据「${item.sourceEvidence[0]}」` : ''}。禁止无故换脸、换发型、换装。`
   ));
   const locs = bible.locations.map((item) => (
     `- ${item.id} ${item.name}：${item.look}；时间 ${item.timeOfDay}`
@@ -338,7 +544,10 @@ export function composeShotVisualIntent(shot: ForecastShot, bible?: VisualBible 
   if (bible.mode === 'expository') {
     return action;
   }
-  const char = bible.characters.find((item) => shot.characterIds?.includes(item.id)) || leadCharacter(bible);
+  const hasExplicitCharacterSelection = Array.isArray(shot.characterIds);
+  const char = hasExplicitCharacterSelection
+    ? bible.characters.find((item) => shot.characterIds?.includes(item.id))
+    : leadCharacter(bible);
   const loc = bible.locations.find((item) => item.id === shot.locationId) || bible.locations[0];
   const parts: string[] = [];
   if (char) {
@@ -367,7 +576,7 @@ export function characterLockEnglish(bible?: VisualBible | null, characterIds?: 
   if (!bible || bible.mode !== 'story' || bible.characters.length === 0) {
     return bible?.paletteLock ? `Keep a consistent color grade: ${bible.paletteLock}.` : '';
   }
-  const chars = (characterIds?.length
+  const chars = (Array.isArray(characterIds)
     ? bible.characters.filter((item) => characterIds.includes(item.id))
     : [leadCharacter(bible)]
   ).filter((item): item is VisualCharacter => Boolean(item));
@@ -488,9 +697,8 @@ export function characterForShot(
   characterIds?: string[]
 ): VisualCharacter | null {
   if (!bible || bible.mode !== 'story') return null;
-  if (characterIds?.length) {
-    const hit = bible.characters.find((item) => characterIds.includes(item.id));
-    if (hit) return hit;
+  if (Array.isArray(characterIds)) {
+    return bible.characters.find((item) => characterIds.includes(item.id)) || null;
   }
   return leadCharacter(bible);
 }

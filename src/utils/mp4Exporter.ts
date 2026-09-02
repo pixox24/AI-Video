@@ -1,11 +1,92 @@
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
-import { VideoProject, StoryboardClip, CameraMotion, SubtitleConfig } from '../types';
-import { calculateSubtitleLayout } from './subtitleFormatter';
+import { VideoProject, StoryboardClip, CameraMotion } from '../types';
 import { DEFAULT_BGM_TRACK_ID, bgmById, resolveBgmTrackId, resolveTtsApi } from './presets';
 import { clipNarrationTimings, clipShotNarration, detectSpeechBounds, isNarrationTrackFresh } from './narrationTrack';
-import { ensureSubtitleFont, resolveSubtitleTypeface, subtitleCanvasFont } from './subtitleFonts';
+import { ensureSubtitleFont } from './subtitleFonts';
+import { drawClipSubtitles, prepareClipSubtitleLayout, PreparedSubtitleLayout } from './subtitleRenderer';
+import { outroFadeAlpha, outroTimeline, resolveOutro } from './outro';
+import { runConcurrencyPool } from './concurrencyPool';
 
 const TRANSITION_SECONDS = 0.4;
+const MAX_VIDEO_ENCODER_QUEUE = 8;
+const PROGRESS_UPDATE_INTERVAL_MS = 200;
+
+interface ClipTimeline {
+  starts: number[];
+  durations: number[];
+  totalDuration: number;
+}
+
+interface RenderPlan {
+  timeline: ClipTimeline;
+  vignette: CanvasGradient;
+  outro: ReturnType<typeof outroTimeline>;
+  subtitleLayouts: Array<PreparedSubtitleLayout | null>;
+}
+
+function buildClipTimeline(clips: StoryboardClip[]): ClipTimeline {
+  const starts: number[] = [];
+  const durations: number[] = [];
+  let totalDuration = 0;
+
+  clips.forEach((clip) => {
+    starts.push(totalDuration);
+    const duration = clip.duration || 3.5;
+    durations.push(duration);
+    totalDuration += duration;
+  });
+
+  return { starts, durations, totalDuration };
+}
+
+async function resolveVideoEncoderConfig(
+  width: number,
+  height: number,
+  fps: number,
+  bitrate: number
+): Promise<VideoEncoderConfig> {
+  const is4k = width >= 3000 || height >= 2000;
+  const codecCandidates = is4k
+    ? [fps > 30 ? 'avc1.640034' : 'avc1.640033', 'avc1.4d002a']
+    : ['avc1.4d002a', 'avc1.64002a'];
+  const optionVariants: Partial<VideoEncoderConfig>[] = [
+    { hardwareAcceleration: 'prefer-hardware', latencyMode: 'realtime' },
+    { hardwareAcceleration: 'prefer-hardware' },
+    {}
+  ];
+
+  for (const codec of codecCandidates) {
+    for (const options of optionVariants) {
+      const candidate: VideoEncoderConfig = {
+        codec,
+        width,
+        height,
+        bitrate,
+        framerate: fps,
+        ...options
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(candidate);
+        if (support.supported && support.config) return support.config;
+      } catch {
+        // Try the next profile or optional encoder hint.
+      }
+    }
+  }
+
+  throw new Error(`浏览器不支持 ${width}x${height} 的 H.264 编码配置`);
+}
+
+async function waitForVideoEncoderCapacity(
+  encoder: VideoEncoder,
+  getError: () => Error | null
+): Promise<void> {
+  while (encoder.encodeQueueSize > MAX_VIDEO_ENCODER_QUEUE) {
+    const error = getError();
+    if (error) throw error;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+}
 
 interface ClipAtTime {
   clip: StoryboardClip;
@@ -14,26 +95,39 @@ interface ClipAtTime {
   clipDuration: number;
 }
 
-function getClipAtTime(clips: StoryboardClip[], time: number): ClipAtTime | null {
-  let acc = 0;
-  for (let i = 0; i < clips.length; i++) {
-    const duration = clips[i].duration || 3.5;
-    if (time >= acc && time < acc + duration) {
-      return { clip: clips[i], index: i, clipTime: time - acc, clipDuration: duration };
+function getClipAtTime(clips: StoryboardClip[], time: number, timeline?: ClipTimeline): ClipAtTime | null {
+  if (clips.length === 0) return null;
+
+  const resolved = timeline || buildClipTimeline(clips);
+  let low = 0;
+  let high = clips.length - 1;
+  let index = 0;
+
+  // Find the last clip whose start is at or before the requested timestamp.
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (resolved.starts[mid] <= time) {
+      index = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
     }
-    acc += duration;
   }
-  if (clips.length > 0) {
-    const lastIndex = clips.length - 1;
-    const lastDuration = clips[lastIndex].duration || 3.5;
-    return {
-      clip: clips[lastIndex],
-      index: lastIndex,
-      clipTime: lastDuration,
-      clipDuration: lastDuration
-    };
+
+  const start = resolved.starts[index] || 0;
+  const duration = resolved.durations[index] || clips[index].duration || 3.5;
+  if (time >= start && time < start + duration) {
+    return { clip: clips[index], index, clipTime: time - start, clipDuration: duration };
   }
-  return null;
+
+  const lastIndex = clips.length - 1;
+  const lastDuration = resolved.durations[lastIndex] || clips[lastIndex].duration || 3.5;
+  return {
+    clip: clips[lastIndex],
+    index: lastIndex,
+    clipTime: lastDuration,
+    clipDuration: lastDuration
+  };
 }
 
 function cameraTransform(motion: CameraMotion | string, progress: number, width: number, height: number) {
@@ -221,7 +315,7 @@ async function renderOfflineAudio(
     // 1. Fetch & decode all narration voice clips
     onProgress?.(10, '正在预拉取全分镜 AI 语音解说...');
     const speechIntervals: { start: number; end: number }[] = [];
-    let accTime = 0;
+    const timeline = buildClipTimeline(project.clips);
 
     if (voiceoverEnabled) {
       const track = project.audio?.narrationTrack;
@@ -251,55 +345,55 @@ async function renderOfflineAudio(
       }
 
       if (!mixedFullTrack) {
-        for (let i = 0; i < project.clips.length; i++) {
-          const clip = project.clips[i];
-          const clipStart = accTime;
-          const clipDur = clip.duration || 3.5;
-          accTime += clipDur;
+        const ttsItems = project.clips
+          .map((clip, index) => ({ clip, index, start: timeline.starts[index] || 0 }))
+          .filter((item) => Boolean((item.clip.narration || '').trim()));
 
-          const spokenText = (clip.narration || '').trim();
-          if (!spokenText) continue;
-
-          try {
+        const ttsResults = await runConcurrencyPool(
+          ttsItems,
+          async (item) => {
             const res = await fetch('/api/audio/tts', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                text: spokenText,
+                text: (item.clip.narration || '').trim(),
                 character: voiceCharacter,
                 rate: speechRate,
                 ttsApi: resolveTtsApi(project.settings.customTtsApi)
               })
             });
-
-            if (res.ok) {
-              const data = await res.json();
-              if (data?.audioUrl) {
-                const arrayBuf = data.audioUrl.startsWith('data:')
-                  ? base64ToArrayBuffer(data.audioUrl)
-                  : await (await fetch(data.audioUrl)).arrayBuffer();
-                const decodedBuffer = await decodeCtx.decodeAudioData(arrayBuf);
-
-                const source = offlineCtx.createBufferSource();
-                source.buffer = decodedBuffer;
-
-                const gain = offlineCtx.createGain();
-                gain.gain.value = voiceoverVolume;
-
-                source.connect(gain);
-                gain.connect(offlineCtx.destination);
-                source.start(clipStart);
-
-                speechIntervals.push({
-                  start: clipStart,
-                  end: Math.min(totalDuration, clipStart + decodedBuffer.duration)
-                });
-              }
+            if (!res.ok) throw new Error(`TTS request failed (${res.status})`);
+            const data = await res.json();
+            if (!data?.audioUrl) throw new Error('TTS response has no audioUrl');
+            const arrayBuf = data.audioUrl.startsWith('data:')
+              ? base64ToArrayBuffer(data.audioUrl)
+              : await (await fetch(data.audioUrl)).arrayBuffer();
+            return { item, decoded: await decodeCtx.decodeAudioData(arrayBuf) };
+          },
+          {
+            concurrency: 3,
+            getId: (item) => item.clip.id,
+            onItemError: (task, error) => {
+              console.warn(`[AudioExport] Clip ${task.item.index + 1} TTS pre-fetch warning:`, error);
             }
-          } catch (ttsErr) {
-            console.warn(`[AudioExport] Clip ${i + 1} TTS pre-fetch warning:`, ttsErr);
           }
-        }
+        );
+
+        ttsResults.forEach((result) => {
+          if (!result?.ok || !result.result) return;
+          const { item, decoded } = result.result;
+          const source = offlineCtx.createBufferSource();
+          source.buffer = decoded;
+          const gain = offlineCtx.createGain();
+          gain.gain.value = voiceoverVolume;
+          source.connect(gain);
+          gain.connect(offlineCtx.destination);
+          source.start(item.start);
+          speechIntervals.push({
+            start: item.start,
+            end: Math.min(totalDuration, item.start + decoded.duration)
+          });
+        });
       }
     }
 
@@ -338,7 +432,16 @@ async function renderOfflineAudio(
           bgmSource.loop = true;
 
           const bgmGain = offlineCtx.createGain();
-          
+
+          // 片尾音乐淡出：窗口钳制在旁白结束点之后；闪避回升完成后再开始收弱
+          const outro = outroTimeline(project.clips, resolveOutro(project.settings));
+          const lastDuckRelease = speechIntervals.length
+            ? Math.min(totalDuration, speechIntervals[speechIntervals.length - 1].end + 0.15) + 0.2
+            : 0;
+          const musicFadeStart = outro && outro.musicFadeDuration > 0
+            ? Math.max(outro.musicFadeStart, lastDuckRelease)
+            : Number.POSITIVE_INFINITY;
+
           if (audioDucking && speechIntervals.length > 0) {
             // Apply dynamic volume curve with smooth fade in/out
             const duckedVol = bgmVolume * 0.35;
@@ -356,6 +459,16 @@ async function renderOfflineAudio(
               bgmGain.gain.setValueAtTime(duckedVol, interval.end);
               bgmGain.gain.linearRampToValueAtTime(bgmVolume, duckEnd + 0.2);
             });
+
+            if (musicFadeStart < totalDuration) {
+              bgmGain.gain.setValueAtTime(bgmVolume, musicFadeStart);
+              bgmGain.gain.linearRampToValueAtTime(0, Math.max(musicFadeStart + 0.05, totalDuration));
+            }
+          } else if (musicFadeStart < totalDuration) {
+            const holdVol = bgmVolume;
+            bgmGain.gain.setValueAtTime(holdVol, 0);
+            bgmGain.gain.setValueAtTime(holdVol, musicFadeStart);
+            bgmGain.gain.linearRampToValueAtTime(0, Math.max(musicFadeStart + 0.05, totalDuration));
           } else {
             bgmGain.gain.value = bgmVolume;
           }
@@ -436,6 +549,26 @@ export async function exportProjectToMP4(
     throw new Error('无法创建 2D 渲染上下文');
   }
 
+  const timeline = buildClipTimeline(project.clips);
+  const vignette = ctx.createRadialGradient(
+    width / 2, height / 2, Math.min(width, height) * 0.35,
+    width / 2, height / 2, Math.max(width, height) * 0.75
+  );
+  vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vignette.addColorStop(1, 'rgba(0, 0, 0, 0.45)');
+  const subtitleLayouts = project.clips.map((clip) => {
+    const text = clipShotNarration(clip);
+    return project.subtitles?.enabled && text
+      ? prepareClipSubtitleLayout(ctx, width, clip, project.subtitles, text)
+      : null;
+  });
+  const renderPlan: RenderPlan = {
+    timeline,
+    vignette,
+    outro: outroTimeline(project.clips, resolveOutro(project.settings)),
+    subtitleLayouts
+  };
+
   // 1. Preload all images and render audio track concurrently
   onProgress?.(8, '正在预加载各分镜原画并混音音轨...');
 
@@ -509,14 +642,11 @@ export async function exportProjectToMP4(
         }
       });
 
-      // Configure H.264 Video Encoder
-      videoEncoder.configure({
-        codec: 'avc1.4d002a', // Main Profile Level 4.2
-        width: width,
-        height: height,
-        bitrate: project.settings.exportQuality === '4k' ? 20_000_000 : 8_000_000,
-        framerate: fps
-      });
+      // Probe the actual profile before configuring. Main@4.2 is fine for
+      // 1080p, but it is invalid for many 4K targets and would force fallback.
+      const videoBitrate = project.settings.exportQuality === '4k' ? 20_000_000 : 8_000_000;
+      const videoConfig = await resolveVideoEncoderConfig(width, height, fps, videoBitrate);
+      videoEncoder.configure(videoConfig);
 
       // 2. Encode Audio using AudioEncoder if available
       let audioEncoder: AudioEncoder | null = null;
@@ -575,11 +705,12 @@ export async function exportProjectToMP4(
       }
 
       // 3. Frame-by-frame offline video rendering loop
+      let lastProgressAt = 0;
       for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
         if (encodeError) throw encodeError;
 
         const currentTime = frameIndex / fps;
-        renderCanvasFrame(ctx, width, height, project, loadedImages, currentTime);
+        renderCanvasFrame(ctx, width, height, project, loadedImages, currentTime, renderPlan);
 
         const timestampMicros = Math.round(currentTime * 1_000_000);
         const durationMicros = Math.round((1 / fps) * 1_000_000);
@@ -594,16 +725,22 @@ export async function exportProjectToMP4(
         videoEncoder.encode(videoFrame, { keyFrame: isKeyFrame });
         videoFrame.close();
 
-        if (frameIndex % 5 === 0 || frameIndex === totalFrames - 1) {
+        await waitForVideoEncoderCapacity(videoEncoder, () => encodeError);
+
+        const now = performance.now();
+        if (frameIndex === 0 || frameIndex === totalFrames - 1 || now - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
           const currentPct = 25 + Math.floor((frameIndex / totalFrames) * 70);
           onProgress?.(currentPct, `正在逐帧编码 H.264 视频流 (${frameIndex + 1}/${totalFrames} 帧)...`);
-          // Yield to main thread for responsive UI
+          lastProgressAt = now;
+          // Yield periodically so React can repaint without throttling every frame.
           await new Promise((r) => setTimeout(r, 0));
         }
       }
 
       onProgress?.(96, '正在封装 MP4 容器格式与音频元数据...');
       await videoEncoder.flush();
+      videoEncoder.close();
+      if (audioEncoder && audioEncoder.state !== 'closed') audioEncoder.close();
       muxer.finalize();
 
       const mp4Blob = new Blob([target.buffer], { type: 'video/mp4' });
@@ -625,7 +762,7 @@ export async function exportProjectToMP4(
 
   // Fallback: MediaRecorder stream recording with audio track
   onProgress?.(30, '使用兼容模式渲染视频与音频流...');
-  return exportViaMediaRecorder(project, canvas, ctx, width, height, loadedImages, mixedAudioBuffer, onProgress);
+  return exportViaMediaRecorder(project, canvas, ctx, width, height, loadedImages, mixedAudioBuffer, renderPlan, onProgress);
 }
 
 /**
@@ -638,9 +775,10 @@ function renderCanvasFrame(
   height: number,
   project: VideoProject,
   loadedImages: (HTMLImageElement | null)[],
-  currentTime: number
+  currentTime: number,
+  renderPlan?: RenderPlan
 ) {
-  const currentInfo = getClipAtTime(project.clips, currentTime);
+  const currentInfo = getClipAtTime(project.clips, currentTime, renderPlan?.timeline);
   const fallbackClip: StoryboardClip = project.clips[0] || {
     id: 'default',
     order: 1,
@@ -725,104 +863,39 @@ function renderCanvasFrame(
 
   ctx.restore();
 
-  const vignette = ctx.createRadialGradient(
-    width / 2, height / 2, Math.min(width, height) * 0.35,
-    width / 2, height / 2, Math.max(width, height) * 0.75
-  );
-  vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-  vignette.addColorStop(1, 'rgba(0, 0, 0, 0.45)');
+  const vignette = renderPlan?.vignette || (() => {
+    const gradient = ctx.createRadialGradient(
+      width / 2, height / 2, Math.min(width, height) * 0.35,
+      width / 2, height / 2, Math.max(width, height) * 0.75
+    );
+    gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.45)');
+    return gradient;
+  })();
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, width, height);
 
   const subtitleText = clipShotNarration(activeClip);
   if (project.subtitles?.enabled && subtitleText) {
-    drawExportSubtitles(ctx, width, height, activeClip, project.subtitles, clipProgress, subtitleText);
-  }
-}
-
-function drawExportSubtitles(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  clip: StoryboardClip,
-  config: SubtitleConfig,
-  progress: number,
-  subtitleText: string
-) {
-  const baseFontSize = Math.round(config.fontSize * (width / 950));
-  const posY = (height * config.positionY) / 100;
-  const maxWidthRatio = config.maxWidthRatio || 0.84;
-  const maxLines = config.maxLines || 3;
-  const typeface = resolveSubtitleTypeface(config);
-
-  const layout = calculateSubtitleLayout(
-    ctx,
-    subtitleText,
-    clip.secondaryText,
-    width,
-    baseFontSize,
-    config.bilingual,
-    maxWidthRatio,
-    maxLines,
-    typeface
-  );
-
-  if (layout.lines.length === 0) return;
-
-  let scale = 1.0;
-  if (config.animation === 'pop') {
-    scale = progress < 0.15 ? 0.92 + (progress / 0.15) * 0.08 : 1.0;
+    drawClipSubtitles(
+      ctx,
+      width,
+      height,
+      activeClip,
+      project.subtitles,
+      clipProgress,
+      subtitleText,
+      renderPlan?.subtitleLayouts[activeClipIndex]
+    );
   }
 
-  ctx.save();
-  ctx.translate(width / 2, posY);
-  ctx.scale(scale, scale);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  if (config.showBackground) {
-    ctx.fillStyle = config.backgroundColor || 'rgba(0, 0, 0, 0.75)';
-    const radius = Math.min(layout.boxHeight * 0.35, layout.fontSize * 0.5);
-    ctx.beginPath();
-    ctx.roundRect(-layout.boxWidth / 2, -layout.boxHeight / 2, layout.boxWidth, layout.boxHeight, radius);
-    ctx.fill();
+  // Outro fade-to-black: 与预览端共享同一套片尾时间轴计算
+  const outro = renderPlan?.outro || outroTimeline(project.clips, resolveOutro(project.settings));
+  const outroAlpha = outroFadeAlpha(outro, currentTime);
+  if (outroAlpha > 0) {
+    ctx.fillStyle = `rgba(0, 0, 0, ${outroAlpha})`;
+    ctx.fillRect(0, 0, width, height);
   }
-
-  const primaryBlockHeight = layout.lines.length * layout.lineHeight;
-  const startY = -layout.totalHeight / 2 + layout.lineHeight / 2;
-
-  ctx.font = subtitleCanvasFont(typeface.primaryFamily, layout.fontSize, typeface.primaryWeight);
-
-  layout.lines.forEach((line, idx) => {
-    const lineY = startY + idx * layout.lineHeight;
-    if (config.showStroke) {
-      ctx.strokeStyle = config.strokeColor || '#000000';
-      ctx.lineWidth = Math.max(3, layout.fontSize * 0.16);
-      ctx.lineJoin = 'round';
-      ctx.strokeText(line, 0, lineY);
-    }
-    ctx.fillStyle = config.primaryColor || '#ffffff';
-    ctx.fillText(line, 0, lineY);
-  });
-
-  if (config.bilingual && layout.secondaryLines.length > 0) {
-    ctx.font = subtitleCanvasFont(typeface.secondaryFamily, layout.secondaryFontSize, typeface.secondaryWeight);
-    const secondaryStartY = -layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;
-
-    layout.secondaryLines.forEach((secLine, idx) => {
-      const secLineY = secondaryStartY + idx * layout.secondaryLineHeight;
-      if (config.showStroke) {
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = Math.max(2, layout.secondaryFontSize * 0.15);
-        ctx.lineJoin = 'round';
-        ctx.strokeText(secLine, 0, secLineY);
-      }
-      ctx.fillStyle = config.highlightColor || '#facc15';
-      ctx.fillText(secLine, 0, secLineY);
-    });
-  }
-
-  ctx.restore();
 }
 
 /**
@@ -836,6 +909,7 @@ async function exportViaMediaRecorder(
   height: number,
   loadedImages: (HTMLImageElement | null)[],
   mixedAudioBuffer: AudioBuffer | null,
+  renderPlan: RenderPlan,
   onProgress?: ExportProgressCallback
 ): Promise<{ blob: Blob; url: string; filename: string; format: 'mp4' | 'webm' }> {
   const fps = project.settings.frameRate || 30;
@@ -919,7 +993,7 @@ async function exportViaMediaRecorder(
       }
 
       const currentTime = frame / fps;
-      renderCanvasFrame(ctx, width, height, project, loadedImages, currentTime);
+      renderCanvasFrame(ctx, width, height, project, loadedImages, currentTime, renderPlan);
       frame++;
 
       if (frame % 5 === 0 || frame === totalFrames - 1) {

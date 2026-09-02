@@ -32,6 +32,8 @@ import {
   bibleContractForPrompt,
   bibleSourceHash,
   fallbackVisualBible,
+  groundVisualBible,
+  narrativeEntityContract,
   mergeVisualBible,
   normalizeVisualBible,
   visualBibleModeForGenre
@@ -47,7 +49,7 @@ function incomingStyleContract(raw: unknown): string {
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const generatedDir = path.join(process.cwd(), "public", "generated");
 const dataDir = path.join(process.cwd(), "data");
 const projectsDir = path.join(dataDir, "projects");
@@ -510,7 +512,7 @@ function validateGeneratedShots(
     order: shot.order || index + 1,
     duration: typeof shot.duration === "number" ? shot.duration : 3.5,
     narration: shot.narration || `镜头 ${index + 1}：关于${fallbackTitle}的精彩解析`,
-    secondaryText: shot.secondaryText || `Shot ${index + 1}: Key insight on ${fallbackTitle}`,
+    secondaryText: shot.secondaryText || "",
     visualPrompt:
       shot.visualPrompt ||
       `Cinematic visual for ${fallbackTitle}, scene ${index + 1}, highly detailed, 8k resolution`,
@@ -1612,7 +1614,9 @@ app.post("/api/script/visual-bible", async (req, res) => {
   const prompt = mode === "story"
     ? `根据整段口播，编译一份短视频「画面圣经 VisualBible」。这不是风格滤镜，是故事里有谁、在哪、什么会回来。
 硬规则：
-- 角色 1 到 2 个。lead 必须可被指认：年龄段、发型、体态、服装。禁止只写性格。
+- 角色 0 到 2 个。只有文案明确出现人物或身份时才创建角色；没有人物就输出 characters=[]，不得为了连续性新增主角。
+- 每个角色必须对应文案实体，sourceEvidence 必须逐字引用文案短句；不得把风格参考图里的人物当成角色。
+- lead 必须可被指认：年龄段、发型、体态、服装。性别、年龄、职业未在文案出现时不得擅自猜测。
 - 场景 1 到 2 个。全片优先待在这些空间，不要每句换地方。
 - 若口播有会回来的物件，写 motif；没有就 motif=null。
 - refs 必须是空数组（脸部参考图下一阶段才接）。seedHint 可空。
@@ -1622,12 +1626,14 @@ app.post("/api/script/visual-bible", async (req, res) => {
 
 ${styleContract}
 
+${narrativeEntityContract(text)}
+
 【体裁】${genre || "故事"}
 【题目】${title || ""}
 【口播】
 ${text}
 
-只输出 JSON：{"mode":"story","logline":"","paletteLock":"","characters":[{"id":"char-lead","name":"","role":"lead","ageBand":"","look":"","wardrobe":"","signature":"","locked":false,"refs":[]}],"locations":[{"id":"loc-1","name":"","look":"","timeOfDay":"","locked":false,"refs":[]}],"motif":null,"continuityRule":"同一人同一空间推进；对照才换主体；收束回收开场"}`
+只输出 JSON：{"mode":"story","logline":"","paletteLock":"","characters":[{"id":"char-lead","name":"","role":"lead","ageBand":"","look":"","wardrobe":"","signature":"","sourceEvidence":[],"confidence":0,"locked":false,"refs":[]}],"locations":[{"id":"loc-1","name":"","look":"","timeOfDay":"","locked":false,"refs":[]}],"motif":null,"continuityRule":"同一人同一空间推进；对照才换主体；收束回收开场"}`
     : `根据整段口播，编译说明型短视频的画面约束。不要硬编主角连续剧。
 - mode 必须是 expository
 - characters 通常为空；只有口播明显反复同一讲解者才给 1 个
@@ -1654,12 +1660,12 @@ ${text}
     const incoming = normalized && (normalized.characters.length > 0 || normalized.mode === "expository" || normalized.paletteLock)
       ? { ...normalized, sourceHash: bibleSourceHash(text, genre, mode), generatedAt: Date.now() }
       : fallbackVisualBible({ narration: text, genre, title });
-    const merged = mergeVisualBible(prev, incoming);
+    const merged = groundVisualBible(mergeVisualBible(prev, incoming), text);
     return res.json({ bible: merged });
   } catch (error: any) {
     console.warn("[Visual Bible] fallback:", error?.message || error);
     return res.json({
-      bible: mergeVisualBible(prev, fallbackVisualBible({ narration: text, genre, title })),
+      bible: groundVisualBible(mergeVisualBible(prev, fallbackVisualBible({ narration: text, genre, title })), text),
       fallback: true
     });
   }
@@ -1747,6 +1753,96 @@ app.post("/api/script/polish-narration", async (req, res) => {
   }
 });
 
+// 2.1.9 Batch-translate per-clip subtitle lines into condensed bilingual English.
+// Units are ID-pinned (clip id -> displayed Chinese slice) so the answer can never drift.
+app.post("/api/script/translate-secondary", async (req, res) => {
+  const { units, llmApi } = req.body || {};
+  const list = (Array.isArray(units) ? units : [])
+    .map((u: any, index: number) => ({ id: String(u?.id || `u${index}`), zh: String(u?.zh || "").trim() }))
+    .filter((u: any) => u.zh);
+  if (list.length === 0) {
+    return res.status(400).json({ error: "units are required" });
+  }
+  if (list.length > 60) {
+    return res.status(400).json({ error: "一次最多翻译 60 条" });
+  }
+
+  const zhChars = (t: string) => (t.match(/[\u4e00-\u9fa5]/g) || []).length || t.replace(/\s/g, "").length;
+  const enWords = (t: string) => t.trim().split(/\s+/).filter(Boolean).length;
+  const looksEnglish = (t: string) => (t.match(/[A-Za-z]/g) || []).length >= 3 && !/[\u4e00-\u9fa5]/.test(t);
+  const plausibleRatio = (zh: string, en: string) => {
+    const ratio = enWords(en) / Math.max(1, zhChars(zh));
+    return ratio >= 0.2 && ratio <= 2.6;
+  };
+  const tooLong = (t: string) => t.length > 80;
+
+  const buildPrompt = (items: { id: string; zh: string }[], stricter: boolean) => `把下面的中文口播切片逐条翻译成短视频画面上的英文字幕。
+硬规则：
+- 输出 JSON {"items":[{"id":输入里的id,"en":"英文"}]}，id 必须与输入一一对应，一条不多、一条不少。
+- 字幕级精简英文：口语自然、短词优先；单条尽量不超过 45 个英文字符，最多两句。
+- 不加引号，不写拼音，不夹杂中文；专有名词保留原文，数字用阿拉伯数字。
+- 只翻译给定的中文，不要翻译别的句子，也不要合并或拆分条目。
+${stricter ? "- 上一轮有的条目缺失、过长或可疑。这次每条务必更短（尽量 ≤ 45 字符），宁可简化也不要超长。\n" : ""}
+【待翻译】
+${items.map((u, i) => `${i + 1}. id=${u.id}\n中文：${u.zh}`).join("\n\n")}
+
+只输出 JSON。`;
+
+  const askOnce = async (items: { id: string; zh: string }[], stricter: boolean): Promise<Map<string, string>> => {
+    const out = new Map<string, string>();
+    const parsed = await runScriptLlmJson({
+      llmApi,
+      system: "你是只输出合法 JSON 的字幕翻译器。",
+      user: buildPrompt(items, stricter),
+      temperature: 0.3
+    });
+    const rows = Array.isArray(parsed?.items) ? parsed.items : [];
+    for (const row of rows) {
+      const id = String(row?.id || "");
+      const en = String(row?.en || "").trim().replace(/^["'`]+|["'`]+$/g, "");
+      if (id && en) out.set(id, en);
+    }
+    return out;
+  };
+
+  try {
+    const byId = new Map<string, string>();
+    let result = await askOnce(list, false);
+    const missingIds = () => list.filter((u) => !result.has(u.id)).length;
+    if (missingIds() > 0) {
+      const stricter = await askOnce(list, true);
+      for (const [id, en] of stricter) result.set(id, en);
+    }
+
+    // Per-unit validation: not English / implausible pairing / too long -> retry that unit alone.
+    let extraCalls = 0;
+    for (const u of list) {
+      let en = result.get(u.id);
+      const bad = (t?: string) => !t || !looksEnglish(t) || !plausibleRatio(u.zh, t) || tooLong(t);
+      if (en && !bad(en)) {
+        byId.set(u.id, en);
+        continue;
+      }
+      while (bad(en) && extraCalls < 16) {
+        extraCalls++;
+        const one = await askOnce([u], true);
+        en = one.get(u.id);
+      }
+      if (en && looksEnglish(en)) byId.set(u.id, en);
+    }
+
+    return res.json({
+      ok: true,
+      items: list.filter((u) => byId.has(u.id)).map((u) => ({ id: u.id, en: byId.get(u.id) })),
+      missing: list.filter((u) => !byId.has(u.id)).map((u) => u.id),
+      source: "llm"
+    });
+  } catch (error: any) {
+    console.warn("[Translate Secondary] LLM failed:", error?.message || error);
+    return res.status(500).json({ error: error?.message || "英文翻译失败" });
+  }
+});
+
 // 2.2 Split free-form long text into structured storyboard shots
 app.post("/api/script/split-text", async (req, res) => {
   const { rawText, visualStyle = "cinematic", targetShots, llmApi } = req.body || {};
@@ -1796,7 +1892,7 @@ app.post("/api/script/split-text", async (req, res) => {
         order: idx + 1,
         duration,
         narration: chunk,
-        secondaryText: `Scene ${idx + 1}: ${chunk.slice(0, 40)}`,
+        secondaryText: "",
         visualPrompt: `Cinematic high quality visual depicting ${chunk.slice(0, 50)}, dramatic atmospheric lighting, 8k resolution, photorealistic masterwork`,
         chineseVisualPrompt: `画面表现：${chunk}`,
         cameraMotion: cameraMotions[idx % cameraMotions.length],
@@ -2181,6 +2277,16 @@ app.post("/api/visual/generate", async (req, res) => {
       ? (keepStructure ? `${refLock}\n${scenePrompt}` : `${refLock} Scene: ${scenePrompt}`)
       : scenePrompt;
     const referenceImage = characterRef?.url ? await resolveReferenceImageDataUrl(String(characterRef.url)) : null;
+    if (characterRef?.url && !referenceImage) {
+      return res.status(400).json({
+        ok: false,
+        error: '角色参考图无法读取，已停止本次生图',
+        diagnosis: '参考图没有成功送入服务端，未执行无参考图降级。请重新上传角色图。',
+        referenceSent: false,
+        referenceAccepted: false,
+        referenceDropped: true
+      });
+    }
 
     // =========================================================================
     // PRIORITY 1: User-configured Custom Image Generation Provider API
@@ -2198,7 +2304,10 @@ app.post("/api/visual/generate", async (req, res) => {
       return res.status(400).json({
         ok: false,
         error: "请先在设置里配置生图供应商和 API Key",
-        diagnosis: "已取消内置免费引擎。主通道填好接口地址、密钥和模型后才能出图。"
+        diagnosis: "已取消内置免费引擎。主通道填好接口地址、密钥和模型后才能出图。",
+        referenceSent: false,
+        referenceAccepted: false,
+        referenceDropped: Boolean(referenceImage)
       });
     }
 
@@ -2210,7 +2319,10 @@ app.post("/api/visual/generate", async (req, res) => {
           return res.status(400).json({
             ok: false,
             error: "请填写生图模型名称",
-            diagnosis: "可在设置里拉取模型列表，或手动填入供应商提供的模型 id。"
+            diagnosis: "可在设置里拉取模型列表，或手动填入供应商提供的模型 id。",
+            referenceSent: false,
+            referenceAccepted: false,
+            referenceDropped: Boolean(referenceImage)
           });
         }
 
@@ -2234,7 +2346,10 @@ app.post("/api/visual/generate", async (req, res) => {
             source: 'custom-provider-api',
             model: targetModel,
             provider: customApi.provider || 'custom',
-            protocolUsed: customResult.methodUsed
+            protocolUsed: customResult.methodUsed,
+            referenceSent: Boolean(customResult.referenceSent),
+            referenceAccepted: Boolean(customResult.referenceAccepted),
+            referenceDropped: Boolean(customResult.referenceDropped)
           });
         } else {
           console.warn('[Custom Image API] Generation failed:', customResult.error, customResult.diagnosis);
@@ -2245,7 +2360,10 @@ app.post("/api/visual/generate", async (req, res) => {
             diagnosis: customResult.diagnosis || '请检查供应商 API 密钥有效性、账户余额或模型名称',
             rawError: customResult.rawError,
             provider: customApi.provider || 'custom',
-            model: targetModel
+            model: targetModel,
+            referenceSent: Boolean(customResult.referenceSent),
+            referenceAccepted: Boolean(customResult.referenceAccepted),
+            referenceDropped: Boolean(customResult.referenceDropped)
           });
         }
       } catch (customApiErr: any) {
@@ -2253,7 +2371,10 @@ app.post("/api/visual/generate", async (req, res) => {
         return res.status(500).json({
           ok: false,
           error: `供应商接口调用异常: ${customApiErr?.message || customApiErr}`,
-          diagnosis: '连接第三方供应商服务超时或网络中断，请检查 Endpoint 连通性'
+          diagnosis: '连接第三方供应商服务超时或网络中断，请检查 Endpoint 连通性',
+          referenceSent: Boolean(referenceImage),
+          referenceAccepted: false,
+          referenceDropped: Boolean(referenceImage)
         });
       }
     }
@@ -2261,7 +2382,10 @@ app.post("/api/visual/generate", async (req, res) => {
     return res.status(400).json({
       ok: false,
       error: "请先在设置里配置生图供应商和 API Key",
-      diagnosis: "已取消内置免费引擎。主通道填好接口地址、密钥和模型后才能出图。"
+      diagnosis: "已取消内置免费引擎。主通道填好接口地址、密钥和模型后才能出图。",
+      referenceSent: false,
+      referenceAccepted: false,
+      referenceDropped: Boolean(referenceImage)
     });
   } catch (error: any) {
     console.error("Visual generation error:", error);
@@ -2615,6 +2739,9 @@ async function executeCustomImageRequest(options: {
   imageUrl?: string;
   methodUsed?: string;
   endpointUsed?: string;
+  referenceSent?: boolean;
+  referenceAccepted?: boolean;
+  referenceDropped?: boolean;
   error?: string;
   rawError?: string;
   diagnosis?: string;
@@ -2667,6 +2794,7 @@ async function executeCustomImageRequest(options: {
   let lastRawError = '';
   let lastStatus = 0;
   let imagesJobAccepted = false;
+  const referenceSent = Boolean(referenceImage);
 
   const useChatForReference = Boolean(referenceImage) && protocol !== 'images';
   // METHOD 1: Chat Completions Protocol (if requested, or when locking a character from a reference photo)
@@ -2709,7 +2837,10 @@ async function executeCustomImageRequest(options: {
             ok: true,
             imageUrl: img,
             methodUsed: 'Chat Completions (/v1/chat/completions)',
-            endpointUsed: chatEndpoint
+            endpointUsed: chatEndpoint,
+            referenceSent,
+            referenceAccepted: referenceSent,
+            referenceDropped: false
           };
         }
       }
@@ -2759,12 +2890,17 @@ async function executeCustomImageRequest(options: {
         ok: true,
         imageUrl: `data:${mime};base64,${b64}`,
         methodUsed: 'Direct Image Stream',
-        endpointUsed: imagesEndpoint
+        endpointUsed: imagesEndpoint,
+        referenceSent,
+        referenceAccepted: referenceSent,
+        referenceDropped: false
       };
     }
 
-    // If 400 Bad Request happens (some providers reject specific sizes), retry with minimal payload
-    if (res.status === 400) {
+    // Retry with a minimal payload only when no reference is involved. Dropping a
+    // reference image would make a successful response look like a reference-based
+    // generation when it was actually text-only.
+    if (res.status === 400 && !referenceImage) {
       console.log(`[Custom Image API] Retrying ${imagesEndpoint} with minimal payload...`);
       res = await fetch(imagesEndpoint, {
         method: 'POST',
@@ -2807,7 +2943,10 @@ async function executeCustomImageRequest(options: {
               ok: true,
               imageUrl: img,
               methodUsed: 'Images API (/v1/images/generations)',
-              endpointUsed: imagesEndpoint
+              endpointUsed: imagesEndpoint,
+              referenceSent,
+              referenceAccepted: referenceSent,
+              referenceDropped: false
             };
           }
 
@@ -2820,7 +2959,10 @@ async function executeCustomImageRequest(options: {
                 ok: true,
                 imageUrl: polledImg,
                 methodUsed: 'Async Image Task Polling',
-                endpointUsed: imagesEndpoint
+                endpointUsed: imagesEndpoint,
+                referenceSent,
+                referenceAccepted: referenceSent,
+                referenceDropped: false
               };
             }
             lastError = `异步生图任务 ${taskId} 已提交，但未在时限内取回图片`;
@@ -2840,7 +2982,10 @@ async function executeCustomImageRequest(options: {
             ok: true,
             imageUrl: img,
             methodUsed: 'Images API (Text format)',
-            endpointUsed: imagesEndpoint
+            endpointUsed: imagesEndpoint,
+            referenceSent,
+            referenceAccepted: referenceSent,
+            referenceDropped: false
           };
         }
       }
@@ -2862,7 +3007,8 @@ async function executeCustomImageRequest(options: {
     if (aborted) lastStatus = 408;
   }
 
-  // METHOD 3: Chat Completions fallback — only when Images 通道明确不可用
+  // METHOD 3: Chat Completions fallback — only when Images 通道明确不可用.
+  // Preserve the reference image; never silently fall back to text-only generation.
   // Never fallback after a job was already accepted, or after timeout: that would submit a second generation.
   const imagesChannelMissing =
     lastStatus === 404 ||
@@ -2893,7 +3039,12 @@ async function executeCustomImageRequest(options: {
           messages: [
             {
               role: 'user',
-              content: `Please generate and draw an image based on this description. Return the image directly or as markdown:\n${prompt}`
+              content: referenceImage
+                ? [
+                    { type: 'image_url', image_url: { url: referenceImage } },
+                    { type: 'text', text: prompt }
+                  ]
+                : `Please generate and draw an image based on this description. Return the image directly or as markdown:\n${prompt}`
             }
           ]
         }),
@@ -2918,7 +3069,10 @@ async function executeCustomImageRequest(options: {
             ok: true,
             imageUrl: img,
             methodUsed: 'Chat-to-Image 自适应通道 (/v1/chat/completions)',
-            endpointUsed: chatEndpoint
+            endpointUsed: chatEndpoint,
+            referenceSent,
+            referenceAccepted: referenceSent,
+            referenceDropped: false
           };
         } else {
           console.warn('[Custom Image API] Chat returned text but no image link parsed:', rawChatText.slice(0, 300));
@@ -2981,6 +3135,9 @@ async function executeCustomImageRequest(options: {
     ok: false,
     status: lastStatus,
     endpointUsed: imagesEndpoint,
+    referenceSent,
+    referenceAccepted: false,
+    referenceDropped: referenceSent,
     error: `[HTTP ${lastStatus || 'ERR'}] ${lastError || '请求失败'}`,
     rawError: lastRawError,
     diagnosis

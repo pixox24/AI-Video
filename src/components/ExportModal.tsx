@@ -18,6 +18,7 @@ import confetti from 'canvas-confetti';
 import { VideoProject } from '../types';
 import { exportProjectToMP4 } from '../utils/mp4Exporter';
 import { clipShotNarration } from '../utils/narrationTrack';
+import { isSecondaryUsable } from '../utils/secondaryText';
 import { buildExportChecklist } from '../utils/exportChecklist';
 import { isStudioFontReady, loadStudioFont, resolveSubtitleFontId, studioFontById } from '../utils/subtitleFonts';
 
@@ -146,7 +147,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
       srtContent += `${index + 1}\n`;
       srtContent += `${formatSRTTime(startSec)} --> ${formatSRTTime(endSec)}\n`;
       srtContent += `${clipShotNarration(clip)}\n`;
-      if (clip.secondaryText) srtContent += `${clip.secondaryText}\n`;
+      if (isSecondaryUsable(clip)) srtContent += `${clip.secondaryText}\n`;
       srtContent += `\n`;
     });
 

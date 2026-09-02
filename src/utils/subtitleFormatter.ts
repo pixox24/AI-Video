@@ -225,21 +225,71 @@ export function calculateSubtitleLayout(
   let secondaryFontSize = Math.round(currentFontSize * 0.62);
   let secondaryLineHeight = Math.round(secondaryFontSize * 1.28);
 
-  // Calculate secondary text lines if bilingual
+  // Bilingual: joint adaptive ladder over (primary size × secondary line count × secondary size).
+  // Invariants: text is never truncated, every line is width-measured, and the box
+  // only settles once all primary + secondary lines fit inside maxWidth.
   if (isBilingual && secondaryText) {
-    ctx.font = subtitleCanvasFont(typeface.secondaryFamily, secondaryFontSize, typeface.secondaryWeight);
-    secondaryLines = wrapText(ctx, secondaryText, maxWidth, 2);
+    interface BilingualFit {
+      primarySize: number;
+      primaryLines: string[];
+      secSize: number;
+      secLines: string[];
+    }
+    const secondaryScales = [1, 0.85, 0.72, 0.6];
+    const secondaryLineOptions = [2, 3];
+    const primaryScales = [1, 0.92];
+    let resolved: BilingualFit | null = null;
+    let fallback: BilingualFit | null = null;
 
-    // If secondary text still exceeds, scale it down slightly
-    for (const secLine of secondaryLines) {
-      const w = ctx.measureText(secLine).width;
-      if (w > maxWidth) {
-        secondaryFontSize = Math.max(11, Math.round(secondaryFontSize * 0.85));
-        secondaryLineHeight = Math.round(secondaryFontSize * 1.25);
-        ctx.font = subtitleCanvasFont(typeface.secondaryFamily, secondaryFontSize, typeface.secondaryWeight);
-        secondaryLines = wrapText(ctx, secondaryText, maxWidth, 2);
-        break;
+    for (const primaryScale of primaryScales) {
+      const tryPrimarySize = Math.max(14, Math.round(currentFontSize * primaryScale));
+      ctx.font = subtitleCanvasFont(typeface.primaryFamily, tryPrimarySize, typeface.primaryWeight);
+      const tryPrimaryLines = wrapText(ctx, text, maxWidth, maxLines);
+      let primaryMaxW = 0;
+      for (const line of tryPrimaryLines) {
+        const w = ctx.measureText(line).width;
+        if (w > primaryMaxW) primaryMaxW = w;
       }
+      const secFloor = Math.max(10, Math.round(tryPrimarySize * 0.45));
+      let lastTry: { secSize: number; secLines: string[] } | null = null;
+
+      if (primaryMaxW <= maxWidth) {
+        for (const secMaxLines of secondaryLineOptions) {
+          let done = false;
+          for (const secScale of secondaryScales) {
+            const trySecSize = Math.max(secFloor, Math.round(tryPrimarySize * 0.62 * secScale));
+            if (lastTry && lastTry.secSize === trySecSize) continue;
+            ctx.font = subtitleCanvasFont(typeface.secondaryFamily, trySecSize, typeface.secondaryWeight);
+            const trySecLines = wrapText(ctx, secondaryText, maxWidth, secMaxLines);
+            lastTry = { secSize: trySecSize, secLines: trySecLines };
+            let secMaxW = 0;
+            for (const line of trySecLines) {
+              const w = ctx.measureText(line).width;
+              if (w > secMaxW) secMaxW = w;
+            }
+            if (secMaxW <= maxWidth) {
+              resolved = { primarySize: tryPrimarySize, primaryLines: tryPrimaryLines, secSize: trySecSize, secLines: trySecLines };
+              done = true;
+              break;
+            }
+          }
+          if (done) break;
+        }
+      }
+
+      if (!resolved && lastTry) {
+        fallback = { primarySize: tryPrimarySize, primaryLines: tryPrimaryLines, secSize: lastTry.secSize, secLines: lastTry.secLines };
+      }
+      if (resolved) break;
+    }
+
+    const fit = resolved || fallback;
+    if (fit) {
+      currentFontSize = fit.primarySize;
+      lines = fit.primaryLines;
+      secondaryFontSize = fit.secSize;
+      secondaryLines = fit.secLines;
+      secondaryLineHeight = Math.round(secondaryFontSize * 1.28);
     }
   }
 

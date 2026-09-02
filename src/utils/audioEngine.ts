@@ -18,6 +18,10 @@ class AudioEngine {
   // Timeline playback BGM instance
   private bgmAudio: HTMLAudioElement | null = null;
   private bgmSessionToken: number = 0;
+  // 片尾音乐淡出状态
+  private bgmOutroActive: boolean = false;
+  private bgmOutroFrame: number | null = null;
+  private bgmOutroBaseVolume: number = 0;
 
   // Dedicated Preview BGM instance (strictly single-instance)
   private previewAudio: HTMLAudioElement | null = null;
@@ -175,6 +179,8 @@ class AudioEngine {
 
   public setBgmVolume(volume: number) {
     this.currentBgmVolume = Math.max(0, Math.min(1, volume));
+    // 片尾淡出进行中只记账，不碰音量，避免把正在收弱的音乐拉回去
+    if (this.bgmOutroActive) return;
     if (this.bgmAudio) {
       const targetVolume = this.isDucking ? this.currentBgmVolume * 0.35 : this.currentBgmVolume;
       this.fadeVolume(this.bgmAudio, targetVolume, 150);
@@ -192,6 +198,8 @@ class AudioEngine {
    */
   private fadeVolume(audio: HTMLAudioElement, targetVol: number, durationMs: number = 250) {
     if (!audio) return;
+    // 片尾淡出拥有最高优先级，闪避/音量调节不得打断它
+    if (this.bgmOutroActive && audio === this.bgmAudio) return;
     const clampedTarget = Math.max(0, Math.min(1, targetVol));
     const startVol = audio.volume;
     const startTime = performance.now();
@@ -228,6 +236,11 @@ class AudioEngine {
     // play() callbacks from the previous track cannot resurrect it.
     this.stopPreviewBgm();
     this.stopBgm();
+    this.bgmOutroActive = false;
+    if (this.bgmOutroFrame) {
+      cancelAnimationFrame(this.bgmOutroFrame);
+      this.bgmOutroFrame = null;
+    }
     const session = this.bgmSessionToken;
 
     this.currentTrackId = trackId;
@@ -407,11 +420,61 @@ class AudioEngine {
   private applyDucking(duck: boolean) {
     if (!this.audioDuckingEnabled) return;
     this.isDucking = duck;
+    if (this.bgmOutroActive) return; // 片尾淡出期间不回升
     if (this.bgmAudio) {
       // Keep 35% of the original volume during speech (65% reduction), fade over 250ms
       const targetVolume = duck ? this.currentBgmVolume * 0.35 : this.currentBgmVolume;
       this.fadeVolume(this.bgmAudio, targetVolume, duck ? 200 : 350);
     }
+  }
+
+  /**
+   * 片尾音乐淡出：从当前音量余弦缓降到 0。开始后屏蔽闪避/音量回调，
+   * 直到 cancelTimelineBgmOutro（回退播放头）或下一次 startBgm。
+   */
+  public beginTimelineBgmOutro(durationMs: number) {
+    if (this.bgmOutroActive) return;
+    this.bgmOutroActive = true;
+    const audio = this.bgmAudio;
+    if (!audio) return;
+    if (this.duckingAnimFrame) {
+      cancelAnimationFrame(this.duckingAnimFrame);
+      this.duckingAnimFrame = null;
+    }
+    this.bgmOutroBaseVolume = audio.volume;
+    const startVol = audio.volume;
+    const startMs = performance.now();
+    const total = Math.max(120, durationMs);
+    const step = (now: number) => {
+      if (!this.bgmOutroActive || audio !== this.bgmAudio) return;
+      const progress = Math.min(1, (now - startMs) / total);
+      const ease = 0.5 * (1 - Math.cos(Math.PI * progress));
+      audio.volume = Math.max(0, startVol * (1 - ease));
+      if (progress < 1) {
+        this.bgmOutroFrame = requestAnimationFrame(step);
+      } else {
+        this.bgmOutroFrame = null;
+      }
+    };
+    this.bgmOutroFrame = requestAnimationFrame(step);
+  }
+
+  /** 回退到淡出窗口之前（拖回播放头/暂停回跳）时恢复音乐音量。 */
+  public cancelTimelineBgmOutro() {
+    if (!this.bgmOutroActive) return;
+    this.bgmOutroActive = false;
+    if (this.bgmOutroFrame) {
+      cancelAnimationFrame(this.bgmOutroFrame);
+      this.bgmOutroFrame = null;
+    }
+    if (this.bgmAudio) {
+      const target = this.isDucking ? this.bgmOutroBaseVolume * 0.35 : this.bgmOutroBaseVolume;
+      this.fadeVolume(this.bgmAudio, target, 200);
+    }
+  }
+
+  public isTimelineBgmOutroActive() {
+    return this.bgmOutroActive;
   }
 
   /**

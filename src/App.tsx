@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry, ProjectLibraryItem } from './types';
+import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry, ProjectLibraryItem, OutroConfig } from './types';
+import { clampOutro, resolveOutro } from './utils/outro';
 import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, isImageApiReady, resolveLlmApi, resolveTtsApi } from './utils/presets';
 import { generateImageWithRetry } from './utils/imageGenerateClient';
 import { classifyImageError } from './utils/imageGenerateRetry';
@@ -88,7 +89,7 @@ import {
   migrateBrowserCopiesToLibrary
 } from './utils/projectLibrary';
 import { createEditHistory } from './utils/editHistory';
-import { characterForShot, characterRefUrl, storyLeadMissingRef } from './utils/visualBible';
+import { characterForShot, characterRefUrl, storyLeadMissingRef, isVisualBibleStale, visualBibleHasBlockingWarnings } from './utils/visualBible';
 
 function settleProjectImages(project: VideoProject): VideoProject {
   const settled: VideoProject = {
@@ -105,9 +106,10 @@ function settleProjectImages(project: VideoProject): VideoProject {
     }))
   };
   const sentenceGap = resolveSentenceGap(settled.audio);
+  const outroHold = resolveOutro(settled.settings).hold;
   return {
     ...settled,
-    clips: stampSentenceGaps(ensureUniqueClipIds(settled.clips || []), sentenceGap),
+    clips: stampSentenceGaps(ensureUniqueClipIds(settled.clips || []), sentenceGap, outroHold),
     audio: {
       ...settled.audio,
       sentenceGap,
@@ -381,7 +383,7 @@ export default function App() {
       }
 
       showStatusToast('正在拼接并对齐画面…', { tone: 'progress', id: 'narration', durationMs: 0 });
-      const assembled = await assembleAlignedNarration(repaired, segments, resolveSentenceGap(project.audio));
+      const assembled = await assembleAlignedNarration(repaired, segments, resolveSentenceGap(project.audio), resolveOutro(project.settings).hold);
       const storeRes = await fetch('/api/audio/store', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -432,11 +434,12 @@ export default function App() {
     const track = current.audio?.narrationTrack;
     if (!track?.audioUrl || !track.alignment?.utterances?.length) return;
     const gap = resolveSentenceGap(current.audio);
-    const stamped = stampSentenceGaps(current.clips, gap);
+    const outroHold = resolveOutro(current.settings).hold;
+    const stamped = stampSentenceGaps(current.clips, gap, outroHold);
     if (narrationFileIncludesHolds(track, stamped)) return;
     const gen = ++bakeGenRef.current;
     try {
-      const assembled = await reassembleNarrationWithHolds(stamped, track, gap);
+      const assembled = await reassembleNarrationWithHolds(stamped, track, gap, outroHold);
       if (!assembled || gen !== bakeGenRef.current) return;
       const storeRes = await fetch('/api/audio/store', {
         method: 'POST',
@@ -486,10 +489,27 @@ export default function App() {
     setIsPlaying(false);
     setProject((prev) => {
       recordHistory(prev);
+      const outroHold = resolveOutro(prev.settings).hold;
       return {
         ...prev,
-        clips: stampSentenceGaps(prev.clips, gap),
+        clips: stampSentenceGaps(prev.clips, gap, outroHold),
         audio: { ...prev.audio, sentenceGap: gap },
+        updatedAt: Date.now()
+      };
+    });
+    scheduleBakeHolds();
+  }, [recordHistory, scheduleBakeHolds]);
+
+  const handleOutroChange = useCallback((config: OutroConfig) => {
+    const nextOutro = clampOutro(config);
+    setIsPlaying(false);
+    setProject((prev) => {
+      recordHistory(prev);
+      const gap = resolveSentenceGap(prev.audio);
+      return {
+        ...prev,
+        clips: stampSentenceGaps(prev.clips, gap, nextOutro.hold),
+        settings: { ...prev.settings, outro: nextOutro },
         updatedAt: Date.now()
       };
     });
@@ -803,6 +823,25 @@ export default function App() {
     return { url, name: character?.name || '' };
   };
 
+  const visualBibleGenerationBlocked = () => {
+    const workspace = project.scriptWorkspace;
+    const bible = workspace?.visualBible;
+    if (!bible) return false;
+    if (isVisualBibleStale(bible, workspace?.fullNarration || '', workspace?.genrePackId)) {
+      showStatusToast('口播已改，先按当前文案重编画面圣经', {
+        tone: 'warn', id: 'visual-bible-stale', actionLabel: '去重编', onAction: () => setActiveTab('script')
+      });
+      return true;
+    }
+    if (visualBibleHasBlockingWarnings(bible)) {
+      showStatusToast('画面圣经与文案存在角色冲突，请先修正后再生图', {
+        tone: 'warn', id: 'visual-bible-conflict', actionLabel: '去核对', onAction: () => setActiveTab('script')
+      });
+      return true;
+    }
+    return false;
+  };
+
   const compiledPromptFor = (clip: StoryboardClip, index: number, clips = project.clips) => {
     return clipImagePromptArgs(
       clip,
@@ -831,6 +870,7 @@ export default function App() {
   const handleGenerateSingleClipImage = useCallback(async (clipId: string) => {
     const targetClip = project.clips.find(c => c.id === clipId);
     if (!targetClip) return;
+    if (visualBibleGenerationBlocked()) return;
     if (!isImageApiReady(project.settings.customImageApi)) {
       showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
       setActiveTab('settings');
@@ -884,7 +924,9 @@ export default function App() {
           imageStatus: 'success',
           isGeneratingImage: false,
           imageError: result.usedBackup ? '备用通道出图' : undefined,
+          referenceStatus: result.referenceAccepted ? 'accepted' : result.referenceDropped ? 'dropped' : undefined,
           visualPrompt: c.promptPinned ? c.visualPrompt : compiled.prompt,
+          visualBibleHash: c.promptPinned ? c.visualBibleHash : project.scriptWorkspace?.visualBible?.sourceHash,
           visualBeat: c.visualBeat || compiled.beat,
           chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(compiled.beat)
         } : c),
@@ -900,7 +942,8 @@ export default function App() {
           isGeneratingImage: false,
           imageError: aborted
             ? (err?.message === '已停止' ? '已停止' : '等待超时：供应商后台可能已出图，但接口未在时限内返回。请重试。')
-            : (err?.message || '生成失败，请检查服务商 API 配置')
+            : `${err?.message || '生成失败，请检查服务商 API 配置'}${err?.referenceDropped ? '；参考图未采用' : ''}`,
+          referenceStatus: err?.referenceDropped ? 'dropped' : undefined
         } : c),
         updatedAt: Date.now()
       }));
@@ -911,6 +954,7 @@ export default function App() {
   const handleGenerateAllImages = async (clipsOverride?: StoryboardClip[]) => {
     const sourceClips = Array.isArray(clipsOverride) ? clipsOverride : project.clips;
     if (sourceClips.length === 0) return;
+    if (visualBibleGenerationBlocked()) return;
     if (!isImageApiReady(project.settings.customImageApi)) {
       showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
       setActiveTab('settings');
@@ -983,7 +1027,8 @@ export default function App() {
           imageUrl: result.imageUrl,
           prompt: compiled.prompt,
           beat: compiled.beat,
-          usedBackup: result.usedBackup
+          usedBackup: result.usedBackup,
+          referenceStatus: result.referenceAccepted ? 'accepted' as const : result.referenceDropped ? 'dropped' as const : undefined
         };
       };
 
@@ -1001,18 +1046,20 @@ export default function App() {
             } : c)
           }));
         },
-        onItemSuccess: (task: { item: StoryboardClip }, result: { imageUrl: string; prompt: string; beat: StoryboardClip['visualBeat']; usedBackup: boolean }) => {
+        onItemSuccess: (task: { item: StoryboardClip }, result: { imageUrl: string; prompt: string; beat: StoryboardClip['visualBeat']; usedBackup: boolean; referenceStatus?: 'accepted' | 'dropped' }) => {
           setProject(prev => ({
             ...prev,
             clips: prev.clips.map(c => c.id === task.item.id ? {
               ...c,
               imageUrl: result.imageUrl,
               visualPrompt: c.promptPinned ? c.visualPrompt : result.prompt,
+              visualBibleHash: c.promptPinned ? c.visualBibleHash : project.scriptWorkspace?.visualBible?.sourceHash,
               visualBeat: c.visualBeat || result.beat,
               chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(result.beat || {}),
               imageStatus: 'success' as const,
               isGeneratingImage: false,
-              imageError: result.usedBackup ? '备用通道出图' : undefined
+              imageError: result.usedBackup ? '备用通道出图' : undefined,
+              referenceStatus: result.referenceStatus
             } : c),
             updatedAt: Date.now()
           }));
@@ -1025,7 +1072,8 @@ export default function App() {
               ...c,
               imageStatus: 'failed' as const,
               isGeneratingImage: false,
-              imageError: error?.message || '生成失败'
+              imageError: `${error?.message || '生成失败'}${error?.referenceDropped ? '；参考图未采用' : ''}`,
+              referenceStatus: error?.referenceDropped ? 'dropped' : undefined
             } : c),
             updatedAt: Date.now()
           }));
@@ -1112,6 +1160,7 @@ export default function App() {
           ...next,
           visualBeat: compiled.beat,
           visualPrompt: compiled.prompt,
+          visualBibleHash: visualBible?.sourceHash,
           chineseVisualPrompt: beatToChinese(compiled.beat) || local.chineseVisualPrompt
         };
       });
@@ -1174,6 +1223,7 @@ export default function App() {
               ...next,
               visualBeat: compiled.beat,
               visualPrompt: compiled.prompt,
+              visualBibleHash: visualBible?.sourceHash,
               chineseVisualPrompt: beatToChinese(compiled.beat) || next.chineseVisualPrompt
             };
           });
@@ -1351,6 +1401,7 @@ export default function App() {
           isGeneratingNarration={isGeneratingNarration}
           narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
           sentenceGap={resolveSentenceGap(project.audio)}
+          outroHold={resolveOutro(project.settings).hold}
           onUtteranceHoldChange={handleUtteranceHoldChange}
           stylePack={hydrateActiveStylePack(project.settings)}
           visualBible={project.scriptWorkspace?.visualBible}
@@ -1478,6 +1529,9 @@ export default function App() {
         <SubtitlePanel
           config={project.subtitles}
           onChange={(subtitles) => updateProject({ subtitles })}
+          clips={project.clips}
+          onUpdateClips={(clips) => updateProject({ clips })}
+          llmApi={project.settings.customLlmApi}
         />
       )}
 
@@ -1497,6 +1551,8 @@ export default function App() {
           onVoiceChange={(voiceId) => updateProject(applyVoiceToProject(project, voiceId))}
           onOpenSettings={() => setActiveTab('settings')}
           onSentenceGapChange={handleSentenceGapChange}
+          outro={resolveOutro(project.settings)}
+          onOutroChange={handleOutroChange}
           clips={project.clips}
         />
       )}
@@ -1561,6 +1617,7 @@ export default function App() {
           onOpenStoryboard={() => setActiveTab('storyboard')}
           onNeedFullNarration={handleApplyStoryboard}
           sentenceGap={resolveSentenceGap(project.audio)}
+          outroHold={resolveOutro(project.settings).hold}
           onApplyStyleOnly={handleApplyStyleToAllClips}
           isApplyingStyle={isGeneratingAllImages}
           isGeneratingNarration={isGeneratingNarration}
@@ -1645,6 +1702,7 @@ export default function App() {
             selectedClipId={selectedClipId}
             onSelectClip={setSelectedClipId}
             sentenceGap={resolveSentenceGap(project.audio)}
+          outroHold={resolveOutro(project.settings).hold}
             onUtteranceHoldChange={handleUtteranceHoldChange}
             onHoldCommit={scheduleBakeHolds}
           />
