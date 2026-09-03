@@ -260,14 +260,18 @@ export const TTS_PROVIDER_PRESETS: TtsProviderPreset[] = [
     defaultEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer',
     defaultModel: 'qwen-audio-3.0-tts-flash',
     defaultVoice: 'longanfengyue',
-    popularModels: [
-      { id: 'qwen-audio-3.0-tts-plus', label: 'Audio 3.0 Plus', hint: '旗舰音质，48kHz，适合成片配音' },
-      { id: 'qwen-audio-3.0-tts-flash', label: 'Audio 3.0 Flash', hint: '新一代更快更省，日常推荐' },
-      { id: 'cosyvoice-v2', label: 'CosyVoice V2', hint: '音色库 longyingtian 等官方音色' },
-      { id: 'qwen3-tts-flash', label: 'Qwen3-TTS-Flash', hint: '上一代轻量档，Cherry 等音色' },
-      { id: 'qwen3-tts-instruct-flash', label: 'Instruct-Flash', hint: '上一代，支持指令控制语速/情感' },
-      { id: 'qwen-tts', label: 'Qwen-TTS', hint: '经典稳定版音色' }
-    ],
+     popularModels: [
+       { id: 'cosyvoice-v3.5-plus', label: 'CosyVoice V3.5 Plus', hint: '最新旗舰版，音质最优' },
+       { id: 'cosyvoice-v3.5-flash', label: 'CosyVoice V3.5 Flash', hint: '最新快版，性能最佳' },
+       { id: 'cosyvoice-v3-plus', label: 'CosyVoice V3 Plus', hint: '旗舰音质，48kHz，适合成片配音' },
+       { id: 'cosyvoice-v3-flash', label: 'CosyVoice V3 Flash', hint: '更快更省，日常推荐' },
+       { id: 'cosyvoice-v2', label: 'CosyVoice V2', hint: '经典稳定版' },
+       { id: 'qwen-audio-3.0-tts-plus', label: 'Audio 3.0 Plus', hint: '旗舰音质，48kHz，适合成片配音' },
+       { id: 'qwen-audio-3.0-tts-flash', label: 'Audio 3.0 Flash', hint: '新一代更快更省，日常推荐' },
+       { id: 'qwen3-tts-flash', label: 'Qwen3-TTS-Flash', hint: '上一代轻量档，Cherry 等音色' },
+       { id: 'qwen3-tts-instruct-flash', label: 'Instruct-Flash', hint: '上一代，支持指令控制语速/情感' },
+       { id: 'qwen-tts', label: 'Qwen-TTS', hint: '经典稳定版音色' }
+     ],
     popularVoices: [
       { id: 'longanfengyue', label: '龙安风悦', hint: '3.0 Flash 自然亲切女声' },
       { id: 'longanlingxin', label: '龙安灵心', hint: '3.0 Plus 旗舰女声' },

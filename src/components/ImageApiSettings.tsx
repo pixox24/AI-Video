@@ -409,6 +409,11 @@ function ImageChannelEditor({
                 </button>
               ))}
             </div>
+            <p className="text-[10px] text-zinc-500 leading-relaxed">
+              钉了人物参考图时，会通过官方 <span className="font-mono text-zinc-400">/v1/images/edits</span> 以 multipart 上传原图（而不是塞进 Chat/JSON 的 image 字段）。
+              要真正锁脸，模型必须支持以图参考/图生图编辑（如 <span className="font-mono text-zinc-400">gpt-image</span> 系列、支持编辑的中转模型）。
+              纯文生图模型（SD/FLUX/DALL·E-3 等）无法参考人物，结果只会按文字生成。
+            </p>
           </div>
           <div className="space-y-2">
             <FieldLabel title="画幅" />

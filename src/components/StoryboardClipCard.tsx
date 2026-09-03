@@ -136,8 +136,12 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
               <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusDot}`} />
               {generating && <span className="text-[10px] text-amber-300">绘制中</span>}
               {failed && <span className="text-[10px] text-rose-300">失败</span>}
-              {clip.referenceStatus === 'accepted' && <span className="text-[9px] text-emerald-300/80">参考图已送达</span>}
-              {clip.referenceStatus === 'dropped' && <span className="text-[9px] text-rose-300">参考图未采用</span>}
+              {clip.referenceStatus === 'accepted' && (
+                <span className="text-[9px] text-emerald-300/80" title="参考图已随 /images/edits 上传。人物能否锁脸取决于模型是否支持以图参考（如 gpt-image 系列）。">参考已随请求发送</span>
+              )}
+              {clip.referenceStatus === 'dropped' && (
+                <span className="text-[9px] text-rose-300" title="当前通道未携带参考图或模型不支持以图编辑，人物一致性无保证。建议换用支持参考的模型（如 gpt-image 系列）。">参考未生效</span>
+              )}
               {clip.characterIds && clip.characterIds.length > 0 && (
                 <span className="text-[9px] text-amber-400/80 border border-amber-500/20 rounded px-1">角色锁</span>
               )}
@@ -161,8 +165,12 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
               )}
               {queued && <span className="text-[10px] text-zinc-500">排队</span>}
               {failed && <span className="text-[10px] text-rose-300">失败</span>}
-              {clip.referenceStatus === 'accepted' && <span className="text-[9px] text-emerald-300/80">参考图已送达</span>}
-              {clip.referenceStatus === 'dropped' && <span className="text-[9px] text-rose-300">参考图未采用</span>}
+              {clip.referenceStatus === 'accepted' && (
+                <span className="text-[9px] text-emerald-300/80" title="参考图已随 /images/edits 上传。人物能否锁脸取决于模型是否支持以图参考（如 gpt-image 系列）。">参考已随请求发送</span>
+              )}
+              {clip.referenceStatus === 'dropped' && (
+                <span className="text-[9px] text-rose-300" title="当前通道未携带参考图或模型不支持以图编辑，人物一致性无保证。建议换用支持参考的模型（如 gpt-image 系列）。">参考未生效</span>
+              )}
               {clip.characterIds && clip.characterIds.length > 0 && (
                 <span className="text-[9px] text-amber-400/80 border border-amber-500/20 rounded px-1">角色锁</span>
               )}

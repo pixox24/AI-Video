@@ -68,6 +68,44 @@ export interface NarrativeCharacterHints {
 const GENERIC_CHARACTER_NAMES = new Set(['主角', '角色', '人物', '讲解者', '我', '他', '她']);
 const OCCUPATION_TERMS = ['程序员', '工程师', '老师', '教师', '医生', '护士', '学生', '记者', '摄影师', '律师', '厨师', '农民', '科学家'];
 
+const NARRATION_SPEECH_VERB =
+  /(?:他|她|它|我)[^。！？!?；;，,]{0,12}(说|问|答|喊|叫|嚷|唱|喊|道)|(?:说|问|答|喊|道)["“「]/;
+const NARRATION_PERSON_ACTION =
+  /(?:他|她)[^。！？!?；;]{0,10}(做|煎|炒|煮|切|拿|放|走|跑|笑|哭|读|写|画|跳|推|看|闻|尝)/;
+const NARRATION_QUOTE = /["“「『]([^"”」』]{2,60})["”」』]/;
+const ANTHROPOMORPHIC_NOTES =
+  /拟人|童话|寓言|主角|角色|扮演|人格化|人格|动画角色|IP 角色|IP角色|会说话|小动物/;
+
+/** 该文案是否存在「必须上叙事班底」的强信号（对话、人物行动、明确拟人意图）。 */
+export function hasNarrativeSignal(
+  narration: string,
+  candidates: CastCandidate[] = [],
+  notes = ''
+): boolean {
+  const text = String(narration || '').trim();
+  if (!text && !notes) return false;
+  if (ANTHROPOMORPHIC_NOTES.test(notes)) return true;
+  if (NARRATION_QUOTE.test(text)) return true;
+  if (NARRATION_SPEECH_VERB.test(text)) return true;
+  if (NARRATION_PERSON_ACTION.test(text)) return true;
+  // 有人物候选且其证据句带主动作/示范语义，通常是出镜讲解者而非虚拟角色。
+  return candidates.some((candidate) => (
+    candidate.kind === 'person'
+    && candidate.evidence.some((sentence) => (
+      NARRATION_PERSON_ACTION.test(sentence)
+      || /教|示范|演示|出镜|讲解|介绍|带你|跟着/.test(sentence)
+    ))
+  ));
+}
+
+/** 被加工/道具类候选名（object），供 expository 锁实物状态时引用。 */
+export function processedObjectNames(candidates: CastCandidate[] = []): string[] {
+  return candidates
+    .filter((candidate) => candidate.kind === 'object')
+    .map((candidate) => candidate.name)
+    .slice(0, 3);
+}
+
 /** Extract only high-signal character facts; this is a guardrail, not a full NER engine. */
 export function extractNarrativeCharacterHints(narration: string): NarrativeCharacterHints {
   const text = String(narration || '').replace(/\s+/g, '').trim();
@@ -116,6 +154,15 @@ export function narrativeEntityContract(
   if (!candidates.length && !hints.hasPerson) {
     return candidateBlock;
   }
+  // 候选全是被加工对象（食材/产品）时，说明这是说明型内容，不要建角色卡。
+  if (candidates.length && candidates.every((item) => item.kind === 'object') && !hints.hasPerson) {
+    return [
+      candidateBlock,
+      '这些候选是被加工对象/道具（object），不是叙事角色。',
+      'characters 必须输出 []，不得拟人化、不得给物体表情或动作。',
+      '把它们的外观与状态一致性写进 paletteLock / continuityRule（同一实物，状态随步骤递进）。'
+    ].filter(Boolean).join('\n');
+  }
   if (!candidates.length) {
   const facts = [
     hints.names.length ? `人物名：${hints.names.join('、')}` : '',
@@ -155,17 +202,26 @@ function normalizeRefs(raw: unknown): VisualCharacterRef[] {
 
 function normalizeCharacter(raw: any, index: number): VisualCharacter | null {
   const name = cleanText(raw?.name);
-  const look = cleanText(raw?.look);
-  const wardrobe = cleanText(raw?.wardrobe);
+  let look = cleanText(raw?.look);
+  let wardrobe = cleanText(raw?.wardrobe);
   if (!name && !look && !wardrobe) return null;
   const role = raw?.role === 'support' || raw?.role === 'extra' ? raw.role : 'lead';
+  const kind: VisualCharacterKind | undefined = raw?.kind === 'creature' || raw?.kind === 'object' || raw?.kind === 'person'
+    ? raw.kind as VisualCharacterKind
+    : undefined;
+  // object 是被加工对象/道具：即使模型写错成拟人文案，也中和为实物描述，绝不上拟人班底。
+  if (kind === 'object') {
+    const anthropomorphic = /拟人|表情|会笑|会哭|会说话|有情绪|穿衣|戴帽|围巾|首饰/.test(`${look} ${wardrobe}`);
+    look = anthropomorphic ? `${name || '该实物'}的可指认外观，全片保持同一实物与状态，禁止拟人化` : (look || `${name || '该实物'}的可指认外观`);
+    wardrobe = anthropomorphic || /换装|穿衣/.test(wardrobe) ? '保持同一外观' : wardrobe;
+  }
   return {
     id: cleanText(raw?.id, role === 'lead' ? 'char-lead' : `char-${index + 1}`),
     name: name || (role === 'lead' ? '主角' : `角色${index + 1}`),
     role,
-    ageBand: cleanText(raw?.ageBand, '成年'),
-    look: look || '可被连续认出的外形，全片不换发型',
-    wardrobe: wardrobe || '全片不换装',
+    ageBand: kind === 'object' ? '不适用' : cleanText(raw?.ageBand, '成年'),
+    look: kind === 'object' ? look : (look || '可被连续认出的外形，全片不换发型'),
+    wardrobe: kind === 'object' ? wardrobe : (wardrobe || '全片不换装'),
     signature: cleanText(raw?.signature) || undefined,
     sourceEvidence: asStringArray(raw?.sourceEvidence || raw?.evidence).slice(0, 4),
     confidence: Number.isFinite(Number(raw?.confidence))
@@ -174,9 +230,7 @@ function normalizeCharacter(raw: any, index: number): VisualCharacter | null {
     locked: Boolean(raw?.locked),
     refs: normalizeRefs(raw?.refs),
     seedHint: cleanText(raw?.seedHint) || undefined,
-    kind: raw?.kind === 'creature' || raw?.kind === 'object' || raw?.kind === 'person'
-      ? raw.kind as VisualCharacterKind
-      : undefined,
+    kind,
     candidateId: cleanText(raw?.candidateId) || undefined
   };
 }
@@ -303,8 +357,19 @@ export function fallbackVisualBible(opts: {
     title: opts.title,
     intentNotes: opts.intentNotes
   });
+  const notes = String(opts.intentNotes || '').trim();
   const hints = extractNarrativeCharacterHints(opts.narration);
-  const characters: VisualCharacter[] = candidates.slice(0, 2).map((candidate, index) => ({
+  const narrativeSignal = mode === 'story' || hasNarrativeSignal(opts.narration, candidates, notes);
+  const objects = processedObjectNames(candidates);
+  // story 叙事体裁：保留原行为，候选前两名建卡（含以物件为主角的故事）。
+  // expository（教程/科普/带货等）默认不建叙事角色卡：
+  // 只有原文带人物对话、人物行动或明确拟人意图时才允许上人物/生物角色；被加工对象不进角色卡。
+  const castCandidates = mode === 'story'
+    ? candidates.slice(0, 2)
+    : narrativeSignal
+      ? candidates.filter((candidate) => candidate.kind === 'person' || candidate.kind === 'creature').slice(0, 2)
+      : [];
+  const characters: VisualCharacter[] = castCandidates.map((candidate, index) => ({
     id: index === 0 ? 'char-lead' : 'char-support',
     name: candidate.name,
     role: index === 0 ? 'lead' : 'support',
@@ -314,7 +379,7 @@ export function fallbackVisualBible(opts: {
     look: candidate.kind === 'creature'
       ? `拟人化的${candidate.name}，全片保持同一外形`
       : candidate.kind === 'object'
-        ? `${candidate.name}的可指认外观，全片不换包装`
+        ? `${candidate.name}的可指认外观，全片保持同一实物，不更换`
         : `${hints.gender === 'male' ? '男性' : hints.gender === 'female' ? '女性' : '性别不擅自推断'}，外形由用户确认；全片不改五官和发型`,
     wardrobe: candidate.kind === 'object'
       ? '保持同一外观'
@@ -327,13 +392,18 @@ export function fallbackVisualBible(opts: {
     refs: []
   }));
   const needsStage = mode === 'story' || characters.length > 0;
+  const expositoryContinuity = objects.length
+    ? `同一批被加工对象（${objects.join('、')}）保持同一实物外观，状态随步骤递进（生→熟→成品），禁止每镜换成另一块；允许按句图解。`
+    : '色板和道具材质保持一致，允许按句图解';
   return {
     version: 1,
     mode,
     castPolicy: 'evidence',
     candidates,
     logline: cleanText(opts.title) || (characters.length ? '同一主体把这件事走完' : ''),
-    paletteLock: mode === 'expository' ? '全片同一色温与材质，不要无故换滤镜' : '全片同一时段、同一色温',
+    paletteLock: mode === 'expository'
+      ? (objects.length ? '全片同一色温、材质与实物状态，不要无故换滤镜或换食材外观' : '全片同一色温与材质，不要无故换滤镜')
+      : '全片同一时段、同一色温',
     characters,
     locations: needsStage ? [{
       id: 'loc-1',
@@ -346,13 +416,15 @@ export function fallbackVisualBible(opts: {
     motif: null,
     continuityRule: characters.length
       ? '有角色的镜子同一主体推进；insert 默认无人；对照才换主体；收束回收开场'
-      : '色板和道具材质保持一致，允许按句图解',
+      : expositoryContinuity,
     sourceHash: hash,
     validation: {
       status: 'warning',
       warnings: characters.length
         ? ['模型未返回可验证角色，已使用文案候选角色卡']
-        : ['文案未识别到可指认主体，未创建角色卡'],
+        : objects.length
+          ? ['教程/说明型文案未创建角色卡；已锁定同一被加工对象与实物状态保持一致']
+          : ['文案未识别到可指认主体，未创建角色卡'],
       checkedAt: Date.now()
     },
     generatedAt: Date.now()
@@ -457,7 +529,9 @@ export function groundVisualBible(
       };
     })
   };
-  const withCast = filtered.characters.length === 0 && candidates.length > 0 && !bible.pinned
+  // 只有当文案确实有叙事班底信号时，才用候选把空角色卡补上。
+  const narrativeSignal = hasNarrativeSignal(narration, candidates, String(opts?.intentNotes || ''));
+  const withCast = filtered.characters.length === 0 && candidates.length > 0 && !bible.pinned && narrativeSignal
     ? {
       ...filtered,
       ...(() => {
@@ -611,6 +685,31 @@ export function bibleHasCast(bible?: VisualBible | null): boolean {
   return Boolean(bible && bible.characters.length > 0);
 }
 
+/** 是否存在真正的叙事班底。story 体裁任何卡都算；expository 纯 object 卡是实物锁而非班底。 */
+export function bibleHasNarrativeCast(bible?: VisualBible | null): boolean {
+  if (!bible || !bible.characters.length) return false;
+  if (bible.mode === 'story') return true;
+  return bible.characters.some((item) => item.kind !== 'object');
+}
+
+/** 若只有 object 卡，返回它们的实物锁定描述，供说明型画面文法引用。 */
+export function bibleObjectLock(bible?: VisualBible | null): string {
+  if (!bible) return '';
+  const objects = bible.characters.filter((item) => item.kind === 'object');
+  if (!objects.length) return '';
+  const names = objects.map((item) => item.name).join('、');
+  return `同一被加工对象（${names}）保持同一实物外观与状态，状态随步骤递进，禁止每镜换另一块；允许按句图解。`;
+}
+
+/** expository 下是否在锁实物（有 object 卡，或连续性规则提到了被加工对象）。 */
+export function bibleLocksObject(bible?: VisualBible | null): boolean {
+  if (!bible) return false;
+  if (bible.mode !== 'expository') return false;
+  if (bible.characters.some((item) => item.kind === 'object')) return true;
+  const text = `${bible.continuityRule || ''} ${bible.paletteLock || ''}`;
+  return /被加工对象|实物外观|同一实物|食材外观/.test(text);
+}
+
 function characterNameTokens(character: VisualCharacter): string[] {
   const raw = [character.name, character.kind === 'creature' ? character.name : '']
     .join(' ')
@@ -661,11 +760,11 @@ export function leadCharacter(bible?: VisualBible | null): VisualCharacter | nul
 
 export function bibleContractForPrompt(bible?: VisualBible | null): string {
   if (!bible) return '';
-  if (!bibleHasCast(bible) && bible.mode === 'expository') {
+  if (bible.mode === 'expository' && !bibleHasNarrativeCast(bible)) {
     return [
       '【画面文法】说明型：允许按句图解，不要硬拍成一部戏。',
       bible.paletteLock ? `【色板锁定】${bible.paletteLock}` : '',
-      bible.continuityRule ? `【连续】${bible.continuityRule}` : ''
+      bibleObjectLock(bible) || (bible.continuityRule ? `【连续】${bible.continuityRule}` : '')
     ].filter(Boolean).join('\n');
   }
   const chars = bible.characters.map((item) => (
@@ -738,8 +837,10 @@ function continuityLabel(kind?: VisualContinuity): string {
 
 export function assignShotContinuity(shots: ForecastShot[], bible?: VisualBible | null): ForecastShot[] {
   if (!bible) return shots;
-  const lead = leadCharacter(bible);
-  const support = bible.characters.find((item) => item.role === 'support') || null;
+  // 纯 object 卡是「实物锁」，不是叙事班底，不参与同人推进。
+  const cast = bibleHasNarrativeCast(bible) ? bible.characters : [];
+  const lead = cast.find((item) => item.role === 'lead') || cast[0] || null;
+  const support = cast.find((item) => item.role === 'support') || null;
   const loc = bible.locations[0] || null;
   return shots.map((shot, index) => {
     const isContrast = shot.splitReason?.includes('对照') || shot.visualCount === 2 && (shot.visualIndex || 0) > 0;
@@ -768,9 +869,10 @@ export function assignShotContinuity(shots: ForecastShot[], bible?: VisualBible 
 
 export function applyOccupancyAfterCoverage(shots: ForecastShot[], bible?: VisualBible | null): ForecastShot[] {
   if (!bible) return shots;
-  const lead = leadCharacter(bible);
-  const support = bible.characters.find((item) => item.role === 'support') || null;
-  const validIds = new Set(bible.characters.map((item) => item.id));
+  const cast = bibleHasNarrativeCast(bible) ? bible.characters : [];
+  const lead = cast.find((item) => item.role === 'lead') || cast[0] || null;
+  const support = cast.find((item) => item.role === 'support') || null;
+  const validIds = new Set(cast.map((item) => item.id));
   return shots.map((shot, index) => {
     const prev = shots[index - 1];
     const contrast = shot.splitReason?.includes('对照') || shot.continuity === 'contrast' || shot.voRole === 'continue';
@@ -814,7 +916,7 @@ export function applyOccupancyAfterCoverage(shots: ForecastShot[], bible?: Visua
 export function composeShotVisualIntent(shot: ForecastShot, bible?: VisualBible | null): string {
   const action = stripBiblePrefix(shot.visualIntent || shot.sliceText || shot.narration || '');
   if (!bible) return action;
-  if (!bibleHasCast(bible) && bible.mode === 'expository') {
+  if (bible.mode === 'expository' && !bibleHasNarrativeCast(bible)) {
     return action;
   }
   const hasExplicitCharacterSelection = Array.isArray(shot.characterIds);
@@ -848,13 +950,25 @@ export function stampShotsWithBible(shots: ForecastShot[], bible?: VisualBible |
 }
 
 export function characterLockEnglish(bible?: VisualBible | null, characterIds?: string[]): string {
-  if (!bible || !bibleHasCast(bible)) {
+  if (!bible) return '';
+  if (bible.mode === 'expository' && !bibleHasNarrativeCast(bible)) {
+    const objects = (Array.isArray(characterIds)
+      ? bible.characters.filter((item) => characterIds.includes(item.id) && item.kind === 'object')
+      : bible.characters.filter((item) => item.kind === 'object')
+    );
+    const objectLines = objects.map((item) => (
+      `keep the same real object "${item.name}": ${item.look}. It may change doneness/stage across shots, but never swap in a different specimen.`
+    ));
+    const palette = bible.paletteLock ? `Keep a consistent color grade: ${bible.paletteLock}.` : '';
+    return [palette, ...objectLines].filter(Boolean).join(' ');
+  }
+  if (!bibleHasNarrativeCast(bible)) {
     return bible?.paletteLock ? `Keep a consistent color grade: ${bible.paletteLock}.` : '';
   }
   const chars = (Array.isArray(characterIds)
     ? bible.characters.filter((item) => characterIds.includes(item.id))
     : [leadCharacter(bible)]
-  ).filter((item): item is VisualCharacter => Boolean(item));
+  ).filter((item): item is VisualCharacter => Boolean(item) && item.kind !== 'object');
   const lines = chars.map((item) => (
     `same character identity "${item.name}": ${item.look}, wearing ${item.wardrobe}. Do not change face, hair, age, or clothes.`
   ));
@@ -923,7 +1037,13 @@ export function continuityShortLabel(kind?: VisualContinuity): string {
 
 export function bibleSummary(bible?: VisualBible | null): string {
   if (!bible) return '还没有画面圣经';
-  if (!bibleHasCast(bible)) return bible.paletteLock || '纯图解：锁色板，不编主角';
+  // 无叙事班底（空卡或仅 object 实物锁）：按说明型措辞展示。
+  if (!bibleHasNarrativeCast(bible)) {
+    const objects = bible.characters.filter((item) => item.kind === 'object').map((item) => item.name).filter(Boolean);
+    if (objects.length) return `锁实物：${objects.join('、')}`;
+    const lock = bible.continuityRule || bible.paletteLock || '';
+    return lock ? `图解 · ${lock}` : '纯图解：锁色板，不编主角';
+  }
   const names = bible.characters.map((item) => item.name).filter(Boolean);
   const loc = bible.locations[0];
   return [...names, loc ? loc.name : '', bible.motif?.name]

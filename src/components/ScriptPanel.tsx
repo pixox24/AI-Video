@@ -118,6 +118,8 @@ import {
   toggleCharacterLock,
   updateCharacterField,
   bibleHasCast,
+  bibleHasNarrativeCast,
+  bibleLocksObject,
   visualBibleModeForGenre
 } from '../utils/visualBible';
 import { extractCastCandidates } from '../utils/castCandidates';
@@ -595,9 +597,11 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     setStatus(
       overBudget
         ? '文案已保留，但预计口播超出当前目标时长；可延长视频或压缩文案。'
-        : bibleHasCast(withBible.visualBible)
+        : bibleHasNarrativeCast(withBible.visualBible)
           ? '已编画面圣经。有证据的角色会在叙事镜上镜，insert 默认无人。'
-          : '口播按整句切开。未识别到可指认主体，按图解推进。'
+          : bibleHasCast(withBible.visualBible)
+            ? '已编画面圣经。教程/说明型内容，锁定同一被加工对象的实物状态，按句图解。'
+            : '口播按整句切开。未识别到可指认主体，按图解推进。'
     );
   };
 
@@ -625,9 +629,11 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       const next = await refineCoverage(spanned);
       onChange(next);
       setStatus(
-        bibleHasCast(withBible.visualBible)
+        bibleHasNarrativeCast(withBible.visualBible)
           ? '已按整句切口播，并按文案证据编了角色卡。'
-          : '已按整句切口播；未识别到可指认主体，按图解推进。'
+          : bibleHasCast(withBible.visualBible)
+            ? '已按整句切口播；说明型内容，锁定实物状态按句图解。'
+            : '已按整句切口播；未识别到可指认主体，按图解推进。'
       );
     } finally {
       setBusy(null);
@@ -655,7 +661,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       }, narration);
       const covered = await refineCoverage(rebuildForecast(next));
       onChange(covered);
-      setStatus(bibleHasCast(next.visualBible) ? '画面圣经已按新口播重编。未上锁角色和参考图已清掉。' : '画面约束已更新。文案没有可指认主体，未建角色卡。');
+      setStatus(bibleHasNarrativeCast(next.visualBible) ? '画面圣经已按新口播重编。未上锁角色和参考图已清掉。' : '画面约束已更新。未发现叙事班底，按说明型/图解处理。');
     } finally {
       setBusy(null);
     }
@@ -2358,8 +2364,10 @@ function DirectorRail({
             <Users className="w-3.5 h-3.5 text-amber-400" />
             画面圣经
           </div>
-          {bibleHasCast(bible) ? (
+          {bibleHasNarrativeCast(bible) ? (
             <span className="text-[9px] px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-300">有班底</span>
+          ) : bibleLocksObject(bible) || bibleHasCast(bible) ? (
+            <span className="text-[9px] px-1.5 py-0.5 rounded border border-sky-500/30 text-sky-300">锁实物</span>
           ) : bible ? (
             <span className="text-[9px] px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500">纯图解</span>
           ) : null}
@@ -2454,7 +2462,7 @@ function DirectorRail({
                 {bible.validation.warnings.map((warning) => <div key={warning}>角色校验：{warning}</div>)}
               </div>
             ) : null}
-            {!bibleHasCast(bible) && bible?.paletteLock && (
+            {!bibleHasNarrativeCast(bible) && bible?.paletteLock && (
               <p className="text-[11px] text-zinc-400 leading-relaxed">{bible.paletteLock}</p>
             )}
           </>

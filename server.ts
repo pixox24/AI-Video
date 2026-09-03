@@ -42,6 +42,7 @@ import {
   bibleSourceHash,
   fallbackVisualBible,
   groundVisualBible,
+  hasNarrativeSignal,
   narrativeEntityContract,
   mergeVisualBible,
   normalizeVisualBible,
@@ -1728,14 +1729,21 @@ app.post("/api/script/visual-bible", async (req, res) => {
     ? candidates
     : extractCastCandidates({ narration: text, title: String(title || ""), intentNotes: notes });
   const entityContract = narrativeEntityContract(text, { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates });
+  const genreRule = mode === "expository"
+    ? `- 本片为说明/教程型（${genre || "科普/教程/带货"}）：默认不建角色卡，把食材、厨具、产品当被加工对象（kind=object），禁止拟人化、禁止给物体表情动作。
+- 只有当口播有明显人物/对话/叙事证据时才允许建 person/creature 角色卡，否则 characters 必须输出 []。
+- characters=[] 时仍要写 paletteLock 与 continuityRule：锁定同一被加工对象的实物外观，状态随步骤递进（生→熟→成品），禁止每镜换另一块。`
+    : "";
   const prompt = `根据整段口播编译「画面圣经 VisualBible」。有原文证据才能建角色；没有证据必须 characters=[]。有角色不等于每镜都上人。
-硬规则：
+ 硬规则：
 - mode 仍用 ${mode}（只影响机位先验，不决定能不能有角色）
-- 角色 0 到 3 个。只能从候选认领；拟人动物 kind=creature，产品 kind=object，人 kind=person。
+- 角色 0 到 3 个。只能从候选认领；人物/拟人动物用 kind=person / creature。
+- object（被加工对象/道具）不作为角色卡；它的外观与状态一致性写进 paletteLock / continuityRule。
 - 每张卡必须有 candidateId、sourceEvidence（原文短句）。不得发明讲解员/女孩/用户。
 - 场景 0 到 2 个。有角色时至少 1 个场景。
 - paletteLock 必填。
 - refs=[]，locked=false。不要改口播。
+${genreRule}
 
 ${styleContract}
 
@@ -1760,7 +1768,8 @@ ${text}
     let incoming = normalized && (normalized.characters.length > 0 || normalized.mode === "expository" || normalized.paletteLock)
       ? { ...normalized, sourceHash: bibleSourceHash(text, genre, mode), generatedAt: Date.now() }
       : fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates });
-    if (incoming.characters.length === 0 && resolvedCandidates.length > 0) {
+    if (incoming.characters.length === 0 && resolvedCandidates.length > 0
+      && hasNarrativeSignal(text, resolvedCandidates, notes)) {
       const filled = fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates });
       incoming = {
         ...incoming,
@@ -2864,6 +2873,20 @@ async function resolveReferenceImageDataUrl(url: string): Promise<string | null>
   return null;
 }
 
+// Convert a base64 image data URL into a Node Blob for multipart uploads.
+function dataUrlToImageFile(dataUrl: string): { blob: Blob; filename: string } | null {
+  const match = String(dataUrl || "").match(/^data:([^;,]+);base64,([\s\S]+)$/);
+  if (!match) return null;
+  const mime = match[1] || "image/png";
+  if (!mime.startsWith("image/")) return null;
+  const buffer = Buffer.from(match[2], "base64");
+  const ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : mime.includes("gif") ? "gif" : "jpg";
+  return {
+    blob: new Blob([new Uint8Array(buffer)], { type: mime }),
+    filename: `reference.${ext}`
+  };
+}
+
 // Master Executor: Tries Images API with intelligent Chat Completions, Universal Parsing & Async Polling
 async function executeCustomImageRequest(options: {
   endpoint: string;
@@ -2928,6 +2951,16 @@ async function executeCustomImageRequest(options: {
     ? cleanEndpoint
     : `${rootBase}/v1/chat/completions`;
 
+  // Reference-image (character lock) is sent through the official image-editing
+  // endpoint as multipart/form-data, not as undocumented JSON fields. Only models
+  // that support image editing (e.g. gpt-image series on relays / DALL·E 2 edits)
+  // can actually follow the uploaded person reference.
+  const editsEndpoint = cleanEndpoint.includes('/images/edits')
+    ? cleanEndpoint
+    : /\/v1\/images\/generations$/i.test(cleanEndpoint)
+      ? cleanEndpoint.replace(/\/v1\/images\/generations$/i, '/v1/images/edits')
+      : `${rootBase}/v1/images/edits`;
+
   const targetModel = model.trim();
   const targetSize = size === 'auto' ? '1024x1024' : size;
 
@@ -2938,6 +2971,85 @@ async function executeCustomImageRequest(options: {
   const referenceSent = Boolean(referenceImage);
 
   const useChatForReference = Boolean(referenceImage) && protocol !== 'images';
+  // METHOD 0: Official Image-Editing endpoint (/v1/images/edits, multipart/form-data).
+  // This is the only channel where most relays actually consume an uploaded person
+  // reference (e.g. gpt-image / gpt-image-2 / DALL·E-2-edits). JSON image fields on
+  // /images/generations are undocumented and silently ignored -> treated as text-only.
+  if (Boolean(referenceImage) && protocol !== 'chat-completions') {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const file = dataUrlToImageFile(referenceImage!);
+      if (file) {
+        const form = new FormData();
+        form.append('model', targetModel);
+        form.append('prompt', prompt);
+        form.append('n', '1');
+        form.append('size', targetSize);
+        if (quality) form.append('quality', quality);
+        form.append('image', file.blob, file.filename);
+
+        const res = await fetch(editsEndpoint, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${cleanApiKey}` },
+          body: form,
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok) {
+          if (contentType.startsWith('image/')) {
+            const arrayBuf = await res.arrayBuffer();
+            const b64 = Buffer.from(arrayBuf).toString('base64');
+            const mime = contentType.split(';')[0] || 'image/png';
+            return {
+              ok: true,
+              imageUrl: `data:${mime};base64,${b64}`,
+              methodUsed: 'Image Edits (multipart /v1/images/edits)',
+              endpointUsed: editsEndpoint,
+              referenceSent,
+              referenceAccepted: referenceSent,
+              referenceDropped: false
+            };
+          }
+          const rawText = await res.text();
+          let data: any = null;
+          try { data = JSON.parse(rawText); } catch { data = rawText; }
+          const img = extractImageUrlUniversal(data);
+          if (img) {
+            return {
+              ok: true,
+              imageUrl: img,
+              methodUsed: 'Image Edits (multipart /v1/images/edits)',
+              endpointUsed: editsEndpoint,
+              referenceSent,
+              referenceAccepted: referenceSent,
+              referenceDropped: false
+            };
+          }
+          lastStatus = res.status || 200;
+          lastError = '编辑接口已响应但未解析到图片';
+          lastRawError = rawText.slice(0, 400);
+        } else {
+          lastStatus = res.status;
+          const errText = await res.text();
+          lastRawError = errText;
+          try {
+            const jsonErr = JSON.parse(errText);
+            lastError = jsonErr?.error?.message || jsonErr?.message || errText;
+          } catch {
+            lastError = errText.slice(0, 300);
+          }
+          console.warn(`[Custom Image API] Edits endpoint ${editsEndpoint} status ${res.status}:`, lastError);
+        }
+      }
+    } catch (e: any) {
+      lastError = e?.message || 'Edits 请求异常';
+      console.warn('[Custom Image API] Edits attempt exception:', lastError);
+    }
+  }
+
   // METHOD 1: Chat Completions Protocol (if requested, or when locking a character from a reference photo)
   if (protocol === 'chat-completions' || cleanEndpoint.includes('/chat/completions') || useChatForReference) {
     try {

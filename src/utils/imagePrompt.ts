@@ -10,7 +10,7 @@ import {
 } from '../types';
 import { clipShotNarration } from './narrationTrack';
 import { dnaTransferText, renderLine, usesStyleDna } from './stylePack';
-import { isQuotedDialogueLine, leadCharacter, speakerCharacterFromLine, stripBiblePrefix } from './visualBible';
+import { bibleHasNarrativeCast, isQuotedDialogueLine, leadCharacter, speakerCharacterFromLine, stripBiblePrefix } from './visualBible';
 import { coverageFramingLine } from './shotCoverage';
 
 export type ImagePromptProfile = 'gpt-image';
@@ -158,6 +158,10 @@ function bibleCharacterLock(bible: VisualBible | null | undefined, clip: ImagePr
       ? bible.characters.find((item) => clip.characterIds!.includes(item.id))
       : (bible.mode === 'expository' && !bible.characters.length ? null : leadCharacter(bible)));
   if (!char) return '';
+  // expository 下的纯 object 卡是实物锁，不要当人物输出「同一人」。
+  if (bible.mode === 'expository' && !bibleHasNarrativeCast(bible)) {
+    return `同一个实物「${char.name}」：${char.look}，状态随步骤递进（生→熟→成品），不要换成另一个。`;
+  }
   return `同一人「${char.name}」：${char.look}，${char.wardrobe}${char.signature ? `，带着${char.signature}` : ''}`;
 }
 
@@ -184,7 +188,7 @@ function constraintsFor(
     '角色参考图只用来锁同一张脸和服装，不要复制参考图的构图和背景',
     '只画这一镜自己的主体和空间'
   ];
-  if (bible?.characters?.length && continuity !== 'contrast') {
+  if (bible?.characters?.length && continuity !== 'contrast' && bibleHasNarrativeCast(bible)) {
     lines.push('不要无故换脸、换装、换房间');
   }
   if (bible?.mode === 'expository' || bible?.paletteLock) {
