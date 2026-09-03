@@ -14,7 +14,15 @@ import {
   normalizeInferredPack,
   styleContractForPrompt
 } from "./src/utils/stylePack";
-import type { ScriptGenre, StylePack, VisualBible } from "./src/types";
+import type { ScriptGenre, ScriptLanguage, StylePack, VisualBible } from "./src/types";
+import {
+  bilingualTarget,
+  countBudgetUnits,
+  countCjk,
+  countLatin,
+  languageProfile,
+  normalizeScriptLanguage
+} from "./src/utils/scriptLanguage";
 import { joinClipsForTts as joinClipsForTtsShared, utterancesFromClips } from "./src/utils/narrationTrack";
 import {
   bailianTtsConcurrency,
@@ -22,6 +30,7 @@ import {
   isQwenAudioFlashModel,
   isQwenAudioPlusModel,
   isQwenAudioTtsModel,
+  isCosyVoiceModel,
   qwenAudioLanguageHints,
   qwenAudioSampleRate,
   resolveBailianTtsEndpoint,
@@ -38,6 +47,7 @@ import {
   normalizeVisualBible,
   visualBibleModeForGenre
 } from "./src/utils/visualBible";
+import { extractCastCandidates } from "./src/utils/castCandidates";
 
 function incomingStyleContract(raw: unknown): string {
   if (raw && typeof raw === "object" && (raw as StylePack).world && (raw as StylePack).render) {
@@ -899,7 +909,55 @@ app.post("/api/script/generate", async (req, res) => {
   }
 });
 
-function fallbackTopicCardsServer(seed: string, intent: string) {
+function fallbackTopicCardsServer(seed: string, intent: string, language: ScriptLanguage = "zh") {
+  if (language === "en") {
+    const topic = String(seed || "").trim() || "a short video worth shooting";
+    const short = topic.split(/\s+/).slice(0, 6).join(" ");
+    return [
+      {
+        id: `topic-fb-1-${Date.now()}`,
+        title: intent === "have-title" ? topic : short,
+        hook: `Everyone has ${short} backwards.`,
+        insight: "Break one common myth, then leave one mechanism people can take away.",
+        genre: intent === "product" ? "带货" : "反常识",
+        whyNow: "Search and comments keep asking the same why.",
+        durationHint: 30,
+        paceHint: "medium",
+        conceptCount: 1,
+        risk: "If you only dunk on the myth, it becomes a rant.",
+        completionFit: "Hook is a flip. Show the contrast in 3 seconds.",
+        hookType: "misconception"
+      },
+      {
+        id: `topic-fb-2-${Date.now()}`,
+        title: `Do ${short} in three steps`,
+        hook: `From now on, ${short} is three steps.`,
+        insight: "Turn the topic into actions, not a list of opinions.",
+        genre: "教程",
+        whyNow: "Most videos stay conceptual. Step-by-step is still a gap.",
+        durationHint: 30,
+        paceHint: "fast",
+        conceptCount: 1,
+        risk: "More than 3 steps will not fit 15–30 seconds.",
+        completionFit: "Fast pace. One action per shot.",
+        hookType: "outcome"
+      },
+      {
+        id: `topic-fb-3-${Date.now()}`,
+        title: `The 3 seconds inside ${short}`,
+        hook: "The part that decides the outcome is not the opening. It is the middle 3 seconds.",
+        insight: "Put the theme in one concrete moment the camera can see.",
+        genre: intent === "blank" ? "情绪" : "故事",
+        whyNow: "Competitors state the conclusion. Few people stage it.",
+        durationHint: 45,
+        paceHint: "slow",
+        conceptCount: 1,
+        risk: "If the scene is vague, image gen will miss.",
+        completionFit: "Slow pace. Hold after the line.",
+        hookType: "mystery"
+      }
+    ];
+  }
   const topic = String(seed || "").trim() || "一个值得拍的短视频主题";
   const short = topic.slice(0, 12);
   return [
@@ -948,20 +1006,31 @@ function fallbackTopicCardsServer(seed: string, intent: string) {
   ];
 }
 
-function fallbackDraftServer(topic: string, hook: string, maxChars: number) {
-  const safeTopic = topic.trim() || "这件事";
-  const sentences = [
-    hook || `你以为你懂${safeTopic}，其实关键不在那儿。`,
-    "先把最常见的误会拿掉：它不是看起来那样运作的。",
-    "真正起作用的，是中间那一下你没注意到的变化。",
-    "看清这一点之后，后面的选择会简单很多。",
-    `记住这一句就够：把注意力放回${safeTopic}本身。`
-  ];
+function fallbackDraftServer(topic: string, hook: string, maxChars: number, language: ScriptLanguage = "zh", insight = "") {
+  const safeTopic = topic.trim() || (language === "en" ? "this" : "这件事");
+  const note = String(insight || "").trim();
+  const setup = note
+    ? (language === "en" ? `Here is the point: ${note}.` : `先把这件事讲清：${note}。`)
+    : (language === "en" ? "The usual story is backwards." : "先把最常见的误会拿掉：它不是看起来那样运作的。");
+  const sentences = language === "en"
+    ? [
+      hook || `You think you understand ${safeTopic}. You don't.`,
+      setup,
+      "The part that actually matters is the change you missed.",
+      "Once you see that, the next choice gets simple.",
+      `Keep your attention on ${safeTopic} itself.`
+    ]
+    : [
+      hook || `你以为你懂${safeTopic}，其实关键不在那儿。`,
+      setup,
+      "真正起作用的，是中间那一下你没注意到的变化。",
+      "看清这一点之后，后面的选择会简单很多。",
+      `记住这一句就够：把注意力放回${safeTopic}本身。`
+    ];
   let fullNarration = "";
   for (const sentence of sentences) {
-    const next = fullNarration ? `${fullNarration}${sentence}` : sentence;
-    const chars = next.replace(/\s+/g, "").length;
-    if (chars > maxChars && fullNarration) break;
+    const next = fullNarration ? `${fullNarration}${language === "en" ? " " : ""}${sentence}` : sentence;
+    if (countBudgetUnits(next, language) > maxChars && fullNarration) break;
     fullNarration = next;
   }
   const beats = [
@@ -974,8 +1043,8 @@ function fallbackDraftServer(topic: string, hook: string, maxChars: number) {
   return { title: safeTopic.slice(0, 20), fullNarration, beats };
 }
 
-function countChars(text: string) {
-  return String(text || "").replace(/\s+/g, "").length;
+function countChars(text: string, language: ScriptLanguage = "zh") {
+  return countBudgetUnits(text, language);
 }
 
 async function fetchWithTimeout(url: string, ms = 8000): Promise<Response> {
@@ -1154,10 +1223,13 @@ app.post("/api/script/topics", async (req, res) => {
     researchNotes,
     researchBrief,
     genrePackId,
-    llmApi
+    llmApi,
+    scriptLanguage
   } = req.body || {};
+  const language = normalizeScriptLanguage(scriptLanguage);
+  const profile = languageProfile(language);
   const seed = String(lockedTitle || intentNotes || "").trim();
-  const fallback = () => ({ cards: fallbackTopicCardsServer(seed, String(intent || "blank")) });
+  const fallback = () => ({ cards: fallbackTopicCardsServer(seed, String(intent || "blank"), language) });
   const pinFirstCard = (cards: any[]) => {
     if (String(intent) !== "have-title" || !seed || !Array.isArray(cards) || cards.length === 0) return cards;
     return [{ ...cards[0], title: seed }, ...cards.slice(1)];
@@ -1166,13 +1238,20 @@ app.post("/api/script/topics", async (req, res) => {
     ? `\n- 用户已有标题「${seed}」。第一张卡的 title 必须逐字等于该标题；另两张必须换 insight 和钩子结构，主题词保持一致。禁止把用户标题改成更「爆」的同义句。`
     : "";
 
+  const languageRule = language === "en"
+    ? `- Write title, hook, insight, whyNow, risk, completionFit, whyThisWorks in natural spoken English.
+- hook ≤ ${profile.hookMax} English words
+- title ≤ ${profile.topicTitleMax} English words${haveTitleRule ? "（第一张卡除外，必须等于用户原标题）" : ""}
+- genre 仍用中文枚举：科普、反常识、故事、教程、带货、情绪、热点解读、口播金句`
+    : `- hook 不超过 ${profile.hookMax} 个汉字
+- title 不超过 ${profile.topicTitleMax} 个汉字${haveTitleRule ? "（第一张卡除外，必须等于用户原标题）" : ""}
+- genre 只能是：科普、反常识、故事、教程、带货、情绪、热点解读、口播金句`;
+
   const prompt = `你是短视频选题导演。根据用户入口、备注和调研，给出恰好 3 张选题卡。
 规则：
 - 三张卡的 insight 必须不同，钩子结构必须不同（分别用 misconception / outcome / mystery 或 stakes）
 - whyNow 必须具体，禁止写「这个话题很火」「很有意义」
-- hook 不超过 22 个汉字
-- title 不超过 18 个汉字${haveTitleRule ? "（第一张卡除外，必须等于用户原标题）" : ""}
-- genre 只能是：科普、反常识、故事、教程、带货、情绪、热点解读、口播金句
+${languageRule}
 - paceHint 只能是：ultrafast、fast、medium、slow、cinematic
 - durationHint 只能是 15、21、30、45、60、90 之一
 - conceptCount 为 1 或 2
@@ -1208,7 +1287,7 @@ app.post("/api/script/topics", async (req, res) => {
           return res.json({
             cards: pinFirstCard(parsed.cards.slice(0, 3).map((card: any, index: number) => ({
               id: card.id || `topic-${index + 1}-${Date.now()}`,
-              title: String(card.title || "").slice(0, 24) || `选题 ${index + 1}`,
+              title: String(card.title || "").slice(0, language === "en" ? 80 : 24) || (language === "en" ? `Angle ${index + 1}` : `选题 ${index + 1}`),
               hook: String(card.hook || ""),
               insight: String(card.insight || ""),
               genre: card.genre || "科普",
@@ -1255,18 +1334,24 @@ app.post("/api/script/draft", async (req, res) => {
     budget,
     genrePack,
     llmApi,
-    stylePack
+    stylePack,
+    scriptLanguage
   } = req.body || {};
+  const language = normalizeScriptLanguage(scriptLanguage || budget?.scriptLanguage);
   const title = String(
     (intent === "have-title" ? lockedTitle : "") || topicCard?.title || topic || intentNotes || "这件事"
   ).trim();
   const maxChars = Math.max(24, Number(budget?.maxChars) || 110);
   const targetSeconds = Number(budget?.targetSeconds) || 30;
   const pace = budget?.pace || "medium";
-  const fallback = () => fallbackDraftServer(title, String(topicCard?.hook || ""), maxChars);
+  const notes = String(intentNotes || topicCard?.insight || "").trim();
+  const fallback = () => fallbackDraftServer(title, String(topicCard?.hook || ""), maxChars, language, notes);
   const beatPlan = Array.isArray(genrePack?.beatPlan) ? genrePack.beatPlan.join(" → ") : "";
   const haveTitleRule = intent === "have-title"
     ? `\n- 输出 title 必须逐字等于「${title}」，不得改写、不得加修饰\n- 口播是展开题目，禁止只换说法把标题重复三遍\n- 若备注为空，把推断的「要讲清什么」写在第二节拍的 intent，不要写进 title`
+    : "";
+  const notesRule = notes
+    ? `\n- 【要讲清什么】是硬约束，不是可忽略备注：口播必须体现「${notes}」。禁止把这句话复述成标题，禁止写成说明书。把要求写进对应节拍的 intent，并在 fullNarration 里用可拍的情节落地。`
     : "";
   const pinDraftTitle = (parsed: any) => {
     if (intent === "have-title" && parsed && typeof parsed === "object") parsed.title = title;
@@ -1275,9 +1360,14 @@ app.post("/api/script/draft", async (req, res) => {
 
   const styleContract = incomingStyleContract(stylePack);
 
-  const prompt = `你是短视频口播导演。按字数预算写一整段连续口播，并拆成节拍。秒数不要你估，只写字。
+  const budgetRule = language === "en"
+    ? `- Write fullNarration and every beat.narration in natural spoken English. Do not write Chinese voiceover.
+- fullNarration word count (whitespace-separated) ≤ ${maxChars}`
+    : `- fullNarration 去掉空白后的汉字数 ≤ ${maxChars}`;
+
+  const prompt = `你是短视频口播导演。按${language === "en" ? "词数" : "字数"}预算写一整段连续口播，并拆成节拍。秒数不要你估，只写${language === "en" ? "词" : "字"}。
 硬约束：
-- fullNarration 去掉空白后的汉字数 ≤ ${maxChars}
+${budgetRule}
 - 第一拍 function 必须是 hook
 - 最后一拍 function 必须是 cta 或 reveal
 - visualIntent 必须写看得见的因果，禁止「很有氛围」「电影感」
@@ -1287,7 +1377,7 @@ app.post("/api/script/draft", async (req, res) => {
 - 不要改口播去迁就风格
 - beats 4 到 8 个，优先按体裁包节拍：${beatPlan || "hook → setup → turn → proof → cta"}
 - energy 只能是 fast / medium / slow / hold
-- function 只能是 hook / setup / turn / proof / reveal / cta${haveTitleRule}
+- function 只能是 hook / setup / turn / proof / reveal / cta${haveTitleRule}${notesRule}
 
 ${styleContract}
 
@@ -1299,7 +1389,7 @@ ${styleContract}
 【入口】${intent || ""}
 【备注】${intentNotes || ""}
 【调研】对标:${researchNotes?.competitor || ""}；问题:${researchNotes?.audienceQuestion || ""}；事实:${researchNotes?.fact || ""}；画面:${researchNotes?.visualRef || ""}
-【目标时长】${targetSeconds}s 【节奏】${pace} 【字数上限】${maxChars}
+【目标时长】${targetSeconds}s 【节奏】${pace} 【${language === "en" ? "词数" : "字数"}上限】${maxChars} 【口播语言】${language}
 
 只输出 JSON：{"title":string,"fullNarration":string,"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
 
@@ -1319,8 +1409,10 @@ ${styleContract}
       if (llmResult.ok && llmResult.text) {
         const parsed = cleanAndParseJSON<any>(llmResult.text);
         if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
-          if (countChars(parsed.fullNarration) > maxChars * 1.15) {
-            parsed.fullNarration = String(parsed.fullNarration).replace(/\s+/g, "").slice(0, maxChars);
+          // Never silently slice generated copy: it can break a sentence, CTA, and beat alignment.
+          if (countChars(parsed.fullNarration, language) > maxChars) {
+            parsed.budgetStatus = "over_budget";
+            parsed.overByChars = countChars(parsed.fullNarration, language) - maxChars;
           }
           return res.json(pinDraftTitle(parsed));
         }
@@ -1336,6 +1428,10 @@ ${styleContract}
       });
       const parsed = cleanAndParseJSON<any>(response.text);
       if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
+        if (countChars(parsed.fullNarration, language) > maxChars) {
+          parsed.budgetStatus = "over_budget";
+          parsed.overByChars = countChars(parsed.fullNarration, language) - maxChars;
+        }
         return res.json(pinDraftTitle(parsed));
       }
     }
@@ -1352,15 +1448,24 @@ app.post("/api/script/research", async (req, res) => {
     intentNotes = "",
     referenceUrl = "",
     platform = "douyin",
-    llmApi
+    llmApi,
+    scriptLanguage
   } = req.body || {};
-  const seed = String(topic || intentNotes || "").trim() || "短视频选题";
-  const bladesMeta = [
-    { id: "competitor", label: "对标", query: `${seed} 短视频 讲解 OR 抖音` },
-    { id: "audience", label: "受众", query: `${seed} 为什么 搞不懂 OR 误区` },
-    { id: "fact", label: "事实", query: `${seed} 数据 OR 研究 OR 报告` },
-    { id: "visual", label: "画面", query: `${seed} 图解 OR 可视化 OR 动画` }
-  ];
+  const language = normalizeScriptLanguage(scriptLanguage);
+  const seed = String(topic || intentNotes || "").trim() || (language === "en" ? "short video topic" : "短视频选题");
+  const bladesMeta = language === "en"
+    ? [
+      { id: "competitor", label: "对标", query: `${seed} YouTube Shorts OR TikTok explainer` },
+      { id: "audience", label: "受众", query: `${seed} why people get this wrong` },
+      { id: "fact", label: "事实", query: `${seed} study OR data OR report` },
+      { id: "visual", label: "画面", query: `${seed} diagram OR visualization OR animation` }
+    ]
+    : [
+      { id: "competitor", label: "对标", query: `${seed} 短视频 讲解 OR 抖音` },
+      { id: "audience", label: "受众", query: `${seed} 为什么 搞不懂 OR 误区` },
+      { id: "fact", label: "事实", query: `${seed} 数据 OR 研究 OR 报告` },
+      { id: "visual", label: "画面", query: `${seed} 图解 OR 可视化 OR 动画` }
+    ];
 
   try {
     const pageFinding = referenceUrl ? await fetchPageFinding(String(referenceUrl)) : null;
@@ -1379,7 +1484,7 @@ app.post("/api/script/research", async (req, res) => {
 【检索】${JSON.stringify(blades.map((b) => ({ id: b.id, query: b.query, findings: b.findings })))}
 
 只输出 JSON：{"summary":string,"notes":{"competitor":string,"audienceQuestion":string,"fact":string,"visualRef":string}}
-notes 每条 ≤ 40 字，要具体。`;
+notes 每条要具体。${language === "en" ? " Write notes in English, each ≤ 18 words." : " notes 每条 ≤ 40 字。"}`;
 
     const parsed = await runScriptLlmJson({
       llmApi,
@@ -1509,16 +1614,22 @@ whyThisWorks 必须点名调研里的一条。`;
 });
 
 app.post("/api/script/split-spans", async (req, res) => {
-  const { narration, llmApi, visualBible, genre } = req.body || {};
+  const { narration, llmApi, visualBible, genre, scriptLanguage } = req.body || {};
+  const language = normalizeScriptLanguage(scriptLanguage);
   const text = String(narration || "").trim();
   if (!text) {
     return res.status(400).json({ error: "narration is required" });
   }
 
+  const sentenceRule = language === "en"
+    ? `- Each spoken span must be a complete sentence ending with . ! or ?. Do not break the voiceover at a comma.
+- Contrast patterns like "not A, but B" / "although A, however B" stay one spoken span; cut the picture at the turn word into 2 visuals.`
+    : `- 口播段必须是完整一句，以。！？结束。禁止在逗号处断开旁白。
+- 「不是A，而是B」「不是A，其实是B」「虽然A，但是B」「与其A，不如B」必须同一口播段；画面在翻转词处切成 2 张。`;
+
   const prompt = `把口播拆成「整句口播段 + 句内画面」。
 硬规则：
-- 口播段必须是完整一句，以。！？结束。禁止在逗号处断开旁白。
-- 「不是A，而是B」「不是A，其实是B」「虽然A，但是B」「与其A，不如B」必须同一口播段；画面在翻转词处切成 2 张。
+${sentenceRule}
 - 一句默认 1 张图；只有新主体/对照翻转才 2 张；最多 3 张。
 - startRatio/endRatio 覆盖 0 到 1，sliceText 必须是互不重复的前后两截，合起来等于该句。禁止两张图都写成后半句。
 - visualIntent 写看得见的画面，不要写情绪形容词。
@@ -1569,7 +1680,8 @@ app.post("/api/script/coverage", async (req, res) => {
 - 相邻两格 shotSize 不能相同。
 - 第一格 coverageJob=hook。最后一格 coverageJob=callback，构图尽量贴近第一格。
 - 对照格 coverageJob=contrast，coverageLink=contrast-cut。
-- ${mode === "story" ? "叙事：同一人同一空间，默认平视；不要每格换世界。" : "说明/科普：不要编男主走来走去；第二格优先 insert。"}
+- 有角色卡时：叙事镜可出同一主体，insert 必须是无人机制/物件特写，不要把角色塞进 insert。
+- 无角色卡时：不要编男主走来走去；第二格优先 insert。
 - 不要写生图英文长 prompt，不要改画风。
 - shotSize 只能是 ecu|cu|ms|ws|insert
 - cameraAngle 只能是 eye|low|high
@@ -1603,7 +1715,7 @@ ${slotLines}
 });
 
 app.post("/api/script/visual-bible", async (req, res) => {
-  const { narration, genre, title, stylePack, llmApi, previousBible } = req.body || {};
+  const { narration, genre, title, stylePack, llmApi, previousBible, intentNotes, candidates } = req.body || {};
   const text = String(narration || "").trim();
   if (!text) {
     return res.status(400).json({ error: "narration is required" });
@@ -1611,43 +1723,31 @@ app.post("/api/script/visual-bible", async (req, res) => {
   const mode = visualBibleModeForGenre(genre as ScriptGenre);
   const styleContract = incomingStyleContract(stylePack);
   const prev = normalizeVisualBible(previousBible, mode);
-  const prompt = mode === "story"
-    ? `根据整段口播，编译一份短视频「画面圣经 VisualBible」。这不是风格滤镜，是故事里有谁、在哪、什么会回来。
+  const notes = String(intentNotes || "").trim();
+  const resolvedCandidates = Array.isArray(candidates) && candidates.length
+    ? candidates
+    : extractCastCandidates({ narration: text, title: String(title || ""), intentNotes: notes });
+  const entityContract = narrativeEntityContract(text, { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates });
+  const prompt = `根据整段口播编译「画面圣经 VisualBible」。有原文证据才能建角色；没有证据必须 characters=[]。有角色不等于每镜都上人。
 硬规则：
-- 角色 0 到 2 个。只有文案明确出现人物或身份时才创建角色；没有人物就输出 characters=[]，不得为了连续性新增主角。
-- 每个角色必须对应文案实体，sourceEvidence 必须逐字引用文案短句；不得把风格参考图里的人物当成角色。
-- lead 必须可被指认：年龄段、发型、体态、服装。性别、年龄、职业未在文案出现时不得擅自猜测。
-- 场景 1 到 2 个。全片优先待在这些空间，不要每句换地方。
-- 若口播有会回来的物件，写 motif；没有就 motif=null。
-- refs 必须是空数组（脸部参考图下一阶段才接）。seedHint 可空。
-- locked 一律 false。
-- look / wardrobe 必须是看得见的，服从下面的美术世界（时代与服饰语言）。
-- 不要改口播。
+- mode 仍用 ${mode}（只影响机位先验，不决定能不能有角色）
+- 角色 0 到 3 个。只能从候选认领；拟人动物 kind=creature，产品 kind=object，人 kind=person。
+- 每张卡必须有 candidateId、sourceEvidence（原文短句）。不得发明讲解员/女孩/用户。
+- 场景 0 到 2 个。有角色时至少 1 个场景。
+- paletteLock 必填。
+- refs=[]，locked=false。不要改口播。
 
 ${styleContract}
 
-${narrativeEntityContract(text)}
+${entityContract}
 
-【体裁】${genre || "故事"}
+【体裁】${genre || ""}
 【题目】${title || ""}
+【要讲清什么】${notes || "（空）"}
 【口播】
 ${text}
 
-只输出 JSON：{"mode":"story","logline":"","paletteLock":"","characters":[{"id":"char-lead","name":"","role":"lead","ageBand":"","look":"","wardrobe":"","signature":"","sourceEvidence":[],"confidence":0,"locked":false,"refs":[]}],"locations":[{"id":"loc-1","name":"","look":"","timeOfDay":"","locked":false,"refs":[]}],"motif":null,"continuityRule":"同一人同一空间推进；对照才换主体；收束回收开场"}`
-    : `根据整段口播，编译说明型短视频的画面约束。不要硬编主角连续剧。
-- mode 必须是 expository
-- characters 通常为空；只有口播明显反复同一讲解者才给 1 个
-- locations 可空
-- paletteLock 必填：同一色温/材质
-- refs 必须是 [] 
-
-${styleContract}
-
-【体裁】${genre || "科普"}
-【口播】
-${text}
-
-只输出 JSON：{"mode":"expository","logline":"","paletteLock":"","characters":[],"locations":[],"motif":null,"continuityRule":"色板和道具材质保持一致，允许按句图解"}`;
+只输出 JSON：{"mode":"${mode}","logline":"","paletteLock":"","characters":[{"id":"char-lead","name":"","role":"lead","kind":"person","candidateId":"","ageBand":"","look":"","wardrobe":"","signature":"","sourceEvidence":[],"confidence":0,"locked":false,"refs":[]}],"locations":[{"id":"loc-1","name":"","look":"","timeOfDay":"","locked":false,"refs":[]}],"motif":null,"continuityRule":"有角色的镜子同一主体推进；insert 默认无人；对照才换主体"}`;
 
   try {
     const parsed = await runScriptLlmJson({
@@ -1657,15 +1757,32 @@ ${text}
       temperature: 0.35
     });
     const normalized = normalizeVisualBible(parsed, mode);
-    const incoming = normalized && (normalized.characters.length > 0 || normalized.mode === "expository" || normalized.paletteLock)
+    let incoming = normalized && (normalized.characters.length > 0 || normalized.mode === "expository" || normalized.paletteLock)
       ? { ...normalized, sourceHash: bibleSourceHash(text, genre, mode), generatedAt: Date.now() }
-      : fallbackVisualBible({ narration: text, genre, title });
-    const merged = groundVisualBible(mergeVisualBible(prev, incoming), text);
+      : fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates });
+    if (incoming.characters.length === 0 && resolvedCandidates.length > 0) {
+      const filled = fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates });
+      incoming = {
+        ...incoming,
+        characters: filled.characters,
+        locations: incoming.locations.length ? incoming.locations : filled.locations,
+        continuityRule: filled.continuityRule
+      };
+    }
+    const merged = groundVisualBible(mergeVisualBible(prev, incoming), text, {
+      title: String(title || ""),
+      intentNotes: notes,
+      candidates: resolvedCandidates
+    });
     return res.json({ bible: merged });
   } catch (error: any) {
     console.warn("[Visual Bible] fallback:", error?.message || error);
     return res.json({
-      bible: groundVisualBible(mergeVisualBible(prev, fallbackVisualBible({ narration: text, genre, title })), text),
+      bible: groundVisualBible(
+        mergeVisualBible(prev, fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates })),
+        text,
+        { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates }
+      ),
       fallback: true
     });
   }
@@ -1673,7 +1790,9 @@ ${text}
 
 // 2.1 Polish, Rewrite, or Expand single narration/prompt with LLM
 app.post("/api/script/polish-narration", async (req, res) => {
-  const { text, type = "narration", style = "punchy", visualStyle = "cinematic", llmApi } = req.body || {};
+  const { text, type = "narration", style = "punchy", visualStyle = "cinematic", llmApi, scriptLanguage } = req.body || {};
+  const language = normalizeScriptLanguage(scriptLanguage);
+  const target = bilingualTarget(language);
   if (!text || typeof text !== "string") {
     return res.status(400).json({ error: "Text is required" });
   }
@@ -1692,10 +1811,11 @@ app.post("/api/script/polish-narration", async (req, res) => {
     secondaryText: `Scene caption and deeper perspective for: ${cleanText}`
   };
 
+  const secondaryLangLabel = target === "zh" ? "精简中文双语字幕" : "精简英文双语字幕";
   const prompt = type === "narration"
     ? `请将以下短视频旁白文案进行润色与重写，使其更加【${style === "punchy" ? "抓人爆款、节奏有力" : style === "emotional" ? "温暖治愈、富有哲思" : "通俗易懂、生动幽默"}】：
 原文：${cleanText}
-同时生成对应的精简英文双语字幕，以及对应的专业英文AI画图Prompt（风格要求：${visualStyle}）。以JSON返回，字段为 polishedText, secondaryText, visualPrompt, chineseVisualPrompt。`
+polishedText 必须用${language === "en" ? "英文" : "中文"}口播。同时生成对应的${secondaryLangLabel}，以及对应的专业英文AI画图Prompt（风格要求：${visualStyle}）。以JSON返回，字段为 polishedText, secondaryText, visualPrompt, chineseVisualPrompt。`
     : `请根据以下画面意图，扩写为一个极其详尽、适合生图的专业英文Prompt（风格：${visualStyle}）：
 画面意图：${cleanText}
 以JSON返回，字段为 polishedText, secondaryText, visualPrompt, chineseVisualPrompt。`;
@@ -1733,7 +1853,7 @@ app.post("/api/script/polish-narration", async (req, res) => {
           type: Type.OBJECT,
           properties: {
             polishedText: { type: Type.STRING, description: "润色后的旁白解说词" },
-            secondaryText: { type: Type.STRING, description: "对应的英文双语字幕" },
+            secondaryText: { type: Type.STRING, description: target === "zh" ? "对应的中文双语字幕" : "对应的英文双语字幕" },
             visualPrompt: { type: Type.STRING, description: "专业英文画图Prompt" },
             chineseVisualPrompt: { type: Type.STRING, description: "中文画面描述" }
           },
@@ -1756,10 +1876,15 @@ app.post("/api/script/polish-narration", async (req, res) => {
 // 2.1.9 Batch-translate per-clip subtitle lines into condensed bilingual English.
 // Units are ID-pinned (clip id -> displayed Chinese slice) so the answer can never drift.
 app.post("/api/script/translate-secondary", async (req, res) => {
-  const { units, llmApi } = req.body || {};
+  const { units, llmApi, from, to, scriptLanguage } = req.body || {};
+  const sourceLang = normalizeScriptLanguage(from || scriptLanguage);
+  const targetLang = to === "zh" || to === "en" ? to : bilingualTarget(sourceLang);
   const list = (Array.isArray(units) ? units : [])
-    .map((u: any, index: number) => ({ id: String(u?.id || `u${index}`), zh: String(u?.zh || "").trim() }))
-    .filter((u: any) => u.zh);
+    .map((u: any, index: number) => ({
+      id: String(u?.id || `u${index}`),
+      text: String(u?.text || u?.zh || "").trim()
+    }))
+    .filter((u: any) => u.text);
   if (list.length === 0) {
     return res.status(400).json({ error: "units are required" });
   }
@@ -1767,28 +1892,42 @@ app.post("/api/script/translate-secondary", async (req, res) => {
     return res.status(400).json({ error: "一次最多翻译 60 条" });
   }
 
-  const zhChars = (t: string) => (t.match(/[\u4e00-\u9fa5]/g) || []).length || t.replace(/\s/g, "").length;
-  const enWords = (t: string) => t.trim().split(/\s+/).filter(Boolean).length;
-  const looksEnglish = (t: string) => (t.match(/[A-Za-z]/g) || []).length >= 3 && !/[\u4e00-\u9fa5]/.test(t);
-  const plausibleRatio = (zh: string, en: string) => {
-    const ratio = enWords(en) / Math.max(1, zhChars(zh));
-    return ratio >= 0.2 && ratio <= 2.6;
+  const looksTranslated = (t: string) => (
+    targetLang === "en"
+      ? countLatin(t) >= 3 && countCjk(t) === 0
+      : countCjk(t) >= 2
+  );
+  const plausibleRatio = (source: string, translated: string) => {
+    if (sourceLang === "zh") {
+      const zhChars = countCjk(source) || source.replace(/\s/g, "").length;
+      const enWords = translated.trim().split(/\s+/).filter(Boolean).length;
+      const ratio = enWords / Math.max(1, zhChars);
+      return ratio >= 0.2 && ratio <= 2.6;
+    }
+    const words = source.trim().split(/\s+/).filter(Boolean).length;
+    const zhChars = countCjk(translated) || translated.replace(/\s/g, "").length;
+    const ratio = zhChars / Math.max(1, words);
+    return ratio >= 0.4 && ratio <= 3.0;
   };
-  const tooLong = (t: string) => t.length > 80;
+  const tooLong = (t: string) => (
+    targetLang === "en" ? t.length > 80 : (countCjk(t) > 40 || t.length > 60)
+  );
 
-  const buildPrompt = (items: { id: string; zh: string }[], stricter: boolean) => `把下面的中文口播切片逐条翻译成短视频画面上的英文字幕。
+  const sourceLabel = sourceLang === "en" ? "English" : "中文";
+  const targetLabel = targetLang === "zh" ? "中文" : "英文";
+  const buildPrompt = (items: { id: string; text: string }[], stricter: boolean) => `把下面的${sourceLabel}口播切片逐条翻译成短视频画面上的${targetLabel}字幕。
 硬规则：
-- 输出 JSON {"items":[{"id":输入里的id,"en":"英文"}]}，id 必须与输入一一对应，一条不多、一条不少。
-- 字幕级精简英文：口语自然、短词优先；单条尽量不超过 45 个英文字符，最多两句。
-- 不加引号，不写拼音，不夹杂中文；专有名词保留原文，数字用阿拉伯数字。
-- 只翻译给定的中文，不要翻译别的句子，也不要合并或拆分条目。
-${stricter ? "- 上一轮有的条目缺失、过长或可疑。这次每条务必更短（尽量 ≤ 45 字符），宁可简化也不要超长。\n" : ""}
+- 输出 JSON {"items":[{"id":输入里的id,"text":"${targetLabel}字幕"}]}，id 必须与输入一一对应，一条不多、一条不少。兼容字段 en / zh 也可以，但优先 text。
+- 字幕级精简：口语自然；${targetLang === "en" ? "单条尽量不超过 45 个英文字符，最多两句。" : "单条尽量不超过 22 个汉字，最多两句。"}
+- 不加引号，不夹杂另一种语言；专有名词可保留原文，数字用阿拉伯数字。
+- 只翻译给定的句子，不要翻译别的句子，也不要合并或拆分条目。
+${stricter ? `- 上一轮有的条目缺失、过长或可疑。这次每条务必更短，宁可简化也不要超长。\n` : ""}
 【待翻译】
-${items.map((u, i) => `${i + 1}. id=${u.id}\n中文：${u.zh}`).join("\n\n")}
+${items.map((u, i) => `${i + 1}. id=${u.id}\n${sourceLabel}：${u.text}`).join("\n\n")}
 
 只输出 JSON。`;
 
-  const askOnce = async (items: { id: string; zh: string }[], stricter: boolean): Promise<Map<string, string>> => {
+  const askOnce = async (items: { id: string; text: string }[], stricter: boolean): Promise<Map<string, string>> => {
     const out = new Map<string, string>();
     const parsed = await runScriptLlmJson({
       llmApi,
@@ -1799,8 +1938,8 @@ ${items.map((u, i) => `${i + 1}. id=${u.id}\n中文：${u.zh}`).join("\n\n")}
     const rows = Array.isArray(parsed?.items) ? parsed.items : [];
     for (const row of rows) {
       const id = String(row?.id || "");
-      const en = String(row?.en || "").trim().replace(/^["'`]+|["'`]+$/g, "");
-      if (id && en) out.set(id, en);
+      const translated = String(row?.text || row?.en || row?.zh || "").trim().replace(/^["'`]+|["'`]+$/g, "");
+      if (id && translated) out.set(id, translated);
     }
     return out;
   };
@@ -1811,35 +1950,37 @@ ${items.map((u, i) => `${i + 1}. id=${u.id}\n中文：${u.zh}`).join("\n\n")}
     const missingIds = () => list.filter((u) => !result.has(u.id)).length;
     if (missingIds() > 0) {
       const stricter = await askOnce(list, true);
-      for (const [id, en] of stricter) result.set(id, en);
+      for (const [id, translated] of stricter) result.set(id, translated);
     }
 
-    // Per-unit validation: not English / implausible pairing / too long -> retry that unit alone.
     let extraCalls = 0;
     for (const u of list) {
-      let en = result.get(u.id);
-      const bad = (t?: string) => !t || !looksEnglish(t) || !plausibleRatio(u.zh, t) || tooLong(t);
-      if (en && !bad(en)) {
-        byId.set(u.id, en);
+      let translated = result.get(u.id);
+      const bad = (t?: string) => !t || !looksTranslated(t) || !plausibleRatio(u.text, t) || tooLong(t);
+      if (translated && !bad(translated)) {
+        byId.set(u.id, translated);
         continue;
       }
-      while (bad(en) && extraCalls < 16) {
+      while (bad(translated) && extraCalls < 16) {
         extraCalls++;
         const one = await askOnce([u], true);
-        en = one.get(u.id);
+        translated = one.get(u.id);
       }
-      if (en && looksEnglish(en)) byId.set(u.id, en);
+      if (translated && looksTranslated(translated)) byId.set(u.id, translated);
     }
 
     return res.json({
       ok: true,
-      items: list.filter((u) => byId.has(u.id)).map((u) => ({ id: u.id, en: byId.get(u.id) })),
+      items: list.filter((u) => byId.has(u.id)).map((u) => {
+        const text = byId.get(u.id);
+        return { id: u.id, text, en: targetLang === "en" ? text : undefined, zh: targetLang === "zh" ? text : undefined };
+      }),
       missing: list.filter((u) => !byId.has(u.id)).map((u) => u.id),
       source: "llm"
     });
   } catch (error: any) {
     console.warn("[Translate Secondary] LLM failed:", error?.message || error);
-    return res.status(500).json({ error: error?.message || "英文翻译失败" });
+    return res.status(500).json({ error: error?.message || "翻译失败" });
   }
 });
 
@@ -3451,9 +3592,10 @@ async function callBailianTts(opts: {
 }): Promise<{ ok: boolean; audioUrl?: string; error?: string; status?: number }> {
   const apiKey = sanitizeBearerKey(opts.apiKey);
   const model = (opts.model || "").trim() || "qwen-audio-3.0-tts-flash";
-  const voice = (opts.voice || "").trim() || (isQwenAudioTtsModel(model) ? "longanfengyue" : "Cherry");
+  const voice = (opts.voice || "").trim() || (isQwenAudioTtsModel(model) ? "longanfengyue" : isCosyVoiceModel(model) ? "longxiaochun" : "Cherry");
   const text = String(opts.text || "").trim();
   const endpoint = resolveBailianTtsEndpoint(opts.endpoint, model);
+  // Audio 3.0 uses the audio-specific payload; CosyVoice keeps the SpeechSynthesizer payload.
   const audio30 = isQwenAudioTtsModel(model);
   const timeoutMs =
     opts.timeoutMs || (isQwenAudioPlusModel(model) ? 180000 : audio30 ? 120000 : 60000);
@@ -3780,6 +3922,8 @@ app.post("/api/audio/tts", async (req, res) => {
     return res.json({
       audioUrl: materializeClientAudioUrl(result.audioUrl),
       voice: result.voice,
+      requestedVoice: String(character || '').trim(),
+      resolvedVoice: result.voice,
       format: result.format,
       character,
       provider: result.provider,
@@ -3815,6 +3959,8 @@ app.post("/api/audio/tts-full", async (req, res) => {
     return res.json({
       audioUrl: materializeClientAudioUrl(result.audioUrl),
       voice: result.voice,
+      requestedVoice: String(character || '').trim(),
+      resolvedVoice: result.voice,
       format: result.format,
       character,
       provider: result.provider,
@@ -3891,6 +4037,10 @@ app.post("/api/audio/tts-utterances", async (req, res) => {
     return res.json({
       segments,
       character,
+      requestedVoice: String(character || '').trim(),
+      resolvedVoice: isUsableBailianTts(ttsApi)
+        ? resolveBailianVoice(character, ttsApi?.voice, String(ttsApi?.model || ''))
+        : undefined,
       provider: isUsableBailianTts(ttsApi) ? "bailian" : "edge",
       count: segments.length
     });
@@ -3931,6 +4081,8 @@ app.post("/api/audio/tts/test", async (req, res) => {
         latencyMs,
         model: resolvedModel,
         voice: resolvedVoice,
+        requestedVoice: String(voice || '').trim(),
+        resolvedVoice,
         audioUrl: result.audioUrl
       });
     }

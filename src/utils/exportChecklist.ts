@@ -1,7 +1,7 @@
 import { VideoProject } from '../types';
 import { isNarrationTrackFresh, joinClipsForTts } from './narrationTrack';
 import { resolveTtsApi } from './presets';
-import { isStudioFontReady, resolveSubtitleFontId, studioFontById } from './subtitleFonts';
+import { isStudioFontReady, studioFontById, subtitleFontIds } from './subtitleFonts';
 
 export type ExportIssueLevel = 'block' | 'warn';
 
@@ -37,9 +37,15 @@ export function buildExportChecklist(project: VideoProject): ExportIssue[] {
     issues.push({ id: 'stale-vo', level: 'warn', text: '旁白和分镜不一致，建议先重配音' });
   }
 
-  const font = studioFontById(resolveSubtitleFontId(project.subtitles));
-  if (font.url && !isStudioFontReady(font.id)) {
-    issues.push({ id: 'font', level: 'warn', text: `字幕字体「${font.name}」还在加载，未就绪会先用系统字体` });
+  const pendingFonts = subtitleFontIds(project.subtitles)
+    .map((id) => studioFontById(id))
+    .filter((font) => font.url && !isStudioFontReady(font.id));
+  if (pendingFonts.length > 0) {
+    issues.push({
+      id: 'font',
+      level: 'warn',
+      text: `字幕字体「${pendingFonts.map((font) => font.name).join(' / ')}」还在加载，未就绪会先用系统字体`
+    });
   }
 
   return issues;

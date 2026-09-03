@@ -4,7 +4,8 @@ import { clampOutro, resolveOutro } from './utils/outro';
 import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, isImageApiReady, resolveLlmApi, resolveTtsApi } from './utils/presets';
 import { generateImageWithRetry } from './utils/imageGenerateClient';
 import { classifyImageError } from './utils/imageGenerateRetry';
-import { resolveSubtitleFontId } from './utils/subtitleFonts';
+import { defaultFontIdForScript, resolveSecondarySubtitleFontId, resolveSubtitleFontId, studioFontById } from './utils/subtitleFonts';
+import { normalizeScriptLanguage } from './utils/scriptLanguage';
 import { applyTtsSettingsToProject, applyVoiceToProject, bailianTtsConcurrency, customVoiceBelongsToModel, isEnrollmentVoiceId, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
 import { findDesignedVoice } from './utils/voiceLibrary';
 import { hydrateActiveStylePack, localRewriteClipPrompt, presetStylePack, renderLine } from './utils/stylePack';
@@ -116,11 +117,22 @@ function settleProjectImages(project: VideoProject): VideoProject {
       bgmTrackId: resolveBgmTrackId(settled.audio?.bgmTrackId),
       voiceCharacter: resolveTtsVoiceId(settled.audio?.voiceCharacter, resolveTtsApi(settled.settings?.customTtsApi))
     },
-    subtitles: {
-      ...DEFAULT_SUBTITLE_CONFIG,
-      ...settled.subtitles,
-      fontId: resolveSubtitleFontId(settled.subtitles)
-    },
+    subtitles: (() => {
+      const spoken = normalizeScriptLanguage(settled.scriptWorkspace?.scriptLanguage);
+      const fontId = resolveSubtitleFontId(settled.subtitles);
+      const hasSecondary = Boolean(settled.subtitles?.secondaryFontId);
+      let secondaryFontId = resolveSecondarySubtitleFontId(settled.subtitles);
+      if (!hasSecondary && spoken === 'en') secondaryFontId = defaultFontIdForScript('cjk');
+      const alignedPrimary = spoken === 'en' && studioFontById(fontId).id === 'system-cjk'
+        ? defaultFontIdForScript('latin')
+        : fontId;
+      return {
+        ...DEFAULT_SUBTITLE_CONFIG,
+        ...settled.subtitles,
+        fontId: alignedPrimary,
+        secondaryFontId
+      };
+    })(),
     scriptWorkspace: hydrateScriptWorkspace(settled),
     settings: {
       ...settled.settings,
@@ -391,10 +403,24 @@ export default function App() {
       });
       const stored = await storeRes.json().catch(() => ({}));
       const audioUrl = stored?.audioUrl || assembled.wavDataUrl;
+      const actualSpeechSeconds = assembled.clips.reduce(
+        (sum, clip) => sum + Math.max(0, Number(clip.speechDuration) || 0),
+        0
+      );
 
       setProject((prev) => ({
         ...prev,
         clips: assembled.clips,
+        scriptWorkspace: prev.scriptWorkspace
+          ? {
+              ...prev.scriptWorkspace,
+              durationBudget: {
+                ...prev.scriptWorkspace.durationBudget,
+                actualSpeechSeconds: Math.round(actualSpeechSeconds * 10) / 10,
+                actualTotalSeconds: Math.round(assembled.duration * 10) / 10
+              }
+            }
+          : prev.scriptWorkspace,
         audio: {
           ...prev.audio,
           narrationTrack: {
@@ -1139,7 +1165,7 @@ export default function App() {
     void (async () => {
       const visualBible = project.scriptWorkspace?.visualBible;
       let rewritten = project.clips.map((clip, index) => {
-        const local = localRewriteClipPrompt(clip, pack, visualBible);
+        const local = localRewriteClipPrompt(clip, pack);
         const next = {
           ...clip,
           chineseVisualPrompt: local.chineseVisualPrompt,
@@ -1406,6 +1432,7 @@ export default function App() {
           stylePack={hydrateActiveStylePack(project.settings)}
           visualBible={project.scriptWorkspace?.visualBible}
           genre={project.scriptWorkspace?.genrePackId || null}
+          scriptLanguage={project.scriptWorkspace?.scriptLanguage}
         />
       )}
 
@@ -1532,6 +1559,7 @@ export default function App() {
           clips={project.clips}
           onUpdateClips={(clips) => updateProject({ clips })}
           llmApi={project.settings.customLlmApi}
+          scriptLanguage={project.scriptWorkspace?.scriptLanguage}
         />
       )}
 

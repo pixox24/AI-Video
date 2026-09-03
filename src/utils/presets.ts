@@ -1,5 +1,5 @@
 import { VideoProject, VisualStyle, SubtitleConfig, AudioConfig, CustomImageApiConfig, CustomLlmApiConfig, CustomTtsApiConfig, ScriptGenre } from '../types';
-import { SYSTEM_FONT_ID, SYSTEM_FONT_STACK } from './subtitleFonts';
+import { SYSTEM_FONT_ID, SYSTEM_FONT_STACK, SYSTEM_LATIN_FONT_ID } from './subtitleFonts';
 
 export const DEFAULT_CUSTOM_IMAGE_API: CustomImageApiConfig = {
   enabled: false,
@@ -263,6 +263,7 @@ export const TTS_PROVIDER_PRESETS: TtsProviderPreset[] = [
     popularModels: [
       { id: 'qwen-audio-3.0-tts-plus', label: 'Audio 3.0 Plus', hint: '旗舰音质，48kHz，适合成片配音' },
       { id: 'qwen-audio-3.0-tts-flash', label: 'Audio 3.0 Flash', hint: '新一代更快更省，日常推荐' },
+      { id: 'cosyvoice-v2', label: 'CosyVoice V2', hint: '音色库 longyingtian 等官方音色' },
       { id: 'qwen3-tts-flash', label: 'Qwen3-TTS-Flash', hint: '上一代轻量档，Cherry 等音色' },
       { id: 'qwen3-tts-instruct-flash', label: 'Instruct-Flash', hint: '上一代，支持指令控制语速/情感' },
       { id: 'qwen-tts', label: 'Qwen-TTS', hint: '经典稳定版音色' }
@@ -623,6 +624,7 @@ export const DEFAULT_SUBTITLE_CONFIG: SubtitleConfig = {
   fontSize: 26,
   fontId: SYSTEM_FONT_ID,
   fontFamily: SYSTEM_FONT_STACK,
+  secondaryFontId: SYSTEM_LATIN_FONT_ID,
   positionY: 82,
   primaryColor: '#ffffff',
   highlightColor: '#facc15',

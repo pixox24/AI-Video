@@ -30,7 +30,7 @@ export function prepareClipSubtitleLayout(
   const maxLines = config.maxLines || 3;
   const typeface = resolveSubtitleTypeface(config);
 
-  // English is only included when it is still paired with this exact shot text.
+  // Translation line is only included when it is still paired with this exact shot text.
   const secondaryText = config.bilingual && isSecondaryUsable(clip)
     ? (clip.secondaryText || '').trim()
     : undefined;
@@ -98,7 +98,7 @@ export function drawClipSubtitles(
   const primaryBlockHeight = layout.lines.length * layout.lineHeight;
   const startY = -layout.totalHeight / 2 + layout.lineHeight / 2;
 
-  // Primary Chinese narration lines
+  // Primary spoken narration lines
   ctx.font = subtitleCanvasFont(typeface.primaryFamily, layout.fontSize, typeface.primaryWeight);
 
   layout.lines.forEach((line, idx) => {
@@ -115,7 +115,7 @@ export function drawClipSubtitles(
     ctx.fillText(line, 0, lineY);
   });
 
-  // Secondary English bilingual lines
+  // Secondary translation lines
   if (layout.secondaryLines.length > 0) {
     ctx.font = subtitleCanvasFont(typeface.secondaryFamily, layout.secondaryFontSize, typeface.secondaryWeight);
     const secondaryStartY = -layout.totalHeight / 2 + primaryBlockHeight + layout.fontSize * 0.25 + layout.secondaryLineHeight / 2;

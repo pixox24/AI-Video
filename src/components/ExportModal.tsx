@@ -20,7 +20,7 @@ import { exportProjectToMP4 } from '../utils/mp4Exporter';
 import { clipShotNarration } from '../utils/narrationTrack';
 import { isSecondaryUsable } from '../utils/secondaryText';
 import { buildExportChecklist } from '../utils/exportChecklist';
-import { isStudioFontReady, loadStudioFont, resolveSubtitleFontId, studioFontById } from '../utils/subtitleFonts';
+import { ensureSubtitleFont, isStudioFontReady, studioFontById, subtitleFontIds } from '../utils/subtitleFonts';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -43,9 +43,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
 
   useEffect(() => {
     if (!isOpen) return;
-    const fontId = resolveSubtitleFontId(project.subtitles);
-    const font = studioFontById(fontId);
-    if (!font.url || isStudioFontReady(fontId)) {
+    const ids = subtitleFontIds(project.subtitles);
+    const pending = ids.map((id) => studioFontById(id)).filter((font) => font.url && !isStudioFontReady(font.id));
+    if (pending.length === 0) {
       setFontReady(true);
       setFontLoading(false);
       return;
@@ -53,7 +53,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
     setFontReady(false);
     setFontLoading(true);
     let cancelled = false;
-    void loadStudioFont(fontId).then((ok) => {
+    void ensureSubtitleFont(project.subtitles).then((ok) => {
       if (cancelled) return;
       setFontReady(ok);
       setFontLoading(false);
@@ -79,7 +79,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
   const totalDuration = project.clips.reduce((acc, c) => acc + (c.duration || 3.5), 0);
   const checklist = buildExportChecklist(project).map((issue) => (
     issue.id === 'font' && fontLoading
-      ? { ...issue, text: `正在加载字幕字体「${studioFontById(resolveSubtitleFontId(project.subtitles)).name}」…` }
+      ? { ...issue, text: `正在加载字幕字体「${subtitleFontIds(project.subtitles).map((id) => studioFontById(id).name).join(' / ')}」…` }
       : issue
   ));
   const blocked = checklist.some((issue) => issue.level === 'block');
@@ -147,7 +147,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, proje
       srtContent += `${index + 1}\n`;
       srtContent += `${formatSRTTime(startSec)} --> ${formatSRTTime(endSec)}\n`;
       srtContent += `${clipShotNarration(clip)}\n`;
-      if (isSecondaryUsable(clip)) srtContent += `${clip.secondaryText}\n`;
+      if (isSecondaryUsable(clip, project.scriptWorkspace?.scriptLanguage)) srtContent += `${clip.secondaryText}\n`;
       srtContent += `\n`;
     });
 

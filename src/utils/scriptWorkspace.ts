@@ -8,6 +8,7 @@ import {
   ScriptBeat,
   ScriptGenre,
   ScriptIntent,
+  ScriptLanguage,
   ScriptPace,
   ScriptWorkspace,
   StoryboardClip,
@@ -23,14 +24,19 @@ import { presetStylePack } from './stylePack';
 import { beatToChinese, compileImagePrompt } from './imagePrompt';
 import { cameraMotionForCoverage, withCoverage } from './shotCoverage';
 import {
-  applyBibleToChineseIntent,
   groundVisualBible,
   normalizeVisualBible,
   stampShotsWithBible,
   stripBiblePrefix,
   visualBibleModeForGenre
 } from './visualBible';
-import { countNarrationChars, ensureUniqueClipIds, joinClipNarrations, newClipId, repairClipSlices } from './narrationTrack';
+import { ensureUniqueClipIds, joinClipNarrations, newClipId, repairClipSlices } from './narrationTrack';
+import {
+  countBudgetUnits,
+  languageProfile,
+  normalizeScriptLanguage,
+  titleUnitCount
+} from './scriptLanguage';
 import { clampOutroHold, clampSentenceGap, SENTENCE_GAP_DEFAULT } from './sentenceGap';
 import {
   applyHoldToShots,
@@ -60,10 +66,11 @@ export const TITLE_MIN_CHARS = 2;
 export const TITLE_MAX_CHARS = 24;
 
 export function createDefaultScriptWorkspace(): ScriptWorkspace {
-  const durationBudget = buildDurationBudget({ platform: 'douyin', pace: 'medium', targetSeconds: 30 });
+  const durationBudget = buildDurationBudget({ platform: 'douyin', pace: 'medium', targetSeconds: 30, scriptLanguage: 'zh' });
   return {
     stage: 'intent',
     gate: 'deep',
+    scriptLanguage: 'zh',
     intent: null,
     intentNotes: '',
     lockedTitle: '',
@@ -90,14 +97,17 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
   }
 
   const narration = joinClipNarrations(project.clips || []);
-  const hasCopy = countNarrationChars(narration) >= 8;
+  const scriptLanguage = normalizeScriptLanguage(project.scriptWorkspace?.scriptLanguage);
+  const hasCopy = countBudgetUnits(narration, scriptLanguage) >= 8;
   const totalDuration = (project.clips || []).reduce((sum, clip) => sum + (clip.duration || 0), 0);
   const durationBudget = buildDurationBudget({
     platform: 'douyin',
     pace: 'medium',
+    durationMode: hasCopy ? 'content-driven' : 'target-driven',
     targetSeconds: totalDuration > 6 ? Math.round(totalDuration) : 30,
-    usedChars: countNarrationChars(narration),
-    conceptUsed: 1
+    usedChars: countBudgetUnits(narration, scriptLanguage),
+    conceptUsed: 1,
+    scriptLanguage
   });
 
   const topicTitle = (project.topic || project.title || '').trim();
@@ -110,6 +120,7 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
     const card = topicTitle ? seedTopicCard(topicTitle) : null;
     return refreshWorkspaceDerived({
       ...createDefaultScriptWorkspace(),
+      scriptLanguage,
       stage: 'copy',
       gate: 'deep',
       intent: 'have-script',
@@ -126,6 +137,7 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
   if (topicTitle) {
     return refreshWorkspaceDerived(lockTitleFromIntent({
       ...createDefaultScriptWorkspace(),
+      scriptLanguage,
       intent: 'have-title',
       lockedTitle: topicTitle,
       durationBudget,
@@ -135,21 +147,27 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
 
   return refreshWorkspaceDerived({
     ...createDefaultScriptWorkspace(),
+    scriptLanguage,
     durationBudget
   });
 }
 
 export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace {
   const base = createDefaultScriptWorkspace();
+  const scriptLanguage = normalizeScriptLanguage(raw.scriptLanguage || raw.durationBudget?.scriptLanguage);
   const durationBudget = buildDurationBudget({
     ...base.durationBudget,
     ...(raw.durationBudget || {}),
-    usedChars: countNarrationChars(raw.fullNarration || ''),
-    conceptUsed: raw.durationBudget?.conceptUsed || raw.topicCards?.find((card) => card.id === raw.selectedTopicId)?.conceptCount || 0
+    durationMode: raw.durationBudget?.durationMode || (raw.intent === 'have-script' ? 'content-driven' : 'target-driven'),
+    speechRate: raw.durationBudget?.speechRate || 1,
+    usedChars: countBudgetUnits(raw.fullNarration || '', scriptLanguage),
+    conceptUsed: raw.durationBudget?.conceptUsed || raw.topicCards?.find((card) => card.id === raw.selectedTopicId)?.conceptCount || 0,
+    scriptLanguage
   });
   return {
     ...base,
     ...raw,
+    scriptLanguage,
     researchNotes: { ...EMPTY_RESEARCH, ...(raw.researchNotes || {}) },
     durationBudget,
     topicCards: Array.isArray(raw.topicCards) ? raw.topicCards : [],
@@ -170,26 +188,32 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     visualBible: (() => {
       const bible = normalizeVisualBible(raw.visualBible, visualBibleModeForGenre(raw.genrePackId));
       return bible && raw.fullNarration
-        ? groundVisualBible(bible, raw.fullNarration)
+        ? groundVisualBible(bible, raw.fullNarration, {
+          title: raw.lockedTitle || raw.draftedTitle,
+          intentNotes: raw.intentNotes
+        })
         : bible;
     })()
   };
 }
 
 export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorkspace {
-  const usedChars = countNarrationChars(workspace.fullNarration);
+  const scriptLanguage = normalizeScriptLanguage(workspace.scriptLanguage);
+  const usedChars = countBudgetUnits(workspace.fullNarration, scriptLanguage);
   const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId);
   const durationBudget = buildDurationBudget({
     ...workspace.durationBudget,
     usedChars,
-    conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed
+    conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed,
+    scriptLanguage
   });
   const directorNotes = [
-    ...titleDirectorNotes({ ...workspace, durationBudget }),
+    ...titleDirectorNotes({ ...workspace, scriptLanguage, durationBudget }),
     ...validateForecast({
       budget: durationBudget,
       shots: workspace.forecastShots,
-      beats: workspace.beats
+      beats: workspace.beats,
+      scriptLanguage
     })
   ];
   return { ...workspace, durationBudget, directorNotes };
@@ -201,42 +225,47 @@ export function narrationForDiagnose(workspace: ScriptWorkspace): string {
   const full = (workspace.fullNarration || '').trim();
   const lateStage = workspace.stage === 'copy' || workspace.stage === 'beats' || workspace.stage === 'rhythm';
   if (lateStage) return full || notes;
-  if (countNarrationChars(notes) >= 8) return notes;
+  if (countBudgetUnits(notes, workspace.scriptLanguage) >= 8) return notes;
   return full || notes;
 }
 
 export function diagnoseExistingScript(workspace: ScriptWorkspace): ScriptWorkspace {
   const narration = (workspace.fullNarration || narrationForDiagnose(workspace)).trim();
-  const chars = countNarrationChars(narration);
+  const scriptLanguage = normalizeScriptLanguage(workspace.scriptLanguage);
+  const chars = countBudgetUnits(narration, scriptLanguage);
   const durationBudget = budgetFromWordCount(
     Math.max(chars, 8),
     workspace.durationBudget.platform,
-    workspace.durationBudget.pace
+    workspace.durationBudget.pace,
+    workspace.durationBudget.speechRate,
+    scriptLanguage
   );
   const beats = beatsFromNarration(narration, durationBudget);
   return rebuildForecast({
     ...workspace,
     fullNarration: narration,
     beats,
-    durationBudget: { ...durationBudget, usedChars: chars },
+    durationBudget: { ...durationBudget, usedChars: chars, durationMode: 'content-driven' },
     stage: 'copy'
   });
 }
 
 export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
-  const usedChars = countNarrationChars(workspace.fullNarration);
+  const scriptLanguage = normalizeScriptLanguage(workspace.scriptLanguage);
+  const usedChars = countBudgetUnits(workspace.fullNarration, scriptLanguage);
   const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId);
   const durationBudget = buildDurationBudget({
     ...workspace.durationBudget,
     usedChars,
-    conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed
+    conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed,
+    scriptLanguage
   });
   const joinedSpans = (workspace.speechSpans || []).map((span) => span.text).join('').replace(/\s+/g, '');
   const joinedNarration = (workspace.fullNarration || '').replace(/\s+/g, '');
   const spansFresh = Boolean(workspace.speechSpans?.length) && joinedSpans === joinedNarration;
   const speechSpans = spansFresh
-    ? normalizeSpeechSpans(workspace.speechSpans, workspace.fullNarration)
-    : buildSpeechSpans(workspace.fullNarration, workspace.beats);
+    ? normalizeSpeechSpans(workspace.speechSpans, workspace.fullNarration, scriptLanguage)
+    : buildSpeechSpans(workspace.fullNarration, workspace.beats, scriptLanguage);
   const forecastShots = withCoverage(
     stampShotsWithBible(
       applyPinnedHolds(
@@ -244,7 +273,8 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
           narration: workspace.fullNarration,
           beats: workspace.beats,
           budget: durationBudget,
-          spans: speechSpans
+          spans: speechSpans,
+          scriptLanguage
         }),
         workspace.forecastShots
       ),
@@ -356,7 +386,8 @@ export function applyGenrePack(workspace: ScriptWorkspace, genre: ScriptGenre): 
     targetSeconds: pack.durationHint,
     usedChars: workspace.durationBudget.usedChars,
     conceptUsed: pack.maxConcepts,
-    lockedShotCount: workspace.durationBudget.lockedShotCount
+    lockedShotCount: workspace.durationBudget.lockedShotCount,
+    scriptLanguage: normalizeScriptLanguage(workspace.scriptLanguage)
   });
   return { ...workspace, genrePackId: genre, durationBudget };
 }
@@ -387,9 +418,10 @@ export function hookPreviewText(workspace: ScriptWorkspace): string {
   const hookBeat = workspace.beats.find((beat) => beat.function === 'hook');
   const source = (hookBeat?.narration || workspace.fullNarration || '').trim();
   if (!source) return '';
-  const maxChars = Math.max(12, Math.round(8 * workspace.durationBudget.charsPerSecond));
+  const lang = normalizeScriptLanguage(workspace.scriptLanguage);
+  const maxChars = Math.max(lang === 'en' ? 8 : 12, Math.round(8 * workspace.durationBudget.charsPerSecond));
   const compact = source.replace(/\s+/g, '');
-  if (countNarrationChars(source) <= maxChars) return source;
+  if (countBudgetUnits(source, lang) <= maxChars) return source;
   let used = 0;
   let out = '';
   for (const ch of source) {
@@ -421,24 +453,31 @@ export function seedTopicCard(title: string): TopicCard {
   };
 }
 
-export function titleCharCount(text: string): number {
-  return (text || '').trim().length;
+export function titleMaxFor(language?: ScriptLanguage): number {
+  return languageProfile(language).titleMax;
 }
 
-export function isLockedTitleValid(title: string | undefined): boolean {
-  const n = titleCharCount(title || '');
-  return n >= TITLE_MIN_CHARS && n <= TITLE_MAX_CHARS;
+export function titleCharCount(text: string, language?: ScriptLanguage): number {
+  return titleUnitCount(text, language);
 }
 
-export function looksLikeScript(text: string | undefined): boolean {
+export function isLockedTitleValid(title: string | undefined, language?: ScriptLanguage): boolean {
+  const profile = languageProfile(language);
+  const n = titleUnitCount(title, language);
+  return n >= profile.titleMin && n <= profile.titleMax;
+}
+
+export function looksLikeScript(text: string | undefined, language?: ScriptLanguage): boolean {
   const value = (text || '').trim();
-  if (countNarrationChars(value) >= 40) return true;
+  const lang = normalizeScriptLanguage(language);
+  if (countBudgetUnits(value, lang) >= (lang === 'en' ? 18 : 40)) return true;
   return (value.match(/[。！？!?]/g) || []).length >= 2;
 }
 
-export function isShortTitleCandidate(text: string | undefined): boolean {
+export function isShortTitleCandidate(text: string | undefined, language?: ScriptLanguage): boolean {
   const value = (text || '').trim();
-  return value.length > 0 && value.length < TITLE_MAX_CHARS && !/[。！？!?]/.test(value);
+  const max = titleMaxFor(language);
+  return titleUnitCount(value, language) > 0 && titleUnitCount(value, language) < max && !/[。！？!?]/.test(value);
 }
 
 export function waitingForTitleAngles(workspace: ScriptWorkspace): boolean {
@@ -449,7 +488,7 @@ export function waitingForTitleAngles(workspace: ScriptWorkspace): boolean {
 export function hasUsableDraftTopic(workspace: ScriptWorkspace): boolean {
   if (workspace.topicCards.some((card) => card.id === workspace.selectedTopicId)) return true;
   if (workspace.intent === 'have-script' && (workspace.fullNarration || workspace.intentNotes).trim()) return true;
-  if (workspace.intent === 'have-title' && isLockedTitleValid(workspace.lockedTitle)) return true;
+  if (workspace.intent === 'have-title' && isLockedTitleValid(workspace.lockedTitle, workspace.scriptLanguage)) return true;
   return Boolean(workspace.intentNotes.trim());
 }
 
@@ -491,7 +530,7 @@ export function lockTitleFromIntent(
   options?: { jumpToDuration?: boolean }
 ): ScriptWorkspace {
   const title = (workspace.lockedTitle || '').trim();
-  if (!isLockedTitleValid(title)) return workspace;
+  if (!isLockedTitleValid(title, workspace.scriptLanguage)) return workspace;
   const pack = genrePackById(workspace.genrePackId);
   const genre = pack?.id || '科普';
   const durationHint = pack?.durationHint || workspace.durationBudget.targetSeconds || 30;
@@ -508,9 +547,10 @@ export function lockTitleFromIntent(
     platform: workspace.durationBudget.platform,
     pace: paceHint,
     targetSeconds: durationHint,
-    usedChars: countNarrationChars(workspace.fullNarration),
+    usedChars: countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage),
     conceptUsed: card.conceptCount,
-    lockedShotCount: workspace.durationBudget.lockedShotCount
+    lockedShotCount: workspace.durationBudget.lockedShotCount,
+    scriptLanguage: normalizeScriptLanguage(workspace.scriptLanguage)
   });
   return {
     ...workspace,
@@ -542,7 +582,7 @@ export function switchScriptIntent(workspace: ScriptWorkspace, intent: ScriptInt
   let selectedTopicId = workspace.selectedTopicId;
   let topicCards = workspace.topicCards;
   if (intent === 'have-title') {
-    if (!lockedTitle.trim() && isShortTitleCandidate(workspace.intentNotes)) {
+    if (!lockedTitle.trim() && isShortTitleCandidate(workspace.intentNotes, workspace.scriptLanguage)) {
       lockedTitle = workspace.intentNotes.trim();
     }
     const selected = topicCards.find((card) => card.id === selectedTopicId);
@@ -554,10 +594,22 @@ export function switchScriptIntent(workspace: ScriptWorkspace, intent: ScriptInt
     }
   }
   let intentNotes = workspace.intentNotes;
-  if (intent === 'have-script' && countNarrationChars(intentNotes) < 8 && countNarrationChars(workspace.fullNarration) >= 8) {
+  if (intent === 'have-script' && countBudgetUnits(intentNotes, workspace.scriptLanguage) < 8 && countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage) >= 8) {
     intentNotes = workspace.fullNarration;
   }
-  return { ...workspace, intent, lockedTitle, selectedTopicId, topicCards, intentNotes };
+  return {
+    ...workspace,
+    intent,
+    lockedTitle,
+    selectedTopicId,
+    topicCards,
+    intentNotes,
+    durationBudget: buildDurationBudget({
+      ...workspace.durationBudget,
+      durationMode: intent === 'have-script' ? 'content-driven' : 'target-driven',
+      scriptLanguage: normalizeScriptLanguage(workspace.scriptLanguage)
+    })
+  };
 }
 
 export function adoptPastedScriptFromTitle(workspace: ScriptWorkspace): ScriptWorkspace {
@@ -571,6 +623,11 @@ export function adoptPastedScriptFromTitle(workspace: ScriptWorkspace): ScriptWo
     lockedTitle: '',
     selectedTopicId: null,
     topicCards: [],
+    durationBudget: buildDurationBudget({
+      ...workspace.durationBudget,
+      durationMode: 'content-driven',
+      scriptLanguage: normalizeScriptLanguage(workspace.scriptLanguage)
+    }),
     stage: 'intent'
   };
 }
@@ -588,7 +645,7 @@ function titleDirectorNotes(workspace: ScriptWorkspace): DirectorNote[] {
       message: `已锁定标题「${title}」，写稿不会改这句。`
     });
   }
-  if (looksLikeScript(workspace.lockedTitle)) {
+  if (looksLikeScript(workspace.lockedTitle, workspace.scriptLanguage)) {
     notes.push({
       id: 'title-looks-script',
       level: 'warn',
@@ -598,7 +655,7 @@ function titleDirectorNotes(workspace: ScriptWorkspace): DirectorNote[] {
   }
   const drafted = (workspace.draftedTitle || '').trim();
   const current = (workspace.lockedTitle || '').trim();
-  if (countNarrationChars(workspace.fullNarration) >= 8 && drafted && current && current !== drafted) {
+  if (countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage) >= 8 && drafted && current && current !== drafted) {
     notes.push({
       id: 'title-dirty',
       level: 'warn',
@@ -759,7 +816,7 @@ export function forecastToClips(
     // 片尾渐隐由 Outro 收束负责，尾镜入镜统一 crossfade，避免结尾双黑场
     const transition: TransitionType = 'crossfade';
     const visual = stripBiblePrefix(shot.visualIntent || shot.sliceText || shot.narration || `scene ${index + 1}`);
-    const chineseVisual = applyBibleToChineseIntent(visual, visualBible, shot);
+    const chineseVisual = visual;
     const voRole = shot.voRole || 'start';
     const span = shot.spanId || `order:${shot.order}`;
     // Only reuse a previous clip when this exact utterance-visual slot matches.
@@ -814,7 +871,7 @@ export function forecastToClips(
       continuity: shot.continuity,
       duration: Math.max(0.05, shot.speechDuration + holdDuration),
       narration: draft.narration,
-      // Reuse the previous English line for the same utterance slot; the zh-hash check
+      // Reuse the previous translation line for the same utterance slot; the primary-hash check
       // in secondaryText.ts will flag it stale if the narration actually changed.
       secondaryText: prev?.secondaryText ?? (shot.sliceText || shot.narration),
       secondaryHash: prev?.secondaryHash,
@@ -824,7 +881,7 @@ export function forecastToClips(
       visualBibleHash: visualBible?.sourceHash,
       visualBeat: compiled.beat,
       visualPrompt: compiled.prompt,
-      chineseVisualPrompt: beatToChinese(compiled.beat) || chineseVisual,
+      chineseVisualPrompt: stripBiblePrefix(beatToChinese(compiled.beat) || chineseVisual),
       promptPinned: draft.promptPinned,
       shotSize: shot.shotSize,
       cameraAngle: shot.cameraAngle,
@@ -848,9 +905,16 @@ export function workspaceTopicTitle(workspace: ScriptWorkspace, fallback = ''): 
   return selected?.title || (workspace.lockedTitle || '').trim() || workspace.intentNotes.trim() || fallback;
 }
 
-export function canApplyStoryboard(workspace: ScriptWorkspace): boolean {
-  const blocked = workspace.directorNotes.some((note) => note.level === 'block');
-  return !blocked && workspace.forecastShots.length >= 2 && countNarrationChars(workspace.fullNarration) >= 8;
+export function canApplyStoryboard(workspace: ScriptWorkspace): { ok: boolean; reason?: string } {
+  const blocked = workspace.directorNotes.find((note) => note.level === 'block');
+  if (blocked) return { ok: false, reason: blocked.message };
+  if (countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage) < 8) {
+    return { ok: false, reason: '口播太短，先写一段完整旁白' };
+  }
+  if (workspace.forecastShots.length < 2) {
+    return { ok: false, reason: '还没有预测镜。在口播页改完文案后等节奏带出现，或点「按预算写稿 / 重新诊断」' };
+  }
+  return { ok: true };
 }
 
 export function stageCompleted(workspace: ScriptWorkspace, stage: ScriptWorkspace['stage']): boolean | 'skipped' {
@@ -876,7 +940,7 @@ export function stageCompleted(workspace: ScriptWorkspace, stage: ScriptWorkspac
     case 'beats':
       return workspace.beats.length >= 2;
     case 'copy':
-      return countNarrationChars(workspace.fullNarration) >= 8;
+      return countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage) >= 8;
     case 'rhythm':
       return workspace.forecastShots.length >= 2;
     default:
@@ -900,7 +964,91 @@ function slugId(text: string): string {
   return text.replace(/\s+/g, '').slice(0, 12) || String(Date.now());
 }
 
-export function fallbackTopicCards(seed: string, intent: ScriptWorkspace['intent']): TopicCard[] {
+export function switchScriptLanguage(workspace: ScriptWorkspace, language: ScriptLanguage): ScriptWorkspace {
+  const next = normalizeScriptLanguage(language);
+  const current = normalizeScriptLanguage(workspace.scriptLanguage);
+  if (next === current) return workspace;
+  return refreshWorkspaceDerived({
+    ...workspace,
+    scriptLanguage: next,
+    durationBudget: buildDurationBudget({
+      ...workspace.durationBudget,
+      scriptLanguage: next,
+      usedChars: 0
+    }),
+    topicCards: [],
+    selectedTopicId: null,
+    beats: [],
+    fullNarration: '',
+    speechSpans: [],
+    forecastShots: [],
+    directorNotes: [],
+    draftedTitle: undefined,
+    appliedShotCount: undefined,
+    appliedAt: undefined,
+    appliedScriptHash: undefined,
+    visualBible: workspace.visualBible?.pinned ? workspace.visualBible : null,
+    stage: workspace.intent ? 'intent' : workspace.stage
+  });
+}
+
+export function fallbackTopicCards(seed: string, intent: ScriptWorkspace['intent'], language?: ScriptLanguage): TopicCard[] {
+  const lang = normalizeScriptLanguage(language);
+  if (lang === 'en') {
+    const topic = seed.trim() || 'a short video worth shooting';
+    const short = topic.split(/\s+/).slice(0, 6).join(' ');
+    const variants: Array<Omit<TopicCard, 'id'>> = [
+      {
+        title: intent === 'have-title' ? topic : short,
+        hook: `Everyone has ${short} backwards.`,
+        insight: 'Break one common myth, then leave one mechanism people can take away.',
+        genre: intent === 'product' ? '带货' : '反常识',
+        whyNow: 'Search and comments keep asking the same why.',
+        durationHint: 30,
+        paceHint: 'medium',
+        conceptCount: 1,
+        risk: 'If you only dunk on the myth, it becomes a rant.',
+        completionFit: 'Hook is a flip. Show the contrast in 3 seconds.',
+        hookType: 'misconception',
+        structure: 'myth_busting',
+        whyThisWorks: 'Myth first, then a mechanism — not a tutorial or a scene.'
+      },
+      {
+        title: `Do ${short} in three steps`,
+        hook: `From now on, ${short} is three steps.`,
+        insight: 'Turn the topic into actions, not a list of opinions.',
+        genre: '教程',
+        whyNow: 'Most videos stay conceptual. Step-by-step is still a gap.',
+        durationHint: 30,
+        paceHint: 'fast',
+        conceptCount: 1,
+        risk: 'More than 3 steps will not fit 15–30 seconds.',
+        completionFit: 'Fast pace. One action per shot.',
+        hookType: 'outcome',
+        structure: 'tutorial',
+        whyThisWorks: 'Executable steps, not a recap of opinions.'
+      },
+      {
+        title: `The 3 seconds inside ${short}`,
+        hook: 'The part that decides the outcome is not the opening. It is the middle 3 seconds.',
+        insight: 'Put the theme in one concrete moment the camera can see.',
+        genre: intent === 'blank' ? '情绪' : '故事',
+        whyNow: 'Competitors state the conclusion. Few people stage it.',
+        durationHint: 45,
+        paceHint: 'slow',
+        conceptCount: 1,
+        risk: 'If the scene is vague, image gen will miss.',
+        completionFit: 'Slow pace. Hold after the line.',
+        hookType: 'mystery',
+        structure: 'story',
+        whyThisWorks: 'A scene carries the theme, unlike a tutorial or a myth flip.'
+      }
+    ];
+    return variants.map((card, index) => ({
+      ...card,
+      id: `topic-fb-${index + 1}-${Date.now()}`
+    }));
+  }
   const topic = seed.trim() || '一个值得拍的短视频主题';
   const variants: Array<Omit<TopicCard, 'id'>> = [
     {
@@ -958,26 +1106,40 @@ export function fallbackTopicCards(seed: string, intent: ScriptWorkspace['intent
 export function fallbackDraft(input: {
   topic: string;
   hook?: string;
+  insight?: string;
   genre?: string;
   maxChars: number;
+  scriptLanguage?: ScriptLanguage;
 }): { title: string; fullNarration: string; beats: ScriptBeat[] } {
-  const topic = input.topic.trim() || '这件事';
-  const hook = input.hook?.trim() || `你以为你懂${topic}，其实关键不在那儿。`;
-  const sentences = [
-    hook,
-    `先把最常见的误会拿掉：它不是看起来那样运作的。`,
-    `真正起作用的，是中间那一下你没注意到的变化。`,
-    `看清这一点之后，后面的选择会简单很多。`,
-    `记住这一句就够：把注意力放回${topic}本身。`
-  ];
+  const lang = normalizeScriptLanguage(input.scriptLanguage);
+  const topic = input.topic.trim() || (lang === 'en' ? 'this' : '这件事');
+  const insight = (input.insight || '').trim();
+  const hook = input.hook?.trim() || (lang === 'en'
+    ? `You think you understand ${topic}. You don't.`
+    : `你以为你懂${topic}，其实关键不在那儿。`);
+  const setup = insight
+    ? (lang === 'en' ? `Here is the point: ${insight}.` : `先把这件事讲清：${insight}。`)
+    : (lang === 'en' ? 'The usual story is backwards.' : '先把最常见的误会拿掉：它不是看起来那样运作的。');
+  const sentences = lang === 'en'
+    ? [
+      hook,
+      setup,
+      'The part that actually matters is the change you missed.',
+      'Once you see that, the next choice gets simple.',
+      `Keep your attention on ${topic} itself.`
+    ]
+    : [
+      hook,
+      setup,
+      `真正起作用的，是中间那一下你没注意到的变化。`,
+      `看清这一点之后，后面的选择会简单很多。`,
+      `记住这一句就够：把注意力放回${topic}本身。`
+    ];
   let fullNarration = '';
   for (const sentence of sentences) {
-    const next = fullNarration ? `${fullNarration}${sentence}` : sentence;
-    if (countNarrationChars(next) > input.maxChars && fullNarration) break;
+    const next = fullNarration ? `${fullNarration}${lang === 'en' ? ' ' : ''}${sentence}` : sentence;
+    if (countBudgetUnits(next, lang) > input.maxChars && fullNarration) break;
     fullNarration = next;
-  }
-  if (countNarrationChars(fullNarration) > input.maxChars) {
-    fullNarration = fullNarration.slice(0, input.maxChars);
   }
   const beats: ScriptBeat[] = [
     { id: 'beat-1', order: 1, function: 'hook', intent: '前 3 秒制造缺口', narration: sentences[0], targetSeconds: 3, energy: 'fast', visualIntent: '特写一张被打断的日常画面，主体正看向镜头外', needsHold: false },
@@ -990,8 +1152,8 @@ export function fallbackDraft(input: {
   let joined = '';
   const fitted = beats.map((beat, index) => {
     const piece = used[index];
-    const next = joined ? `${joined}${piece}` : piece;
-    if (countNarrationChars(next) > input.maxChars && index > 0) {
+    const next = joined ? `${joined}${lang === 'en' ? ' ' : ''}${piece}` : piece;
+    if (countBudgetUnits(next, lang) > input.maxChars && index > 0) {
       return { ...beat, narration: '' };
     }
     joined = next;

@@ -6,17 +6,25 @@ import { showStatusToast } from './statusToast';
 
 const PROJECT_KEY = 'ai_video_current_project';
 const SAVED_KEY = 'ai_video_saved_projects';
-const MAX_INLINE_IMAGE = 8000;
 
 export function clipImageForPersist(imageUrl?: string): string | undefined {
   if (!imageUrl) return undefined;
-  if (imageUrl.startsWith('data:') && imageUrl.length > MAX_INLINE_IMAGE) return undefined;
+  if (imageUrl.startsWith('data:')) return undefined;
   return imageUrl;
 }
 
-function slimThumb<T extends { thumbDataUrl?: string }>(item: T): T {
-  if (!item.thumbDataUrl || item.thumbDataUrl.length <= MAX_INLINE_IMAGE) return item;
-  return { ...item, thumbDataUrl: undefined };
+function persistableUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  if (url.startsWith('data:')) return undefined;
+  return url;
+}
+
+function slimAssetRef<T extends { thumbDataUrl?: string; imageUrl?: string }>(item: T): T {
+  return {
+    ...item,
+    imageUrl: persistableUrl(item.imageUrl),
+    thumbDataUrl: undefined
+  };
 }
 
 function slimBible(bible?: VisualBible): VisualBible | undefined {
@@ -25,11 +33,11 @@ function slimBible(bible?: VisualBible): VisualBible | undefined {
     ...bible,
     characters: (bible.characters || []).map((character) => ({
       ...character,
-      refs: (character.refs || []).map((ref) => slimThumb(ref))
+      refs: (character.refs || []).map((ref) => slimAssetRef(ref))
     })),
     locations: (bible.locations || []).map((location) => ({
       ...location,
-      refs: (location.refs || []).map((ref) => slimThumb(ref))
+      refs: (location.refs || []).map((ref) => slimAssetRef(ref))
     }))
   };
 }
@@ -45,20 +53,21 @@ export function isLibraryProject(project: VideoProject): boolean {
 
 export function projectForPersist(project: VideoProject): VideoProject {
   const track = project.audio?.narrationTrack;
-  const audioUrl = track?.audioUrl && track.audioUrl.startsWith('data:') ? undefined : track?.audioUrl;
   const slimmed: VideoProject = {
     ...project,
     clips: (project.clips || []).map((clip) => ({
       ...clip,
       imageUrl: clipImageForPersist(clip.imageUrl),
+      voiceAudioUrl: persistableUrl(clip.voiceAudioUrl),
       isGeneratingImage: false,
       imageStatus: clip.imageStatus === 'generating' || clip.imageStatus === 'queued' ? 'idle' : clip.imageStatus
     })),
     audio: {
       ...project.audio,
-      narrationTrack: track
-        ? { ...track, audioUrl: audioUrl || track.audioUrl }
-        : track
+      customBgmUrl: persistableUrl(project.audio?.customBgmUrl),
+      narrationTrack: track && persistableUrl(track.audioUrl)
+        ? { ...track, audioUrl: persistableUrl(track.audioUrl)! }
+        : (track?.audioUrl ? undefined : track)
     },
     scriptWorkspace: project.scriptWorkspace
       ? { ...project.scriptWorkspace, visualBible: slimBible(project.scriptWorkspace.visualBible) }
@@ -69,7 +78,7 @@ export function projectForPersist(project: VideoProject): VideoProject {
         ? {
             ...project.settings.activeStylePack,
             reference: project.settings.activeStylePack.reference
-              ? slimThumb(project.settings.activeStylePack.reference)
+              ? slimAssetRef(project.settings.activeStylePack.reference)
               : undefined
           }
         : project.settings.activeStylePack
@@ -169,7 +178,7 @@ export function writeCurrentProject(project: VideoProject): boolean {
     console.warn('[Project Persist] Failed to save current project:', err);
     if (!persistWarned) {
       persistWarned = true;
-      showStatusToast('浏览器存档空间不足，大图未写入本地。生成图请用服务器路径，刷新前不要关页。', {
+      showStatusToast('浏览器缓存写不下这份工程。磁盘保存仍会继续，刷新以服务器上的工程为准。', {
         tone: 'warn',
         id: 'persist',
         durationMs: 4200
@@ -365,7 +374,7 @@ export function writeSavedProjects(projects: VideoProject[]): boolean {
     return true;
   } catch (err) {
     console.warn('[Project Persist] Failed to save project list:', err);
-    showStatusToast('工程列表存档失败，大图已尽量剔除。请少存几份或先清掉本地大图。', {
+    showStatusToast('工程列表缓存失败。工程文件仍在磁盘，可从工程库打开。', {
       tone: 'warn',
       id: 'persist-library',
       durationMs: 4200

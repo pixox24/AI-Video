@@ -5,11 +5,10 @@ import {
   StyleDna,
   StyleDnaModule,
   StylePack,
-  VisualBible,
   VisualContinuity,
   VisualStyle
 } from '../types';
-import { applyBibleToChineseIntent, stripBiblePrefix } from './visualBible';
+import { stripBiblePrefix } from './visualBible';
 
 export const DEFAULT_STYLE_VISION_API: CustomStyleVisionApiConfig = {
   enabled: false,
@@ -564,14 +563,12 @@ export function hashStyleImage(dataUrl: string): string {
 
 export function localRewriteClipPrompt(
   clip: { visualPrompt?: string; chineseVisualPrompt?: string; narration?: string; characterIds?: string[]; locationId?: string; continuity?: VisualContinuity },
-  pack: StylePack,
-  visualBible?: VisualBible | null
+  pack: StylePack
 ): { visualPrompt: string; chineseVisualPrompt: string } {
   const raw = clip.chineseVisualPrompt || clip.narration || pack.label;
   const scene = stripBiblePrefix(stripStyleRenders(raw));
-  const chinese = applyBibleToChineseIntent(scene, visualBible, clip);
   return {
-    chineseVisualPrompt: chinese,
+    chineseVisualPrompt: scene,
     visualPrompt: clip.visualPrompt || ''
   };
 }

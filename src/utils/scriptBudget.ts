@@ -6,6 +6,7 @@ import {
   NarrativeStructure,
   ScriptBeat,
   ScriptGenre,
+  ScriptLanguage,
   ScriptPace,
   ScriptPlatform,
   ShotEnergy,
@@ -14,6 +15,11 @@ import {
 import { countNarrationChars } from './narrationTrack';
 import { SpeechSpan } from '../types';
 import { buildSpeechSpans, shotsFromSpeechSpans, splitCompleteSentences } from './speechSpans';
+import {
+  budgetUnitLabel,
+  normalizeScriptLanguage,
+  paceUnitsPerSecond
+} from './scriptLanguage';
 
 export interface PacePreset {
   id: ScriptPace;
@@ -137,33 +143,47 @@ export function recommendDuration(
 }
 
 export function buildDurationBudget(partial: {
+  durationMode?: 'target-driven' | 'content-driven';
   targetSeconds?: number;
   platform?: ScriptPlatform;
   pace?: ScriptPace;
+  speechRate?: number;
   usedChars?: number;
+  actualSpeechSeconds?: number;
+  actualTotalSeconds?: number;
   conceptUsed?: number;
   lockedShotCount?: number | null;
+  scriptLanguage?: ScriptLanguage;
 }): DurationBudget {
   const platform = partial.platform || 'douyin';
   const pace = partial.pace || 'medium';
   const preset = PACE_PRESETS[pace];
   const plat = PLATFORM_OPTIONS.find((item) => item.id === platform) || PLATFORM_OPTIONS[0];
+  const language = normalizeScriptLanguage(partial.scriptLanguage);
+  // TTS rate is a multiplier: faster speech carries more budget units per second.
+  const speechRate = Math.max(0.8, Math.min(1.5, Number(partial.speechRate) || 1));
+  const effectiveCps = paceUnitsPerSecond(pace, language, speechRate);
   const targetSeconds = Math.max(8, Math.min(180, Number(partial.targetSeconds) || plat.defaultSeconds));
   const holdSeconds = round1(targetSeconds * preset.holdRatio);
   const speechSeconds = round1(Math.max(0.5, targetSeconds - holdSeconds));
-  const maxChars = Math.max(8, Math.round(speechSeconds * preset.cps));
+  const maxChars = Math.max(8, Math.round(speechSeconds * effectiveCps));
   const usedChars = Math.max(0, partial.usedChars || 0);
   const conceptMax = conceptMaxForDuration(targetSeconds);
   const locked = partial.lockedShotCount;
   return {
+    durationMode: partial.durationMode || 'target-driven',
     targetSeconds,
     platform,
     pace,
-    charsPerSecond: preset.cps,
+    speechRate,
+    scriptLanguage: language,
+    charsPerSecond: effectiveCps,
     speechSeconds,
     holdSeconds,
     maxChars,
     usedChars,
+    actualSpeechSeconds: Number.isFinite(partial.actualSpeechSeconds) ? Math.max(0, Number(partial.actualSpeechSeconds)) : undefined,
+    actualTotalSeconds: Number.isFinite(partial.actualTotalSeconds) ? Math.max(0, Number(partial.actualTotalSeconds)) : undefined,
     conceptMax,
     conceptUsed: Math.max(0, partial.conceptUsed || 0),
     lockedShotCount: typeof locked === 'number' && locked > 0 ? Math.round(locked) : null
@@ -173,16 +193,23 @@ export function buildDurationBudget(partial: {
 export function budgetFromWordCount(
   chars: number,
   platform: ScriptPlatform,
-  pace: ScriptPace
+  pace: ScriptPace,
+  speechRate = 1,
+  scriptLanguage?: ScriptLanguage
 ): DurationBudget {
   const preset = PACE_PRESETS[pace];
-  const speechSeconds = Math.max(4, chars / preset.cps);
+  const language = normalizeScriptLanguage(scriptLanguage);
+  const effectiveCps = paceUnitsPerSecond(pace, language, speechRate);
+  const speechSeconds = Math.max(4, chars / effectiveCps);
   const targetSeconds = Math.max(8, Math.min(180, speechSeconds / (1 - preset.holdRatio)));
   return buildDurationBudget({
     targetSeconds: round1(targetSeconds),
     platform,
     pace,
-    usedChars: chars
+    speechRate,
+    durationMode: 'content-driven',
+    usedChars: chars,
+    scriptLanguage: language
   });
 }
 
@@ -380,11 +407,13 @@ export function predictShots(input: {
   beats?: ScriptBeat[];
   budget: DurationBudget;
   spans?: SpeechSpan[];
+  scriptLanguage?: ScriptLanguage;
 }): ForecastShot[] {
+  const language = normalizeScriptLanguage(input.scriptLanguage || input.budget.scriptLanguage);
   const spans = input.spans && input.spans.length > 0
     ? input.spans
-    : buildSpeechSpans(input.narration, input.beats);
-  return shotsFromSpeechSpans(spans, input.budget.charsPerSecond);
+    : buildSpeechSpans(input.narration, input.beats, language);
+  return shotsFromSpeechSpans(spans, input.budget.charsPerSecond, language);
 }
 
 function mergeChunksToCount<T extends { text: string }>(chunks: T[], desired: number): T[] {
@@ -474,26 +503,31 @@ export function validateForecast(input: {
   budget: DurationBudget;
   shots: ForecastShot[];
   beats?: ScriptBeat[];
+  scriptLanguage?: ScriptLanguage;
 }): DirectorNote[] {
   const { budget, shots } = input;
   const notes: DirectorNote[] = [];
   const preset = PACE_PRESETS[budget.pace];
   const used = budget.usedChars;
+  const unit = budgetUnitLabel(input.scriptLanguage);
 
   if (used > budget.maxChars) {
     const extraSeconds = round1((used - budget.maxChars) / budget.charsPerSecond);
     notes.push({
       id: 'chars-over',
-      level: used > budget.maxChars * 1.25 ? 'block' : 'warn',
+      // Existing copy is content-first. Length mismatch needs a decision, not a hard stop.
+      level: 'warn',
       target: 'chars',
-      message: `超了 ${used - budget.maxChars} 字，大约多 ${extraSeconds} 秒。要卡住 ${budget.targetSeconds} 秒请删一句论据或钩子复述。`
+      message: budget.durationMode === 'content-driven'
+        ? `这段口播预计多 ${extraSeconds} 秒，约需 ${round1(used / budget.charsPerSecond)} 秒口播；可延长视频、压缩文案，或拆成系列。`
+        : `超了 ${used - budget.maxChars} ${unit}，大约多 ${extraSeconds} 秒。要卡住 ${budget.targetSeconds} 秒请删一句论据或钩子复述。`
     });
   } else if (used > 0 && used < budget.maxChars * 0.55) {
     notes.push({
       id: 'chars-under',
       level: 'info',
       target: 'chars',
-      message: '字偏少，画面会停较久。可以补一个例子，或把节奏改慢。'
+      message: `${unit}偏少，画面会停较久。可以补一个例子，或把节奏改慢。`
     });
   }
 

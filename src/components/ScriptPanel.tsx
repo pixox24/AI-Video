@@ -30,6 +30,7 @@ import {
   ResearchNotes,
   ScriptGenre,
   ScriptIntent,
+  ScriptLanguage,
   ScriptPace,
   ScriptPlatform,
   ScriptStage,
@@ -41,7 +42,7 @@ import {
   VisualBible,
   VisualStyle
 } from '../types';
-import { countNarrationChars } from '../utils/narrationTrack';
+import { budgetUnitLabel, countBudgetUnits, languageProfile, normalizeScriptLanguage } from '../utils/scriptLanguage';
 import { applyLlmCoverage, CAMERA_ANGLE_LABEL, COVERAGE_JOB_LABEL, SHOT_SIZE_LABEL } from '../utils/shotCoverage';
 import {
   PACE_PRESETS,
@@ -51,6 +52,7 @@ import {
   applyNarrationToBeats,
   beatIntentLabel,
   buildDurationBudget,
+  budgetFromWordCount,
   estimatedShotCount,
   formatSeconds,
   GENRE_PACKS,
@@ -92,8 +94,9 @@ import {
   RESEARCH_FIELDS,
   stageCompleted,
   switchScriptIntent,
-  TITLE_MAX_CHARS,
+  switchScriptLanguage,
   titleCharCount,
+  titleMaxFor,
   waitingForTitleAngles,
   workspaceTopicTitle
 } from '../utils/scriptWorkspace';
@@ -108,14 +111,16 @@ import {
   fallbackVisualBible,
   groundVisualBible,
   isVisualBibleStale,
-  leadCharacter,
+  lockedCastOnly,
   mergeVisualBible,
   normalizeVisualBible,
   setCharacterRef,
   toggleCharacterLock,
   updateCharacterField,
+  bibleHasCast,
   visualBibleModeForGenre
 } from '../utils/visualBible';
+import { extractCastCandidates } from '../utils/castCandidates';
 import { prepareCharacterRefFile } from '../utils/characterRef';
 
 interface ScriptPanelProps {
@@ -236,11 +241,25 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   };
 
   const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId) || null;
+  const scriptLanguage = normalizeScriptLanguage(workspace.scriptLanguage);
+  const langProfile = languageProfile(scriptLanguage);
+  const unitLabel = langProfile.budgetUnitLabel;
   const chars = workspace.durationBudget.usedChars;
-  const applyReady = canApplyStoryboard(workspace);
+  const applyGate = canApplyStoryboard(workspace);
+  const applyReady = applyGate.ok;
   const topicTitle = workspaceTopicTitle(workspace, workspace.intent === 'have-title' ? '未锁题' : '未选题');
-  const titleValid = isLockedTitleValid(workspace.lockedTitle);
+  const titleValid = isLockedTitleValid(workspace.lockedTitle, scriptLanguage);
   const waitingAngles = waitingForTitleAngles(workspace);
+
+  // Keep the planning budget in sync with the audio panel's effective TTS rate.
+  useEffect(() => {
+    const currentRate = workspace.durationBudget.speechRate || 1;
+    if (Math.abs(currentRate - speechRate) < 0.001) return;
+    onChange(refreshWorkspaceDerived({
+      ...workspace,
+      durationBudget: buildDurationBudget({ ...workspace.durationBudget, speechRate, scriptLanguage })
+    }));
+  }, [speechRate, workspace.durationBudget.speechRate]);
 
   const commit = (next: ScriptWorkspace) => {
     onChange(refreshWorkspaceDerived(next));
@@ -250,7 +269,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
 
   const handleFastGate = async () => {
     if (workspace.intent === 'have-title' && !titleValid) {
-      setError('标题 2–24 个字');
+      setError(`标题 ${langProfile.titleMin}–${langProfile.titleMax} ${unitLabel}`);
       return;
     }
     if (waitingAngles) {
@@ -277,8 +296,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   };
 
   const handleLockTitle = () => {
-    if (!isLockedTitleValid(workspace.lockedTitle)) {
-      setError('标题 2–24 个字');
+    if (!isLockedTitleValid(workspace.lockedTitle, scriptLanguage)) {
+      setError(`标题 ${langProfile.titleMin}–${langProfile.titleMax} ${unitLabel}`);
       return;
     }
     const next = lockTitleFromIntent(workspace);
@@ -291,7 +310,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   const handleTitleChange = (value: string) => {
     const next = applyLockedTitleEdit(workspace, value);
     const selectedLocked = next.topicCards.find((card) => card.id === next.selectedTopicId);
-    if (selectedLocked?.hookType === 'locked-title' && isLockedTitleValid(next.lockedTitle)) {
+    if (selectedLocked?.hookType === 'locked-title' && isLockedTitleValid(next.lockedTitle, scriptLanguage)) {
       onTopicChange(next.lockedTitle.trim());
     }
     commit(next);
@@ -307,8 +326,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
 
   const handleScoutTopics = async () => {
     if (workspace.intent === 'have-title') {
-      if (!isLockedTitleValid(workspace.lockedTitle)) {
-        setError('标题 2–24 个字');
+      if (!isLockedTitleValid(workspace.lockedTitle, scriptLanguage)) {
+        setError(`标题 ${langProfile.titleMin}–${langProfile.titleMax} ${unitLabel}`);
         return;
       }
     } else if (workspace.intent === 'direction' || workspace.intent === 'product' || workspace.intent === 'reference') {
@@ -336,13 +355,14 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           researchNotes: workspace.researchNotes,
           researchBrief: workspace.researchBrief,
           genrePackId: workspace.genrePackId,
-          llmApi: customLlmApi
+          llmApi: customLlmApi,
+          scriptLanguage
         })
       });
       const data = await res.json().catch(() => ({}));
       let cards: TopicCard[] = Array.isArray(data?.cards) && data.cards.length > 0
         ? data.cards.slice(0, 3)
-        : fallbackTopicCards(seed, workspace.intent);
+        : fallbackTopicCards(seed, workspace.intent, scriptLanguage);
       if (workspace.intent === 'have-title' && cards[0] && seed) {
         cards = [{ ...cards[0], title: seed }, ...cards.slice(1)];
       }
@@ -355,7 +375,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       });
       setStatus('选出一张卡。点卡只锁题，不会写全文。');
     } catch {
-      let cards = fallbackTopicCards(seed, workspace.intent);
+      let cards = fallbackTopicCards(seed, workspace.intent, scriptLanguage);
       if (workspace.intent === 'have-title' && cards[0] && seed) {
         cards = [{ ...cards[0], title: seed }, ...cards.slice(1)];
       }
@@ -373,7 +393,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       pace: card.paceHint || rec.pace,
       targetSeconds: card.durationHint || rec.seconds,
       usedChars: chars,
-      conceptUsed: card.conceptCount
+      conceptUsed: card.conceptCount,
+      scriptLanguage
     });
     onTopicChange(card.title);
     commit({
@@ -390,7 +411,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   const handleDraft = async () => {
     let source = workspace;
     let card = selected;
-    if (workspace.intent === 'have-title' && !card && isLockedTitleValid(workspace.lockedTitle)) {
+    if (workspace.intent === 'have-title' && !card && isLockedTitleValid(workspace.lockedTitle, scriptLanguage)) {
       source = lockTitleFromIntent(workspace);
       card = source.topicCards.find((item) => item.id === source.selectedTopicId) || null;
       onTopicChange(source.lockedTitle);
@@ -403,7 +424,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     }
     setBusy('draft');
     setError(null);
-    setStatus('按字数预算写节拍和口播...');
+    setStatus(`按${unitLabel}数预算写节拍和口播...`);
     try {
       const res = await fetch('/api/script/draft', {
         method: 'POST',
@@ -418,7 +439,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           budget: source.durationBudget,
           genrePack: genrePackById(source.genrePackId || card?.genre || null),
           llmApi: customLlmApi,
-          stylePack
+          stylePack,
+          scriptLanguage
         })
       });
       const data = await res.json().catch(() => ({}));
@@ -431,10 +453,14 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   };
 
   const ensureVisualBible = async (base: ScriptWorkspace, narration: string): Promise<ScriptWorkspace> => {
-    if (countNarrationChars(narration) < 8) return base;
+    if (countBudgetUnits(narration, scriptLanguage) < 8) return base;
     const baseSelected = base.topicCards.find((card) => card.id === base.selectedTopicId);
     const genre = base.genrePackId || baseSelected?.genre || selected?.genre || null;
     const bibleTitle = baseSelected?.title || selected?.title || topicTitle;
+    const intentNotes = (base.intentNotes || '').trim();
+    const candidates = extractCastCandidates({ narration, title: bibleTitle, intentNotes });
+    const groundOpts = { title: bibleTitle, intentNotes, candidates };
+    const previousBible = lockedCastOnly(base.visualBible);
     try {
       const res = await fetch('/api/script/visual-bible', {
         method: 'POST',
@@ -445,19 +471,21 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           title: bibleTitle,
           stylePack,
           llmApi: customLlmApi,
-          previousBible: base.visualBible
+          previousBible,
+          intentNotes,
+          candidates
         })
       });
       const data = await res.json().catch(() => ({}));
       const incoming = normalizeVisualBible(data?.bible, visualBibleModeForGenre(genre));
       const bible = incoming
-        ? groundVisualBible(mergeVisualBible(base.visualBible, incoming), narration)
-        : groundVisualBible(mergeVisualBible(base.visualBible, fallbackVisualBible({ narration, genre, title: bibleTitle })), narration);
+        ? groundVisualBible(mergeVisualBible(previousBible, incoming), narration, groundOpts)
+        : groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, groundOpts);
       return { ...base, visualBible: bible };
     } catch {
       return {
         ...base,
-        visualBible: groundVisualBible(mergeVisualBible(base.visualBible, fallbackVisualBible({ narration, genre, title: bibleTitle })), narration)
+        visualBible: groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, groundOpts)
       };
     }
   };
@@ -471,7 +499,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           narration,
           llmApi: customLlmApi,
           visualBible: base.visualBible,
-          genre: base.genrePackId || selected?.genre || null
+          genre: base.genrePackId || selected?.genre || null,
+          scriptLanguage: normalizeScriptLanguage(base.scriptLanguage)
         })
       });
       const data = await res.json().catch(() => ({}));
@@ -509,7 +538,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       if (Array.isArray(data?.shots) && data.shots.length === shots.length) {
-        return { ...base, forecastShots: applyLlmCoverage(shots, data.shots) };
+        return { ...base, forecastShots: applyLlmCoverage(shots, data.shots, base.visualBible) };
       }
     } catch {
       // keep rule coverage from rebuildForecast
@@ -526,8 +555,10 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     const fallback = fallbackDraft({
       topic,
       hook: card?.hook,
+      insight: card?.insight || source.intentNotes,
       genre: card?.genre,
-      maxChars: source.durationBudget.maxChars
+      maxChars: source.durationBudget.maxChars,
+      scriptLanguage: normalizeScriptLanguage(source.scriptLanguage)
     });
     const beats = Array.isArray(data?.beats) && data.beats.length >= 2 ? data.beats : fallback.beats;
     const fullNarration = typeof data?.fullNarration === 'string' && data.fullNarration.trim()
@@ -560,16 +591,19 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       onTopicChange(data.title.trim());
     }
     onChange(next);
+    const overBudget = countBudgetUnits(fullNarration, source.scriptLanguage) > source.durationBudget.maxChars;
     setStatus(
-      withBible.visualBible?.mode === 'story'
-        ? '已编画面圣经。同一角色会贯穿各镜，对照句仍同一口气两张图。'
-        : '口播按整句切开。对照句会同一口气、两张画面。'
+      overBudget
+        ? '文案已保留，但预计口播超出当前目标时长；可延长视频或压缩文案。'
+        : bibleHasCast(withBible.visualBible)
+          ? '已编画面圣经。有证据的角色会在叙事镜上镜，insert 默认无人。'
+          : '口播按整句切开。未识别到可指认主体，按图解推进。'
     );
   };
 
   const handleDiagnose = async () => {
     const pasted = narrationForDiagnose(workspace);
-    if (countNarrationChars(pasted) < 8) {
+    if (countBudgetUnits(pasted, scriptLanguage) < 8) {
       setError('先把已有口播粘贴进来');
       return;
     }
@@ -591,9 +625,9 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       const next = await refineCoverage(spanned);
       onChange(next);
       setStatus(
-        withBible.visualBible?.mode === 'story'
-          ? '已按整句切口播，并编了画面圣经。'
-          : '已按整句切口播；一句里若有对照，会切两张图。'
+        bibleHasCast(withBible.visualBible)
+          ? '已按整句切口播，并按文案证据编了角色卡。'
+          : '已按整句切口播；未识别到可指认主体，按图解推进。'
       );
     } finally {
       setBusy(null);
@@ -608,7 +642,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
 
   const handleRebuildBible = async () => {
     const narration = workspace.fullNarration.trim();
-    if (countNarrationChars(narration) < 8) {
+    if (countBudgetUnits(narration, scriptLanguage) < 8) {
       setError('先写出口播，再编画面圣经');
       return;
     }
@@ -621,7 +655,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       }, narration);
       const covered = await refineCoverage(rebuildForecast(next));
       onChange(covered);
-      setStatus(next.visualBible?.mode === 'story' ? '画面圣经已更新，角色会贯穿各镜' : '画面约束已更新');
+      setStatus(bibleHasCast(next.visualBible) ? '画面圣经已按新口播重编。未上锁角色和参考图已清掉。' : '画面约束已更新。文案没有可指认主体，未建角色卡。');
     } finally {
       setBusy(null);
     }
@@ -641,15 +675,15 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         sentenceGap,
         outroHold
       );
-      // 双语字幕：写入分镜时顺手把缺失/过期的英文行按当前旁白补齐
-      const translated = await translateClipsSecondary(clips, customLlmApi);
+      // 双语字幕：写入分镜时顺手把缺失/过期的翻译行按当前旁白补齐
+      const translated = await translateClipsSecondary(clips, customLlmApi, scriptLanguage);
       const finalClips = translated.clips;
       commit(stampAppliedWorkspace(workspace, workspace.forecastShots, stylePack, finalClips.length));
       onNeedFullNarration?.(finalClips);
       if (translated.error) {
-        setStatus(`已写入 ${finalClips.length} 镜。英文双语行没生成全（${translated.error}），可在字幕面板补齐。`);
+        setStatus(`已写入 ${finalClips.length} 镜。翻译行没生成全（${translated.error}），可在字幕面板补齐。`);
       } else if (translated.translated > 0) {
-        setStatus(`已写入 ${finalClips.length} 镜，并生成英文双语行（${translated.translated} 镜）。对照句同一口气配两图。`);
+        setStatus(`已写入 ${finalClips.length} 镜，并生成翻译行（${translated.translated} 镜）。对照句同一口气配两图。`);
       } else {
         setStatus(`已写入 ${finalClips.length} 镜。机位已按全片设计，对照句同一口气配两图。`);
       }
@@ -709,7 +743,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           intentNotes: workspace.intentNotes,
           referenceUrl: workspace.referenceUrl,
           platform: workspace.durationBudget.platform,
-          llmApi: customLlmApi
+          llmApi: customLlmApi,
+          scriptLanguage
         })
       });
       const data = await res.json().catch(() => ({}));
@@ -835,7 +870,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           ...mixed.durationBudget,
           pace: card.paceHint || rec.pace,
           targetSeconds: card.durationHint || rec.seconds,
-          conceptUsed: card.conceptCount
+          conceptUsed: card.conceptCount,
+          scriptLanguage
         }),
         stage: 'duration'
       }));
@@ -940,6 +976,28 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           <span className="hidden md:inline-flex text-[11px] px-2.5 py-1 rounded-full border bg-zinc-800 text-zinc-400 border-zinc-700 max-w-[220px] truncate">
             {topicTitle}
           </span>
+          <div className="inline-flex rounded-lg border border-[#2b2b36] overflow-hidden text-[11px]">
+            {(['zh', 'en'] as ScriptLanguage[]).map((lang) => (
+              <button
+                key={lang}
+                id={`btn-script-lang-${lang}`}
+                type="button"
+                onClick={() => {
+                  if (lang === scriptLanguage) return;
+                  const dirty = Boolean(workspace.fullNarration.trim() || workspace.topicCards.length || workspace.beats.length);
+                  if (dirty && !window.confirm('切换口播语言会清空当前选题、口播和翻译，确定？')) return;
+                  commit(switchScriptLanguage(workspace, lang));
+                  setStatus(lang === 'en' ? '口播语言已切到英文。双语字幕副行将是中文。' : '口播语言已切到中文。双语字幕副行将是英文。');
+                  setError(null);
+                }}
+                className={`px-2.5 py-1.5 cursor-pointer ${
+                  scriptLanguage === lang ? 'bg-amber-500 text-black' : 'text-zinc-300 hover:bg-[#1c1c24]'
+                }`}
+              >
+                {lang === 'zh' ? '中文口播' : 'English'}
+              </button>
+            ))}
+          </div>
           <button
             id="btn-script-fast-gate"
             type="button"
@@ -1007,8 +1065,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
               onNotes={(intentNotes) => commit({ ...workspace, intentNotes })}
               onLockedTitle={handleTitleChange}
               onReferenceUrl={(referenceUrl) => commit({ ...workspace, referenceUrl })}
-              onPlatform={(platform) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, platform }) })}
-              onPace={(pace) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, pace }) })}
+              onPlatform={(platform) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, platform, scriptLanguage }) })}
+              onPace={(pace) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, pace, scriptLanguage }) })}
               onGenrePack={handleGenrePack}
               onScout={handleScoutTopics}
               onDiagnose={handleDiagnose}
@@ -1077,6 +1135,18 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
               }}
               onDraft={handleDraft}
               onDiagnose={handleDiagnose}
+              onAdoptDuration={() => {
+                const budget = workspace.durationBudget;
+                const nextBudget = budgetFromWordCount(
+                  Math.max(8, budget.usedChars),
+                  budget.platform,
+                  budget.pace,
+                  budget.speechRate,
+                  scriptLanguage
+                );
+                onChange(rebuildForecast({ ...workspace, durationBudget: nextBudget }));
+                setStatus(`已把目标时长调整为约 ${nextBudget.targetSeconds}s，保留现有文案。`);
+              }}
               busy={Boolean(busy)}
               onHoldChange={handleHoldChange}
               onFillHook={handleFillHook}
@@ -1130,6 +1200,12 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
                 ? '已是当前稿'
                 : '写入分镜'}
         </button>
+        {!applyReady && applyGate.reason && (
+          <span className="text-[11px] text-rose-300 max-w-md leading-snug">{applyGate.reason}</span>
+        )}
+        {applyReady && applyMode.mode === 'current' && (
+          <span className="text-[11px] text-zinc-500">结构和风格都已是当前稿。改口播后若按钮仍灰，点「按预算写稿」或在口播框再改一个字触发重算。</span>
+        )}
         {applyMode.mode === 'style-only' && (
           <button
             type="button"
@@ -1225,9 +1301,11 @@ function IntentStage({
   onAdoptScript: () => void;
 }) {
   const intent = workspace.intent;
-  const titleCount = titleCharCount(workspace.lockedTitle);
-  const titleValid = isLockedTitleValid(workspace.lockedTitle);
-  const titleLooksLikeScript = looksLikeScript(workspace.lockedTitle);
+  const lang = normalizeScriptLanguage(workspace.scriptLanguage);
+  const titleLimit = titleMaxFor(lang);
+  const titleCount = titleCharCount(workspace.lockedTitle, lang);
+  const titleValid = isLockedTitleValid(workspace.lockedTitle, lang);
+  const titleLooksLikeScript = looksLikeScript(workspace.lockedTitle, lang);
   const placeholder = intent === 'product'
     ? '产品是什么，卖给谁，最想强调哪一句'
     : intent === 'reference'
@@ -1299,8 +1377,8 @@ function IntentStage({
         <div className="space-y-3 rounded-2xl border border-[#2b2b36] bg-[#18181f] p-4">
           <div className="flex items-center justify-between gap-2">
             <label htmlFor="input-locked-title" className="text-[12px] text-zinc-400">标题</label>
-            <span className={`text-[11px] tabular-nums ${titleCount > TITLE_MAX_CHARS ? 'text-rose-300' : 'text-zinc-500'}`}>
-              {titleCount}/{TITLE_MAX_CHARS}
+            <span className={`text-[11px] tabular-nums ${titleCount > titleLimit ? 'text-rose-300' : 'text-zinc-500'}`}>
+              {titleCount}/{titleLimit}
             </span>
           </div>
           <input
@@ -1310,7 +1388,7 @@ function IntentStage({
             autoFocus={focusTitle}
             placeholder="就拍这句。例如：咖啡因不是让你清醒，是推迟你睡觉"
             className={`w-full bg-[#121217] border rounded-xl px-3 py-2.5 text-[13px] text-zinc-200 placeholder-zinc-600 focus:outline-none select-text ${
-              titleCount > TITLE_MAX_CHARS ? 'border-rose-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
+              titleCount > titleLimit ? 'border-rose-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
             }`}
           />
           <label htmlFor="input-title-insight" className="text-[12px] text-zinc-400">这一条要讲清什么（可空）</label>
@@ -1437,7 +1515,7 @@ function TopicStage({
         <div className="rounded-2xl border border-dashed border-[#2b2b36] p-8 text-center space-y-3">
           <p className="text-sm text-zinc-400">还没有选题卡。</p>
           {workspace.intent === 'have-title' ? (
-            <PrimaryButton id="btn-lock-title" busy={busy} disabled={!isLockedTitleValid(workspace.lockedTitle)} onClick={onLockTitle}>
+            <PrimaryButton id="btn-lock-title" busy={busy} disabled={!isLockedTitleValid(workspace.lockedTitle, workspace.scriptLanguage)} onClick={onLockTitle}>
               就按这句写
             </PrimaryButton>
           ) : (
@@ -1692,8 +1770,10 @@ function DurationStage({
       : null;
   const estimate = estimatedShotCount(budget);
   const lockHint = lockedShotImplication(budget);
+  const lang = normalizeScriptLanguage(workspace.scriptLanguage);
+  const unit = budgetUnitLabel(lang);
   const canDraft = hasUsableDraftTopic(workspace);
-  const draftHint = workspace.intent === 'have-title' && !isLockedTitleValid(workspace.lockedTitle) && !selected
+  const draftHint = workspace.intent === 'have-title' && !isLockedTitleValid(workspace.lockedTitle, lang) && !selected
     ? '先回意图页写标题'
     : undefined;
 
@@ -1701,7 +1781,7 @@ function DurationStage({
     <div className="space-y-5 max-w-4xl">
       <SectionIntro
         title="把时长当成预算"
-        desc={rec ? rec.reason : '改平台、节奏、秒数，字数和停留会立刻重算。体裁包会带上节拍骨架。'}
+        desc={rec ? rec.reason : `改平台、节奏、秒数，${unit}数和停留会立刻重算。体裁包会带上节拍骨架。`}
       />
       <div className="flex flex-wrap gap-2">
         {GENRE_PACKS.map((pack) => (
@@ -1728,7 +1808,7 @@ function DurationStage({
       <div className="flex flex-wrap gap-2">
         {(Object.values(PACE_PRESETS) as typeof PACE_PRESETS[ScriptPace][]).map((item) => (
           <Chip key={item.id} active={budget.pace === item.id} onClick={() => onBudget(buildDurationBudget({ ...budget, pace: item.id }))}>
-            {item.label} {item.cps}字/秒
+            {item.label} {languageProfile(lang).paceUnitsPerSecond[item.id]}{unit}/秒
           </Chip>
         ))}
       </div>
@@ -1786,14 +1866,20 @@ function DurationStage({
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <BudgetRing label="口播字数" used={budget.usedChars} max={budget.maxChars} unit="字" />
+        <BudgetRing label={`口播${unit}数`} used={budget.usedChars} max={budget.maxChars} unit={unit} />
         <BudgetRing label="停留配额" used={Number((workspace.forecastShots.reduce((sum, shot) => sum + shot.holdDuration, 0)).toFixed(1))} max={budget.holdSeconds} unit="s" />
         <BudgetRing label="概念" used={budget.conceptUsed || (selected ? selected.conceptCount : 0)} max={budget.conceptMax} unit="个" />
       </div>
 
-      <div className="text-[12px] text-zinc-400 flex items-center gap-2">
+      <div className="text-[12px] text-zinc-400 flex flex-wrap items-center gap-2 leading-relaxed">
         <Clock className="w-3.5 h-3.5 text-amber-400" />
         口播 {formatSeconds(budget.speechSeconds)} · 停留 {formatSeconds(budget.holdSeconds)} · {estimate.min}–{estimate.max} 镜
+        {budget.actualSpeechSeconds != null && (
+          <span className="text-emerald-300">· 实测口播 {formatSeconds(budget.actualSpeechSeconds)}</span>
+        )}
+        {budget.actualTotalSeconds != null && (
+          <span className="text-emerald-300">· 成片 {formatSeconds(budget.actualTotalSeconds)}</span>
+        )}
       </div>
 
       <div className="space-y-1.5">
@@ -1879,6 +1965,7 @@ function CopyStage({
   onChange,
   onDraft,
   onDiagnose,
+  onAdoptDuration,
   busy,
   onHoldChange,
   onFillHook,
@@ -1888,17 +1975,21 @@ function CopyStage({
   onChange: (value: string) => void;
   onDraft: () => void;
   onDiagnose: () => void;
+  onAdoptDuration: () => void;
   busy: boolean;
   onHoldChange: (shotId: string, holdDuration: number) => void;
   onFillHook: (key: keyof ResearchNotes) => void;
   onEditTitle?: () => void;
 }) {
   const budget = workspace.durationBudget;
+  const unit = budgetUnitLabel(workspace.scriptLanguage);
   const over = budget.usedChars > budget.maxChars;
   const lockedTitle = workspaceTopicTitle(workspace);
   return (
     <div className="space-y-4 max-w-4xl">
-      <SectionIntro title="整段口播" desc="一条连续旁白。字数对着预算变色。切镜按画面动机，不按每句等长。节奏带右缘只能加停留。" />
+      <SectionIntro title="整段口播" desc={workspace.durationBudget.durationMode === 'content-driven'
+        ? '已有文案优先保留。这里显示预计口播时长与目标的差异，可延长、压缩或拆成系列。'
+        : `一条连续旁白。按目标时长控制${unit}数，切镜按画面动机，不按每句等长。`} />
       {workspace.intent === 'have-title' && lockedTitle && (
         <div className="flex items-center gap-2 rounded-xl border border-[#2b2b36] bg-[#18181f] px-3 py-2">
           <Lock className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
@@ -1911,12 +2002,17 @@ function CopyStage({
         </div>
       )}
       <HookDropZone onFillHook={onFillHook} />
-      <div className="flex items-center justify-between text-[12px]">
-        <span className={over ? 'text-rose-300' : 'text-zinc-400'}>
-          {budget.usedChars} / {budget.maxChars} 字
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+        <span className={over ? 'text-amber-300' : 'text-zinc-400'}>
+          {budget.usedChars} / {budget.maxChars} {unit} · 预计口播 {formatSeconds(budget.usedChars / Math.max(0.1, budget.charsPerSecond))}
         </span>
         {workspace.intent === 'have-script' ? (
-          <button type="button" onClick={onDiagnose} className="text-amber-400 text-[12px] cursor-pointer">重新诊断</button>
+          <div className="flex items-center gap-3">
+            {over && workspace.durationBudget.durationMode === 'content-driven' && (
+              <button type="button" onClick={onAdoptDuration} className="text-amber-300 text-[12px] cursor-pointer">延长到预计时长</button>
+            )}
+            <button type="button" onClick={onDiagnose} className="text-amber-400 text-[12px] cursor-pointer">重新诊断</button>
+          </div>
         ) : (
           <button type="button" onClick={onDraft} disabled={busy} className="text-amber-400 text-[12px] cursor-pointer disabled:opacity-50">按预算重写</button>
         )}
@@ -1928,7 +2024,7 @@ function CopyStage({
         rows={14}
         placeholder="口播写在这里。刷新后还在。"
         className={`w-full bg-[#18181f] border rounded-2xl p-4 text-[14px] leading-relaxed text-zinc-100 placeholder-zinc-600 focus:outline-none resize-none select-text ${
-          over ? 'border-rose-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
+          over ? 'border-amber-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
         }`}
       />
       <RhythmTape shots={workspace.forecastShots} onHoldChange={onHoldChange} />
@@ -1969,9 +2065,11 @@ function RhythmStage({
                   {shot.visualCount && shot.visualCount > 1 ? ` · 同一句图 ${(shot.visualIndex || 0) + 1}/${shot.visualCount}` : ''}
                   {shot.holdPinned ? ' · 停留已钉' : ''}
                   {continuityShortLabel(shot.continuity) ? ` · ${continuityShortLabel(shot.continuity)}` : ''}
-                  {leadCharacter(workspace.visualBible) && shot.characterIds?.includes(leadCharacter(workspace.visualBible)!.id)
-                    ? ` · ${leadCharacter(workspace.visualBible)!.name}`
-                    : ''}
+                  {shot.characterIds?.length
+                    ? ` · ${workspace.visualBible?.characters.find((item) => shot.characterIds!.includes(item.id))?.name || '角色'}`
+                    : shot.coverageJob === 'insert'
+                      ? ' · 无人'
+                      : ''}
                 </div>
                 <div className="mt-0.5 text-[10px] text-zinc-600 truncate">{shot.splitReason}</div>
               </div>
@@ -2196,7 +2294,10 @@ function DirectorRail({
   const patchBible = (next: VisualBible) => {
     if (!onChange) return;
     const grounded = workspace.fullNarration.trim()
-      ? groundVisualBible(next, workspace.fullNarration)
+      ? groundVisualBible(next, workspace.fullNarration, {
+        title: workspace.lockedTitle || workspace.draftedTitle,
+        intentNotes: workspace.intentNotes
+      })
       : next;
     onChange(rebuildForecast({ ...workspace, visualBible: grounded }));
   };
@@ -2217,7 +2318,7 @@ function DirectorRail({
     <div className={`p-4 space-y-3 ${compact ? '' : 'overflow-y-auto custom-scrollbar h-full'}`}>
       <div className="text-[12px] font-medium text-zinc-200">导演批注</div>
       <div className={`grid gap-2 ${compact ? 'grid-cols-3' : 'grid-cols-1'}`}>
-        <MiniStat label="字数" value={`${budget.usedChars}/${budget.maxChars}`} warn={budget.usedChars > budget.maxChars} />
+        <MiniStat label={`${budgetUnitLabel(workspace.scriptLanguage)}数`} value={`${budget.usedChars}/${budget.maxChars}`} warn={budget.usedChars > budget.maxChars} />
         <MiniStat
           label="时长"
           value={`${budget.targetSeconds}s`}
@@ -2226,7 +2327,7 @@ function DirectorRail({
         <MiniStat label="预测" value={forecastSummary(workspace).split('·')[0]} />
       </div>
       {notes.length === 0 ? (
-        <p className="text-[11px] text-zinc-500 leading-relaxed">还没有需要改的地方。字数超了、钩子太长、节奏太平，会出现在这里。</p>
+        <p className="text-[11px] text-zinc-500 leading-relaxed">还没有需要改的地方。{budgetUnitLabel(workspace.scriptLanguage)}数超了、钩子太长、节奏太平，会出现在这里。</p>
       ) : (
         <div className="space-y-2">
           {notes.map((note) => (
@@ -2257,10 +2358,10 @@ function DirectorRail({
             <Users className="w-3.5 h-3.5 text-amber-400" />
             画面圣经
           </div>
-          {bible?.mode === 'story' ? (
-            <span className="text-[9px] px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-300">叙事</span>
+          {bibleHasCast(bible) ? (
+            <span className="text-[9px] px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-300">有班底</span>
           ) : bible ? (
-            <span className="text-[9px] px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500">说明</span>
+            <span className="text-[9px] px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-500">纯图解</span>
           ) : null}
         </div>
         {compact && (
@@ -2269,7 +2370,7 @@ function DirectorRail({
             onClick={() => setCompactOpen((open) => !open)}
             className="w-full text-left text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
           >
-            {bibleSummary(bible)}{stale ? ' · 口播已改' : ''}{bible?.mode === 'story' ? ' · 点开钉参考图' : ''}
+            {bibleSummary(bible)}{stale ? ' · 口播已改' : ''}{bibleHasCast(bible) ? ' · 点开钉参考图' : ''}
           </button>
         )}
         {showCards && (
@@ -2286,13 +2387,13 @@ function DirectorRail({
               <button
                 type="button"
                 onClick={onRebuildBible}
-                disabled={bibleBusy || countNarrationChars(workspace.fullNarration) < 8}
+                disabled={bibleBusy || countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage) < 8}
                 className="text-[11px] text-amber-400 hover:text-amber-300 cursor-pointer disabled:opacity-40"
               >
                 {bibleBusy ? '正在编圣经…' : bible ? '按口播重编' : '编画面圣经'}
               </button>
             )}
-            {bible?.mode === 'story' && bible.characters.map((character) => (
+            {bibleHasCast(bible) && bible.characters.map((character) => (
               <div key={character.id} className="rounded-xl border border-[#2b2b36] bg-[#18181f] p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <input
@@ -2302,7 +2403,7 @@ function DirectorRail({
                   />
                   <button
                     type="button"
-                    title={character.locked ? '已钉住，重编时保留' : '钉住这张角色卡'}
+                    title={character.locked ? '已上锁：写稿/重编时保留这张卡和参考图' : '未上锁：写稿/重编会按新口播重建并清掉参考图'}
                     onClick={() => patchBible(toggleCharacterLock(bible, character.id))}
                     className={`p-1 rounded cursor-pointer ${character.locked ? 'text-amber-300' : 'text-zinc-500 hover:text-zinc-300'}`}
                   >
@@ -2353,7 +2454,7 @@ function DirectorRail({
                 {bible.validation.warnings.map((warning) => <div key={warning}>角色校验：{warning}</div>)}
               </div>
             ) : null}
-            {bible?.mode === 'expository' && bible.paletteLock && (
+            {!bibleHasCast(bible) && bible?.paletteLock && (
               <p className="text-[11px] text-zinc-400 leading-relaxed">{bible.paletteLock}</p>
             )}
           </>

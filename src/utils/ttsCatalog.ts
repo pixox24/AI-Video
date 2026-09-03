@@ -54,14 +54,25 @@ export const QWEN_AUDIO_FLASH_VOICES: TtsVoiceOption[] = [
   { id: 'loongjohn', name: 'loongJohn', desc: '沉稳亲切美音男声，适合英文旁白', badge: '美音' }
 ];
 
+// 百炼音色库会持续扩充；这里仅提供常见 CosyVoice 音色的友好名称，未知 ID 仍可手动透传。
+export const COSYVOICE_VOICES: TtsVoiceOption[] = [
+  { id: 'longyingtian', name: '龙应甜', desc: '温柔甜美女声', badge: 'CosyVoice' },
+  { id: 'longgaoseng', name: '龙高僧', desc: '得道高僧音', badge: 'CosyVoice' },
+  { id: 'loongtomoka', name: 'loongtomoka', desc: '日语女声', badge: 'CosyVoice' },
+  { id: 'longanli_v3', name: '龙安莉', desc: '利落从容女声', badge: 'CosyVoice' },
+  { id: 'longsanshu_v3', name: '龙三叔', desc: '沉稳质感男声', badge: 'CosyVoice' }
+];
+
 const EDGE_PERSONA_IDS = new Set(EDGE_TTS_VOICES.map((item) => item.id));
 const QWEN3_VOICE_IDS = new Set(QWEN3_TTS_VOICES.map((item) => item.id));
 const PLUS_VOICE_IDS = new Set(QWEN_AUDIO_PLUS_VOICES.map((item) => item.id));
 const FLASH_VOICE_IDS = new Set(QWEN_AUDIO_FLASH_VOICES.map((item) => item.id));
+const COSYVOICE_IDS = new Set(COSYVOICE_VOICES.map((item) => item.id));
 const ALL_BAILIAN_VOICE_IDS = new Set([
   ...QWEN3_VOICE_IDS,
   ...PLUS_VOICE_IDS,
-  ...FLASH_VOICE_IDS
+  ...FLASH_VOICE_IDS,
+  ...COSYVOICE_IDS
 ]);
 
 const MALE_VOICE_IDS = new Set([
@@ -112,7 +123,11 @@ const TO_EDGE: Record<string, string> = {
 
 export function isQwenAudioTtsModel(model?: string | null): boolean {
   const id = (model || '').trim().toLowerCase();
-  return id.startsWith('qwen-audio-') || id.startsWith('cosyvoice-');
+  return id.startsWith('qwen-audio-');
+}
+
+export function isCosyVoiceModel(model?: string | null): boolean {
+  return (model || '').trim().toLowerCase().startsWith('cosyvoice-');
 }
 
 export function isQwenAudioPlusModel(model?: string | null): boolean {
@@ -140,7 +155,8 @@ function isSpeechSynthesizerEndpoint(url: string): boolean {
 }
 
 export function defaultEndpointForTtsModel(model?: string | null): string {
-  return isQwenAudioTtsModel(model) ? QWEN_AUDIO_TTS_HTTP_ENDPOINT : QWEN3_TTS_HTTP_ENDPOINT;
+  if (isQwenAudioTtsModel(model)) return QWEN_AUDIO_TTS_HTTP_ENDPOINT;
+  return QWEN3_TTS_HTTP_ENDPOINT;
 }
 
 export function resolveBailianTtsEndpoint(endpoint: string | undefined, model?: string | null): string {
@@ -149,18 +165,27 @@ export function resolveBailianTtsEndpoint(endpoint: string | undefined, model?: 
     if (!trimmed || isGenerationEndpoint(trimmed)) return QWEN_AUDIO_TTS_HTTP_ENDPOINT;
     return trimmed;
   }
+  if (isCosyVoiceModel(model)) {
+    // CosyVoice uses the SpeechSynthesizer API and is incompatible with Audio 3.0's endpoint.
+    if (!trimmed || /\/audio\/tts\/?$/i.test(trimmed) || isGenerationEndpoint(trimmed)) {
+      return QWEN_AUDIO_TTS_HTTP_ENDPOINT;
+    }
+    return trimmed;
+  }
   if (!trimmed || isSpeechSynthesizerEndpoint(trimmed)) return QWEN3_TTS_HTTP_ENDPOINT;
   return trimmed;
 }
 
 export function defaultVoiceForModel(model?: string | null): string {
   if (isQwenAudioPlusModel(model)) return 'longanlingxin';
+  if (isCosyVoiceModel(model)) return 'longyingtian';
   if (isQwenAudioFlashModel(model) || isQwenAudioTtsModel(model)) return 'longanfengyue';
   return 'Cherry';
 }
 
 export function voicesForTtsModel(model?: string | null): TtsVoiceOption[] {
   if (isQwenAudioPlusModel(model)) return QWEN_AUDIO_PLUS_VOICES;
+  if (isCosyVoiceModel(model)) return COSYVOICE_VOICES;
   if (isQwenAudioFlashModel(model) || isQwenAudioTtsModel(model)) return QWEN_AUDIO_FLASH_VOICES;
   return QWEN3_TTS_VOICES;
 }
@@ -196,6 +221,7 @@ export function inferTargetModelFromVoiceId(id?: string | null): string {
   const value = (id || '').trim();
   if (/^qwen-audio-3\.0-tts-plus-/i.test(value)) return 'qwen-audio-3.0-tts-plus';
   if (/^qwen-audio-3\.0-tts-flash-/i.test(value)) return 'qwen-audio-3.0-tts-flash';
+  if (COSYVOICE_IDS.has(value)) return 'cosyvoice-v2';
   return '';
 }
 
@@ -205,7 +231,7 @@ export function sanitizePastedVoiceId(raw: string): string {
   if (full) return full[0];
   const system = text.match(/\b(longan[a-z0-9_]+|loong[a-z0-9_]+)\b/i);
   if (system) return system[1];
-  return text.replace(/^voice\s*[=:：]\s*/i, '').trim();
+  return text.replace(/^voice(?:[_\s-]*id)?\s*[=:：]\s*/i, '').trim();
 }
 
 export function isMissingEnrollmentError(error?: string | null): boolean {
@@ -222,9 +248,11 @@ export function libraryVoiceCandidates(voiceId: string, model?: string | null): 
   };
   const match = id.match(/^qwen-audio-3\.0-tts-(plus|flash)-(.+)$/i);
   const suffix = match?.[2] || (/^[A-Za-z0-9_]+$/.test(id) ? id : '');
+  // 先验证用户粘贴的原始 ID；只有跨 Plus/Flash 的完整 ID 才尝试模型前缀变体。
+  // 这样不会因为一个猜测的候选先成功而掩盖真实 ID 未生效的问题。
+  push(id);
   if (isQwenAudioPlusModel(model) && suffix) push(`qwen-audio-3.0-tts-plus-${suffix}`);
   if (isQwenAudioFlashModel(model) && suffix) push(`qwen-audio-3.0-tts-flash-${suffix}`);
-  push(id);
   return ids;
 }
 
@@ -358,6 +386,16 @@ export function isBailianVoiceId(id: string | null | undefined): boolean {
   return !!id && ALL_BAILIAN_VOICE_IDS.has(id);
 }
 
+/**
+ * 百炼音色库会持续增加官方音色，项目静态目录不可能实时覆盖全部 ID。
+ * 只要输入符合 voice_id 的 ASCII 形态，就应让百炼校验它，而不是猜测替换成默认音色。
+ */
+export function looksLikeBailianVoiceId(id: string | null | undefined): boolean {
+  const value = (id || '').trim();
+  if (!value || value.length > 128 || /\s/.test(value)) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value);
+}
+
 function isForeignSystemVoice(id: string, model?: string | null): boolean {
   if (!id) return false;
   const catalogIds = new Set(voicesForTtsModel(model).map((item) => item.id));
@@ -376,10 +414,20 @@ export function resolveTtsVoiceId(voiceId: string | null | undefined, api?: Cust
     if (trimmed) {
       if (customVoiceBelongsToModel(trimmed, resolved.model)) return trimmed;
       if (isEnrollmentVoiceId(trimmed) || isDesignedVoiceId(trimmed)) return defaultVoiceForModel(resolved.model);
-      const mapped = mapVoiceToModel(trimmed, resolved.model);
-      if (catalog.some((item) => item.id === mapped)) return mapped;
       const remappedBase = remapAudio30BaseVoice(trimmed, resolved.model);
       if (remappedBase) return remappedBase;
+      // 官方音色库 ID 会不断新增，目录外的合法 ID 必须原样交给百炼校验。
+      // 已知 Edge 人设仍走兼容映射，避免切换引擎时破坏旧项目。
+      if (isQwenAudioTtsModel(resolved.model) || isCosyVoiceModel(resolved.model)) {
+        // Cherry/Edge IDs are legacy aliases and keep their compatibility mapping.
+        // Any other syntactically valid manual ID is owned by the provider, including
+        // official CosyVoice IDs that are not present in this app's static catalog.
+        if (looksLikeBailianVoiceId(trimmed) && !isEdgePersonaId(trimmed) && !QWEN3_VOICE_IDS.has(trimmed)) {
+          return trimmed;
+        }
+      }
+      const mapped = mapVoiceToModel(trimmed, resolved.model);
+      if (catalog.some((item) => item.id === mapped)) return mapped;
       if (!isForeignSystemVoice(trimmed, resolved.model)) return trimmed;
     }
     return defaultVoiceForModel(resolved.model);

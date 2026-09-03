@@ -10,6 +10,7 @@ import {
   VisualBible,
   VisualBibleMode
 } from '../types';
+import { applyOccupancyAfterCoverage } from './visualBible';
 
 const SIZES: ShotSize[] = ['ecu', 'cu', 'ms', 'ws', 'insert'];
 const ANGLES: CameraAngle[] = ['eye', 'low', 'high'];
@@ -103,6 +104,10 @@ export function assignRuleCoverage(
       shotSize = differentSize(prev?.shotSize, mode === 'story' ? 'ms' : 'insert');
       coverageJob = mode === 'story' ? 'establish' : 'insert';
       coverageLink = 'same-axis';
+    } else if (/["“'][^"”']{2,120}["”']/.test(shot.sliceText || shot.narration || '')) {
+      shotSize = differentSize(prev?.shotSize, 'cu');
+      coverageJob = 'evidence';
+      shotComposition = 'thirds';
     } else if (shot.function === 'proof' || shot.function === 'reveal') {
       shotSize = differentSize(prev?.shotSize, index % 2 === 0 ? 'insert' : 'cu');
       coverageJob = shotSize === 'insert' ? 'insert' : 'evidence';
@@ -161,29 +166,32 @@ export function applyLlmCoverage(
     shotComposition?: string;
     coverageJob?: string;
     coverageLink?: string;
-  }>
+  }>,
+  bible?: VisualBible | null
 ): ForecastShot[] {
   if (!Array.isArray(incoming) || incoming.length === 0) return shots;
   const byId = new Map(incoming.map((item) => [String(item.id || ''), item]));
   const stamped = shots.map((shot, index) => {
     const hit = byId.get(shot.id) || incoming[index];
     if (!hit) return shot;
+    const dialogue = /["“'][^"”']{2,120}["”']/.test(shot.sliceText || shot.narration || '');
     return {
       ...shot,
-      shotSize: asEnum(hit.shotSize, SIZES, shot.shotSize || 'ms'),
+      shotSize: asEnum(dialogue ? 'cu' : hit.shotSize, SIZES, shot.shotSize || 'ms'),
       cameraAngle: asEnum(hit.cameraAngle, ANGLES, shot.cameraAngle || 'eye'),
       shotComposition: asEnum(hit.shotComposition, COMPS, shot.shotComposition || 'thirds'),
-      coverageJob: asEnum(hit.coverageJob, JOBS, shot.coverageJob || 'evidence'),
+      coverageJob: asEnum(dialogue ? 'evidence' : hit.coverageJob, JOBS, shot.coverageJob || 'evidence'),
       coverageLink: asEnum(hit.coverageLink, LINKS, shot.coverageLink || 'advance'),
       coverageSource: 'llm' as CoverageSource
     };
   });
-  return stamped.map((shot, index, list) => {
+  const sized = stamped.map((shot, index, list) => {
     if (index === 0) return shot;
     const prev = list[index - 1];
     if (shot.shotSize !== prev.shotSize) return shot;
     return { ...shot, shotSize: differentSize(prev.shotSize, shot.shotSize || 'ms') };
   });
+  return applyOccupancyAfterCoverage(sized, bible);
 }
 
 export function cameraMotionForCoverage(shot: {
@@ -226,5 +234,6 @@ export function withCoverage(
   previous?: ForecastShot[]
 ): ForecastShot[] {
   const ruled = assignRuleCoverage(shots, coverageModeFromBible(bible));
-  return mergeCoverage(ruled, previous || []);
+  const merged = mergeCoverage(ruled, previous || []);
+  return applyOccupancyAfterCoverage(merged, bible);
 }

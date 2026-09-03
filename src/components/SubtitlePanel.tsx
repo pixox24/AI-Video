@@ -1,19 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import { Subtitles, Sparkles, Type, ChevronDown, Loader2 } from 'lucide-react';
-import { StoryboardClip, SubtitleConfig, SubtitlePreset } from '../types';
+import { ScriptLanguage, StoryboardClip, SubtitleConfig, SubtitlePreset } from '../types';
 import { ToolRail } from './ToolRail';
 import { showStatusToast } from '../utils/statusToast';
 import { secondaryCoverage, translateClipsSecondary } from '../utils/secondaryText';
 import {
-  STUDIO_FONTS,
   StudioFont,
+  StudioFontScript,
   fontFamilyStack,
+  fontsForScript,
   isStudioFontReady,
   loadStudioFont,
+  resolveSecondarySubtitleFontId,
   resolveSubtitleFontId,
   studioFontById,
   subscribeStudioFonts
 } from '../utils/subtitleFonts';
+import { normalizeScriptLanguage } from '../utils/scriptLanguage';
 
 interface SubtitlePanelProps {
   config: SubtitleConfig;
@@ -21,9 +24,12 @@ interface SubtitlePanelProps {
   clips?: StoryboardClip[];
   onUpdateClips?: (clips: StoryboardClip[]) => void;
   llmApi?: unknown;
+  scriptLanguage?: ScriptLanguage;
 }
 
-const FONT_PREVIEW_TEXT = '这是当前字幕字体';
+function specimenText(script: StudioFontScript): string {
+  return script === 'latin' ? 'The quick brown fox' : '这是当前字幕字体';
+}
 
 function FontSpecimenCard({
   font,
@@ -31,7 +37,8 @@ function FontSpecimenCard({
   pickerOpen = false,
   onClick,
   ariaExpanded,
-  ariaControls
+  ariaControls,
+  idPrefix = 'subtitle-font'
 }: {
   font: StudioFont;
   active?: boolean;
@@ -39,11 +46,12 @@ function FontSpecimenCard({
   onClick: () => void;
   ariaExpanded?: boolean;
   ariaControls?: string;
+  idPrefix?: string;
 }) {
   const ready = isStudioFontReady(font.id);
   return (
     <button
-      id={`subtitle-font-${font.id}`}
+      id={`${idPrefix}-${font.id}`}
       type="button"
       onClick={onClick}
       aria-expanded={ariaExpanded}
@@ -73,42 +81,119 @@ function FontSpecimenCard({
           </span>
         )}
       </div>
-      <div className="mx-2 mb-2 rounded-lg bg-black/40 border border-white/5 px-3 py-3">
+      <div className="mx-2 mb-2 rounded-lg bg-black/40 border border-white/5 px-3 py-3 space-y-1">
         <p
           className={`text-zinc-50 leading-relaxed ${active ? 'text-[22px]' : 'text-[20px]'}`}
           style={ready ? { fontFamily: fontFamilyStack(font) } : undefined}
         >
-          {ready ? FONT_PREVIEW_TEXT : '正在载入字体…'}
+          {ready ? specimenText(font.script) : '正在载入字体…'}
         </p>
+        {ready && (
+          <p
+            className="text-[11px] text-zinc-400 leading-relaxed"
+            style={{ fontFamily: fontFamilyStack(font) }}
+          >
+            {font.script === 'latin' ? '字幕 Aa 123' : 'Subtitle Aa 123'}
+          </p>
+        )}
       </div>
     </button>
   );
 }
 
-export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, clips, onUpdateClips, llmApi }) => {
+function FontPicker({
+  label,
+  hint,
+  selectedId,
+  script,
+  open,
+  onToggle,
+  onSelect,
+  idPrefix
+}: {
+  label: string;
+  hint: string;
+  selectedId: string;
+  script: StudioFontScript;
+  open: boolean;
+  onToggle: () => void;
+  onSelect: (fontId: string) => void;
+  idPrefix: string;
+}) {
+  const fonts = fontsForScript(script);
+  const selected = studioFontById(selectedId);
+  const others = fonts.filter((font) => font.id !== selected.id);
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-zinc-400 font-medium flex items-center gap-1.5">
+          <Type className="w-3.5 h-3.5 text-amber-400" />
+          {label}
+        </label>
+        <span className="text-[10px] text-zinc-500">{hint}</span>
+      </div>
+      <FontSpecimenCard
+        font={selected}
+        active
+        pickerOpen={open}
+        onClick={onToggle}
+        ariaExpanded={open}
+        ariaControls={`${idPrefix}-picker`}
+        idPrefix={idPrefix}
+      />
+      <div
+        id={`${idPrefix}-picker`}
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+          open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+        }`}
+      >
+        <div className="overflow-hidden" aria-hidden={!open} inert={!open}>
+          <div className="space-y-1.5 pt-0.5">
+            <p className="text-[10px] text-zinc-500 px-0.5">点选即用，选完自动收起</p>
+            <div className="max-h-72 overflow-y-auto space-y-2 pr-0.5 custom-scrollbar">
+              {others.map((font) => (
+                <FontSpecimenCard
+                  key={font.id}
+                  font={font}
+                  onClick={() => onSelect(font.id)}
+                  idPrefix={idPrefix}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, clips, onUpdateClips, llmApi, scriptLanguage }) => {
   const [, setFontTick] = useState(0);
   const [fontPickerOpen, setFontPickerOpen] = useState(false);
+  const [secondaryPickerOpen, setSecondaryPickerOpen] = useState(false);
   const [backfilling, setBackfilling] = useState(false);
+  const spokenLang = normalizeScriptLanguage(scriptLanguage);
+  const primaryScript: StudioFontScript = spokenLang === 'en' ? 'latin' : 'cjk';
+  const secondaryScript: StudioFontScript = spokenLang === 'en' ? 'cjk' : 'latin';
   const selectedFontId = resolveSubtitleFontId(config);
-  const selectedFont = studioFontById(selectedFontId);
-  const otherFonts = STUDIO_FONTS.filter((font) => font.id !== selectedFontId);
-  const coverage = secondaryCoverage(clips || []);
+  const secondaryFontId = resolveSecondarySubtitleFontId(config);
+  const coverage = secondaryCoverage(clips || [], scriptLanguage);
 
   const handleBackfillEnglish = async () => {
     if (!clips || !onUpdateClips || backfilling) return;
     setBackfilling(true);
     try {
-      const result = await translateClipsSecondary(clips, llmApi);
+      const result = await translateClipsSecondary(clips, llmApi, scriptLanguage);
       if (result.translated > 0) {
         onUpdateClips(result.clips);
         showStatusToast(
           result.failed > 0
-            ? `已补齐 ${result.translated} 镜英文，${result.failed} 镜未译出，可再点一次`
-            : `已补齐 ${result.translated} 镜英文`,
+            ? `已补齐 ${result.translated} 镜翻译，${result.failed} 镜未译出，可再点一次`
+            : `已补齐 ${result.translated} 镜翻译`,
           { tone: result.failed > 0 ? 'warn' : 'ok', id: 'subtitle-english' }
         );
       } else {
-        showStatusToast(result.error || '英文没生成出来，请检查模型设置', { tone: 'warn', id: 'subtitle-english' });
+        showStatusToast(result.error || '翻译没生成出来，请检查模型设置', { tone: 'warn', id: 'subtitle-english' });
       }
     } finally {
       setBackfilling(false);
@@ -118,48 +203,56 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, 
   useEffect(() => {
     const unsubscribe = subscribeStudioFonts(() => setFontTick((tick) => tick + 1));
     void loadStudioFont(selectedFontId);
+    void loadStudioFont(secondaryFontId);
     return unsubscribe;
-  }, [selectedFontId]);
+  }, [selectedFontId, secondaryFontId]);
 
   useEffect(() => {
-    if (!fontPickerOpen) return;
-    STUDIO_FONTS.forEach((font) => {
-      if (font.id === selectedFontId) return;
+    if (!fontPickerOpen && !secondaryPickerOpen) return;
+    const script = fontPickerOpen ? primaryScript : secondaryScript;
+    fontsForScript(script).forEach((font) => {
       void loadStudioFont(font.id);
     });
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setFontPickerOpen(false);
+      if (event.key === 'Escape') {
+        setFontPickerOpen(false);
+        setSecondaryPickerOpen(false);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [fontPickerOpen, selectedFontId]);
+  }, [fontPickerOpen, secondaryPickerOpen, primaryScript, secondaryScript]);
 
-  const handleSelectFont = (fontId: string) => {
+  const applyFont = (slot: 'primary' | 'secondary', fontId: string) => {
     const font = studioFontById(fontId);
-    setFontPickerOpen(false);
-    if (font.id === selectedFontId) return;
-    onChange({
-      ...config,
-      fontId: font.id,
-      fontFamily: fontFamilyStack(font)
-    });
+    if (slot === 'primary') {
+      setFontPickerOpen(false);
+      if (font.id === selectedFontId) return;
+      onChange({ ...config, fontId: font.id, fontFamily: fontFamilyStack(font) });
+    } else {
+      setSecondaryPickerOpen(false);
+      if (font.id === secondaryFontId) return;
+      onChange({ ...config, secondaryFontId: font.id });
+    }
+    const toastId = slot === 'primary' ? 'subtitle-font' : 'subtitle-font-secondary';
+    const label = slot === 'primary' ? '口播字体' : '翻译字体';
     if (!font.url || isStudioFontReady(font.id)) {
-      showStatusToast(`已切换字幕字体：${font.name}`, { tone: 'ok', id: 'subtitle-font' });
+      showStatusToast(`已切换${label}：${font.name}`, { tone: 'ok', id: toastId });
       return;
     }
-    showStatusToast('正在载入字幕字体…', { tone: 'progress', id: 'subtitle-font', durationMs: 0 });
+    showStatusToast(`正在载入${label}…`, { tone: 'progress', id: toastId, durationMs: 0 });
     void loadStudioFont(font.id).then((ok) => {
       if (ok) {
-        showStatusToast(`已切换字幕字体：${font.name}`, { tone: 'ok', id: 'subtitle-font' });
+        showStatusToast(`已切换${label}：${font.name}`, { tone: 'ok', id: toastId });
       } else {
-        showStatusToast(`字体载入失败：${font.name}，预览暂用系统字体`, { tone: 'error', id: 'subtitle-font' });
+        showStatusToast(`${label}载入失败：${font.name}，预览暂用系统字体`, { tone: 'error', id: toastId });
       }
     });
   };
 
   const presets: { id: SubtitlePreset; name: string; desc: string; sampleColor: string }[] = [
     { id: 'viral-yellow', name: '抖音爆款黄白', desc: '白字搭配明黄重点，高停留率', sampleColor: 'text-amber-400' },
-    { id: 'cinematic-bilingual', name: '电影双语大片', desc: '中英双语优雅排版，高级院线感', sampleColor: 'text-sky-400' },
+    { id: 'cinematic-bilingual', name: '电影双语大片', desc: '主行口播 + 副行翻译，院线排版', sampleColor: 'text-sky-400' },
     { id: 'glow-capsule', name: '荧光暗黑胶囊', desc: '半透明圆角药丸底色，极其清晰', sampleColor: 'text-emerald-400' },
     { id: 'neon-cyan', name: '赛博霓虹发光', desc: '青色与粉色外发光，未来科技感', sampleColor: 'text-cyan-400' },
     { id: 'retro-typewriter', name: '复古打字机', desc: '等宽机械字体，纪实人文感', sampleColor: 'text-orange-300' },
@@ -290,53 +383,41 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, 
           </div>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <label className="text-zinc-400 font-medium flex items-center gap-1.5">
-              <Type className="w-3.5 h-3.5 text-amber-400" />
-              字幕字体
-            </label>
-            <span className="text-[10px] text-zinc-500">{STUDIO_FONTS.length} 款</span>
-          </div>
-
-          <FontSpecimenCard
-            font={selectedFont}
-            active
-            pickerOpen={fontPickerOpen}
-            onClick={() => setFontPickerOpen((open) => !open)}
-            ariaExpanded={fontPickerOpen}
-            ariaControls="subtitle-font-picker"
+        <FontPicker
+          label="口播字体"
+          hint={primaryScript === 'latin' ? '西文' : '中文'}
+          selectedId={selectedFontId}
+          script={primaryScript}
+          open={fontPickerOpen}
+          onToggle={() => {
+            setFontPickerOpen((open) => !open);
+            setSecondaryPickerOpen(false);
+          }}
+          onSelect={(fontId) => applyFont('primary', fontId)}
+          idPrefix="subtitle-font"
+        />
+        {config.bilingual && (
+          <FontPicker
+            label="翻译字体"
+            hint={secondaryScript === 'latin' ? '西文副行' : '中文副行'}
+            selectedId={secondaryFontId}
+            script={secondaryScript}
+            open={secondaryPickerOpen}
+            onToggle={() => {
+              setSecondaryPickerOpen((open) => !open);
+              setFontPickerOpen(false);
+            }}
+            onSelect={(fontId) => applyFont('secondary', fontId)}
+            idPrefix="subtitle-font-secondary"
           />
-
-          <div
-            id="subtitle-font-picker"
-            className={`grid transition-[grid-template-rows] duration-200 ease-out ${
-              fontPickerOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
-            }`}
-          >
-            <div className="overflow-hidden" aria-hidden={!fontPickerOpen} inert={!fontPickerOpen}>
-              <div className="space-y-1.5 pt-0.5">
-                <p className="text-[10px] text-zinc-500 px-0.5">点选即用，选完自动收起</p>
-                <div className="max-h-72 overflow-y-auto space-y-2 pr-0.5 custom-scrollbar">
-                  {otherFonts.map((font) => (
-                    <FontSpecimenCard
-                      key={font.id}
-                      font={font}
-                      onClick={() => handleSelectFont(font.id)}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        )}
 
         {/* Bilingual Switch */}
         <div className="p-3 bg-[#1e1e26] border border-[#2b2b38] rounded-xl space-y-2">
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
-              <span className="font-medium text-zinc-200 block text-xs">中英双语字幕显示</span>
-              <span className="text-[10px] text-zinc-400">自动同步分镜的英文对照翻译</span>
+              <span className="font-medium text-zinc-200 block text-xs">双语字幕显示</span>
+              <span className="text-[10px] text-zinc-400">主行是口播语言，副行是翻译</span>
             </div>
             <input
               type="checkbox"
@@ -349,7 +430,7 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, 
             <div className="pt-1 border-t border-[#2b2b38] space-y-1.5">
               <div className="flex items-center justify-between text-[10px]">
                 <span className="text-zinc-400">
-                  英文行 <span className="font-mono text-zinc-200">{coverage.fresh}/{coverage.total}</span> 镜与旁白对齐
+                  翻译行 <span className="font-mono text-zinc-200">{coverage.fresh}/{coverage.total}</span> 镜与旁白对齐
                 </span>
                 {coverage.stale > 0 && <span className="text-amber-400">{coverage.stale} 镜待更新</span>}
               </div>
@@ -361,7 +442,7 @@ export const SubtitlePanel: React.FC<SubtitlePanelProps> = ({ config, onChange, 
                   disabled={backfilling}
                   className="w-full py-1.5 rounded-xl border border-amber-500/30 text-amber-300 hover:bg-amber-500/10 cursor-pointer disabled:opacity-50 text-[11px]"
                 >
-                  {backfilling ? '正在生成英文…' : `补齐英文（${coverage.stale} 镜）`}
+                  {backfilling ? '正在生成翻译…' : `补齐翻译（${coverage.stale} 镜）`}
                 </button>
               )}
             </div>

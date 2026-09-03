@@ -24,7 +24,8 @@ import {
   ClipsChange,
   StylePack,
   VisualBible,
-  ScriptGenre
+  ScriptGenre,
+  ScriptLanguage
 } from '../types';
 import { resolveImageApi } from '../utils/presets';
 import { generateProceduralArtwork } from '../utils/visualGenerator';
@@ -62,6 +63,7 @@ interface StoryboardPanelProps {
   stylePack?: StylePack;
   visualBible?: VisualBible | null;
   genre?: ScriptGenre | null;
+  scriptLanguage?: ScriptLanguage;
 }
 
 export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
@@ -88,7 +90,8 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
   onUtteranceHoldChange,
   stylePack,
   visualBible = null,
-  genre = null
+  genre = null,
+  scriptLanguage
 }) => {
   const activePack = stylePack || presetStylePack(visualStyle);
   const compileClip = (clip: StoryboardClip, index: number, total = clips.length) => clipImagePromptArgs(
@@ -250,7 +253,8 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           type: 'narration',
           style: 'punchy',
           visualStyle,
-          llmApi: customLlmApi
+          llmApi: customLlmApi,
+          scriptLanguage
         })
       });
       const data = await res.json().catch(() => ({}));

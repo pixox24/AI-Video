@@ -10,7 +10,7 @@ import {
 } from '../types';
 import { clipShotNarration } from './narrationTrack';
 import { dnaTransferText, renderLine, usesStyleDna } from './stylePack';
-import { leadCharacter, stripBiblePrefix } from './visualBible';
+import { isQuotedDialogueLine, leadCharacter, speakerCharacterFromLine, stripBiblePrefix } from './visualBible';
 import { coverageFramingLine } from './shotCoverage';
 
 export type ImagePromptProfile = 'gpt-image';
@@ -112,16 +112,19 @@ export function resolveVisualBeat(clip: ImagePromptClip): VisualBeat {
     (clip.chineseVisualPrompt || '').trim() || (clip.visualPrompt || '').trim()
   );
   const looksLikeDna = /Transfer only the visual system|Keep a consistent color grade|color palette|Impasto|Charcoal Sketch/i.test(scene);
-  if (scene && !looksLikeDna && !looksLikeSpokenLine(scene, spoken)) {
-    return beatFromProse(scene);
+  if (scene && !looksLikeDna) {
+    if (!looksLikeSpokenLine(scene, spoken) || scene.length > Math.max(24, spoken.length * 0.8)) {
+      return beatFromProse(scene);
+    }
   }
   const hinted = beatFromHint(spoken || scene);
   if (hinted) return hinted;
+  if (scene && !looksLikeDna) {
+    return { action: scene };
+  }
   if (spoken) {
     return {
-      setting: '干净的说明性画面，没有字幕、没有界面文字',
-      subject: '一个能看见的具体主体，用来图解这句口播，不要把台词写在画面上',
-      action: spoken.replace(/[。！？!?]+$/g, '').slice(0, 24)
+      action: spoken.replace(/[。！？!?]+$/g, '')
     };
   }
   return { subject: scene || '一个清楚的主体' };
@@ -134,26 +137,40 @@ function styleDetails(pack: StylePack): string {
   return renderLine(pack);
 }
 
-function bibleSubjectLock(bible: VisualBible | null | undefined, clip: ImagePromptClip): string {
-  if (!bible || bible.mode !== 'story') return '';
-  // `undefined` means the shot has no explicit binding and may use the lead;
-  // an explicit empty array means this shot intentionally contains no character.
+function looksLikeLocationLock(text: string | undefined): boolean {
+  const value = String(text || '').trim();
+  return /^【/.test(value) || /^同一空间/.test(value) || /^同一人/.test(value) || /拟人化的|全片保持同一外形|全片不换装/.test(value);
+}
+
+function isGenericBeatText(text: string | undefined): boolean {
+  const value = String(text || '').trim();
+  return /干净的说明性画面|一个能看见的具体主体|一个清楚的主体|可被院线镜头拍到/.test(value);
+}
+
+function bibleCharacterLock(bible: VisualBible | null | undefined, clip: ImagePromptClip): string {
+  if (!bible) return '';
+  if (clip.coverageJob === 'insert' && (!clip.characterIds || clip.characterIds.length === 0)) return '';
+  const spoken = clipShotNarration(clip) || clip.narration || '';
+  const speaker = speakerCharacterFromLine(bible, spoken);
   const hasExplicitCharacterSelection = Array.isArray(clip.characterIds);
-  const char = hasExplicitCharacterSelection
-    ? bible.characters.find((item) => clip.characterIds!.includes(item.id))
-    : leadCharacter(bible);
-  const loc = bible.locations.find((item) => item.id === clip.locationId) || bible.locations[0];
-  const parts: string[] = [];
-  if (char) {
-    parts.push(`同一人「${char.name}」：${char.look}，${char.wardrobe}${char.signature ? `，带着${char.signature}` : ''}`);
-  }
-  if (loc && clip.continuity !== 'contrast') {
-    parts.push(`同一空间「${loc.name}」：${loc.look}，${loc.timeOfDay}`);
-  }
-  if (clip.continuity === 'callback' && bible.motif) {
-    parts.push(`回收看见${bible.motif.name}：${bible.motif.look}`);
-  }
-  return parts.join('；');
+  const char = speaker
+    || (hasExplicitCharacterSelection
+      ? bible.characters.find((item) => clip.characterIds!.includes(item.id))
+      : (bible.mode === 'expository' && !bible.characters.length ? null : leadCharacter(bible)));
+  if (!char) return '';
+  return `同一人「${char.name}」：${char.look}，${char.wardrobe}${char.signature ? `，带着${char.signature}` : ''}`;
+}
+
+function bibleLocationLock(bible: VisualBible | null | undefined, clip: ImagePromptClip): string {
+  if (!bible || clip.continuity === 'contrast') return '';
+  const loc = clip.locationId
+    ? bible.locations.find((item) => item.id === clip.locationId)
+    : null;
+  if (!loc) return '';
+  const motif = clip.continuity === 'callback' && bible.motif
+    ? `回收看见${bible.motif.name}：${bible.motif.look}`
+    : '';
+  return [`同一空间「${loc.name}」：${loc.look}，${loc.timeOfDay}`, motif].filter(Boolean).join('；');
 }
 
 function constraintsFor(
@@ -164,12 +181,14 @@ function constraintsFor(
   const lines = [
     '画面上不要出现可读文字、字幕、Logo 或口播原句',
     '不要把风格参考图里的人物、服装、道具或街道画进来',
+    '角色参考图只用来锁同一张脸和服装，不要复制参考图的构图和背景',
     '只画这一镜自己的主体和空间'
   ];
-  if (bible?.mode === 'expository') {
-    lines.push('全片用同一套色和介质，这一镜不要换滤镜');
-  } else if (bible?.mode === 'story' && continuity !== 'contrast') {
+  if (bible?.characters?.length && continuity !== 'contrast') {
     lines.push('不要无故换脸、换装、换房间');
+  }
+  if (bible?.mode === 'expository' || bible?.paletteLock) {
+    lines.push('全片用同一套色和介质，这一镜不要换滤镜');
   }
   if (!usesStyleDna(pack) && pack.world?.dont?.length) {
     lines.push(`不要出现：${pack.world.dont.slice(0, 3).join('、')}`);
@@ -185,7 +204,7 @@ function useLine(
 ): string {
   const ratio = aspectRatio || '16:9';
   const frame = `frame ${clipIndex + 1} of ${Math.max(1, clipCount)}`;
-  const kind = genre ? `${genre} short video` : 'short video';
+  const kind = genre === '故事' || genre === '情绪' ? 'story short video' : (genre ? `${genre} short video` : 'short video');
   const beat = clipIndex === 0 ? 'hook' : '';
   return [ratio, kind, frame, beat].filter(Boolean).join(', ');
 }
@@ -212,19 +231,32 @@ export function compileImagePrompt(input: {
   const beat = resolveVisualBeat(bibleHashMatches
     ? input.clip
     : { ...input.clip, visualPrompt: '', chineseVisualPrompt: '', promptPinned: false });
-  const identity = bibleSubjectLock(input.bible, input.clip);
+  const characterLock = bibleCharacterLock(input.bible, input.clip);
+  const locationLock = bibleLocationLock(input.bible, input.clip);
   const framing = coverageFramingLine(input.clip);
-  const setting = [framing, beat.setting, usesStyleDna(input.pack) ? '' : input.pack.world?.space]
-    .filter(Boolean)
-    .join('；');
-  const subject = [identity, beat.subject].filter(Boolean).join('；');
+  const setting = [
+    framing,
+    locationLock,
+    looksLikeLocationLock(beat.setting) || isGenericBeatText(beat.setting) ? '' : beat.setting,
+    usesStyleDna(input.pack) || isGenericBeatText(input.pack.world?.space) ? '' : input.pack.world?.space
+  ].filter(Boolean).join('；');
+  const subject = [
+    characterLock,
+    looksLikeLocationLock(beat.subject) || isGenericBeatText(beat.subject) ? '' : beat.subject
+  ].filter(Boolean).join('；');
+  const spokenLine = clipShotNarration(input.clip) || input.clip.narration || '';
+  let action = looksLikeLocationLock(beat.action) ? '' : beat.action;
+  if (isQuotedDialogueLine(spokenLine) && speakerCharacterFromLine(input.bible, spokenLine)) {
+    const speaker = speakerCharacterFromLine(input.bible, spokenLine);
+    action = `${speaker!.name} is speaking this line: reacting in the moment, face and body leading. Do not make a dental close-up or object insert the main subject.`;
+  }
   const details = styleDetails(input.pack);
   const constraints = constraintsFor(input.bible, input.pack, input.clip.continuity);
 
   const prompt = [
     `Use: ${useLine(input.aspectRatio, input.genre, input.clipIndex, input.clipCount)}.`,
     `Scene: ${setting || '简单空间，为这个主体服务'}。`,
-    `Subject: ${subject || '一个清楚的主体'}。${beat.action ? ` ${beat.action}。` : ''}`,
+    `Subject: ${subject || '一个清楚的主体'}。${action ? ` ${action}。` : ''}`,
     `Details: ${details}。`,
     `Constraints: ${constraints.join('; ')}.`
   ].join('\n');

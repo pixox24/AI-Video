@@ -1353,6 +1353,8 @@ function TtsProviderSection({
     latencyMs?: number;
     model?: string;
     voice?: string;
+    requestedVoice?: string;
+    resolvedVoice?: string;
     audioUrl?: string;
     error?: string;
   } | null>(null);
@@ -1418,6 +1420,8 @@ function TtsProviderSection({
           latencyMs: data.latencyMs,
           model: data.model,
           voice: data.voice,
+          requestedVoice: data.requestedVoice,
+          resolvedVoice: data.resolvedVoice || data.voice,
           audioUrl: data.audioUrl
         });
       } else {
@@ -1617,7 +1621,12 @@ function TtsProviderSection({
                   <div className="space-y-1">
                     <p className="text-zinc-300">
                       模型 <span className="font-mono text-zinc-100">{testResult.model}</span>
-                      {testResult.voice ? ` · 音色 ${testResult.voice}` : ''}
+                      {testResult.resolvedVoice ? (
+                        <> · 实际音色 <span className="font-mono text-zinc-100">{testResult.resolvedVoice}</span></>
+                      ) : testResult.voice ? ` · 音色 ${testResult.voice}` : ''}
+                      {testResult.requestedVoice && testResult.requestedVoice !== testResult.resolvedVoice && (
+                        <span className="block text-amber-300">请求音色未原样生效：{testResult.requestedVoice}</span>
+                      )}
                     </p>
                     {testResult.audioUrl && (
                       <audio controls src={testResult.audioUrl} className="w-full h-9" preload="metadata" />

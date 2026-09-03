@@ -49,6 +49,10 @@ export function VoiceDesignWorkshop({
   onNeedSettings?: () => void;
 }) {
   const available = isVoiceDesignAvailable(ttsApi);
+  const canUseBailian = Boolean(
+    ttsApi?.provider === 'bailian' && ttsApi.enabled !== false && ttsApi.apiKey?.trim()
+  );
+  const canDesign = available;
   const model = (ttsApi?.model || '').trim();
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState(VOICE_PROMPT_EXAMPLES[0].prompt);
@@ -118,8 +122,12 @@ export function VoiceDesignWorkshop({
   };
 
   const handleCreate = async () => {
-    if (!available || !ttsApi) {
+    if (!canUseBailian || !ttsApi) {
       onNeedSettings?.();
+      return;
+    }
+    if (!canDesign) {
+      showStatusToast('当前模型只支持导入已有音色；声音描述生成请切换到 Audio 3.0 Plus 或 Flash', { tone: 'warn', id: 'voice-design' });
       return;
     }
     if (promptOver || previewShort || previewLong || !prompt.trim()) return;
@@ -172,7 +180,7 @@ export function VoiceDesignWorkshop({
     }
   };
 
-  const probeLibraryVoice = async (voiceId: string): Promise<{ voiceId: string; audioUrl: string } | null> => {
+  const probeLibraryVoice = async (voiceId: string): Promise<{ voiceId: string; audioUrl: string; error?: string } | null> => {
     if (!ttsApi) return null;
     const res = await fetch('/api/audio/tts', {
       method: 'POST',
@@ -185,12 +193,18 @@ export function VoiceDesignWorkshop({
       })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data?.audioUrl) return null;
-    return { voiceId, audioUrl: String(data.audioUrl) };
+    if (!res.ok || !data?.audioUrl) {
+      return { voiceId, audioUrl: '', error: String(data?.error || `HTTP ${res.status}`) };
+    }
+    const resolvedVoice = String(data.resolvedVoice || data.voice || '').trim();
+    if (resolvedVoice && resolvedVoice !== voiceId) {
+      return { voiceId, audioUrl: '', error: `服务商实际使用 ${resolvedVoice}` };
+    }
+    return { voiceId: resolvedVoice || voiceId, audioUrl: String(data.audioUrl) };
   };
 
   const handleImport = async () => {
-    if (!available || !ttsApi) {
+    if (!canUseBailian || !ttsApi) {
       onNeedSettings?.();
       return;
     }
@@ -251,13 +265,19 @@ export function VoiceDesignWorkshop({
       showStatusToast('不是账号注册音色，改按控制台音色库试合成…', { tone: 'progress', id: 'voice-design', durationMs: 0 });
       const candidates = libraryVoiceCandidates(voiceId, model);
       let probed: { voiceId: string; audioUrl: string } | null = null;
+      let lastProbeError = '';
       for (const candidate of candidates) {
-        probed = await probeLibraryVoice(candidate);
-        if (probed) break;
+        const result = await probeLibraryVoice(candidate);
+        if (result?.audioUrl) {
+          probed = result;
+          break;
+        }
+        if (result?.error) lastProbeError = `${candidate}: ${result.error}`;
       }
       if (!probed) {
+        const voiceModel = inferTargetModelFromVoiceId(voiceId);
         throw new Error(
-          '这条 ID 不是账号里的设计/复刻音色，用当前模型合成也失败。请确认：1) 复制的是 voice 参数不是中文名；2) 设置里的 Plus/Flash 和音色库一致。'
+          `${voiceModel && voiceModel !== model ? `该音色属于 ${voiceModel}，当前模型是 ${model}。` : '音色合成失败。'}${lastProbeError ? ` 服务商错误：${lastProbeError}` : ''} 请确认音色库中的模型与当前设置一致。`
         );
       }
 
@@ -312,6 +332,10 @@ export function VoiceDesignWorkshop({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.audioUrl) {
         throw new Error(data?.error || '试听合成失败');
+      }
+      const resolvedVoice = String(data.resolvedVoice || data.voice || '').trim();
+      if (resolvedVoice && resolvedVoice !== draft.voiceId) {
+        throw new Error(`试听音色未生效：服务商实际使用 ${resolvedVoice}`);
       }
       const audioUrl = String(data.audioUrl);
       setDraft((prev) => (prev ? { ...prev, previewAudioUrl: audioUrl } : prev));
@@ -374,10 +398,10 @@ export function VoiceDesignWorkshop({
       </p>
       {open && (
         <div className="space-y-2.5 pt-1">
-          {!available ? (
+          {!canUseBailian ? (
             <div className="space-y-2">
               <p className="text-[11px] text-amber-200/90 leading-relaxed">
-                声音设计需要百炼 Key，且模型为 Audio 3.0 Plus 或 Flash。
+                导入百炼音色或生成声音描述都需要百炼 API Key。
               </p>
               {onNeedSettings && (
                 <button
@@ -417,6 +441,11 @@ export function VoiceDesignWorkshop({
                 </button>
               </div>
               <div className="text-[10px] text-zinc-500">或从描述生成新音色</div>
+              {!canDesign && (
+                <p className="text-[10px] text-amber-200/80 leading-relaxed">
+                  当前模型只支持导入已有音色；声音描述生成请切换到 Audio 3.0 Plus 或 Flash。
+                </p>
+              )}
               <div className="flex flex-wrap gap-1">
                 {VOICE_PROMPT_EXAMPLES.map((item) => (
                   <button
@@ -476,7 +505,7 @@ export function VoiceDesignWorkshop({
                 id="btn-generate-voice-design"
                 type="button"
                 onClick={() => void handleCreate()}
-                disabled={creating || promptOver || previewShort || previewLong || !prompt.trim()}
+                disabled={!canDesign || creating || promptOver || previewShort || previewLong || !prompt.trim()}
                 className="w-full py-2 bg-[#22222c] hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-xl flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 text-xs font-medium"
               >
                 {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}

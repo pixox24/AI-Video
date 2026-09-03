@@ -22,7 +22,7 @@ import { resolveTtsApi } from '../utils/presets';
 import { showStatusToast } from '../utils/statusToast';
 import {
   loadStudioFont,
-  resolveSubtitleFontId
+  subtitleFontIds
 } from '../utils/subtitleFonts';
 
 function formatTimecode(sec: number) {
@@ -127,11 +127,13 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   }, [isPlaying, audio.bgmEnabled, audio.bgmTrackId, audio.bgmVolume, audio.customBgmUrl, isMuted]);
 
   const narrationFresh = isNarrationTrackFresh(audio, clips, resolveTtsApi(settings.customTtsApi));
-  const subtitleFontId = resolveSubtitleFontId(subtitles);
+  const subtitleFontKey = subtitleFontIds(subtitles).join(',');
 
   useEffect(() => {
-    void loadStudioFont(subtitleFontId);
-  }, [subtitleFontId]);
+    subtitleFontIds(subtitles).forEach((id) => {
+      void loadStudioFont(id);
+    });
+  }, [subtitleFontKey]);
 
   useEffect(() => {
     if (audio.voiceoverEnabled && audio.narrationTrack?.audioUrl) {

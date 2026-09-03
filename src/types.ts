@@ -92,9 +92,9 @@ export interface StoryboardClip {
   duration: number; // in seconds (e.g. 3.5) = speechDuration + holdDuration
   speechDuration?: number; // locked narration span on the full track
   holdDuration?: number; // extra picture hold after speech ends
-  narration: string; // The spoken text / voiceover
-  secondaryText?: string; // Optional English/sub text
-  secondaryHash?: string; // Hash of the Chinese display text when secondaryText was produced; stale hash = wrong pairing
+  narration: string; // Spoken VO in scriptLanguage
+  secondaryText?: string; // Bilingual translation line (the other language)
+  secondaryHash?: string; // Hash of the primary display text when secondaryText was produced; stale hash = wrong pairing
   visualPrompt: string; // Compiled image prompt last sent (or user-pinned)
   /** Bible source hash used when the prompt was compiled. */
   visualBibleHash?: string;
@@ -131,6 +131,7 @@ export interface SubtitleConfig {
   fontSize: number; // 18 - 48
   fontId?: string;
   fontFamily: string;
+  secondaryFontId?: string;
   positionY: number; // percentage from top, e.g., 82%
   primaryColor: string;
   highlightColor: string;
@@ -140,7 +141,7 @@ export interface SubtitleConfig {
   showStroke: boolean;
   strokeColor: string;
   animation: 'pop' | 'fade' | 'karaoke' | 'none';
-  bilingual: boolean;
+  bilingual: boolean; // draw translation line under the spoken primary line
   autoWrap?: boolean; // Automatic multi-line wrapping to prevent screen overflow
   maxLines?: number; // Max allowed lines before scaling font (default 2 or 3)
   maxWidthRatio?: number; // Safe width ratio (e.g., 0.84 = 84% screen width)
@@ -340,6 +341,7 @@ export interface ProjectSettings {
 
 export type ScriptStage = 'intent' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
 export type ScriptIntent = 'have-title' | 'blank' | 'direction' | 'product' | 'reference' | 'have-script';
+export type ScriptLanguage = 'zh' | 'en';
 export type ScriptGenre = '科普' | '反常识' | '故事' | '教程' | '带货' | '情绪' | '热点解读' | '口播金句';
 export type ScriptPace = 'ultrafast' | 'fast' | 'medium' | 'slow' | 'cinematic';
 export type ScriptPlatform = 'douyin' | 'shipinhao' | 'reels' | 'bilibili' | 'youtube';
@@ -350,6 +352,8 @@ export type ScriptGate = 'fast' | 'deep';
 export type VisualBibleMode = 'story' | 'expository';
 export type VisualContinuity = 'same-space' | 'same-subject' | 'contrast' | 'callback' | 'new-info';
 export type VisualCharacterRole = 'lead' | 'support' | 'extra';
+export type VisualCharacterKind = 'person' | 'creature' | 'object';
+export type VisualCastPolicy = 'evidence';
 export type VisualCharacterRefKind = 'none' | 'sheet' | 'face' | 'turnaround';
 
 export interface VisualCharacterRef {
@@ -360,10 +364,22 @@ export interface VisualCharacterRef {
   notes?: string;
 }
 
+export interface CastCandidate {
+  id: string;
+  name: string;
+  kind: VisualCharacterKind;
+  mentions: number;
+  evidence: string[];
+  inTitle?: boolean;
+  inNotes?: boolean;
+}
+
 export interface VisualCharacter {
   id: string;
   name: string;
   role: VisualCharacterRole;
+  kind?: VisualCharacterKind;
+  candidateId?: string;
   ageBand: string;
   look: string;
   wardrobe: string;
@@ -396,6 +412,8 @@ export interface VisualMotif {
 export interface VisualBible {
   version: 1;
   mode: VisualBibleMode;
+  castPolicy?: VisualCastPolicy;
+  candidates?: CastCandidate[];
   logline: string;
   paletteLock: string;
   characters: VisualCharacter[];
@@ -469,14 +487,21 @@ export interface ConceptMix {
 }
 
 export interface DurationBudget {
+  /** target-driven: AI writes to a duration; content-driven: existing copy determines duration */
+  durationMode: 'target-driven' | 'content-driven';
   targetSeconds: number;
   platform: ScriptPlatform;
   pace: ScriptPace;
-  charsPerSecond: number;
+  speechRate: number;
+  charsPerSecond: number; // budget units per second for the current scriptLanguage
+  scriptLanguage?: ScriptLanguage;
   speechSeconds: number;
   holdSeconds: number;
-  maxChars: number;
+  maxChars: number; // budget units: zh=chars, en=words
   usedChars: number;
+  /** Measured after TTS; planning values remain estimates until this is present. */
+  actualSpeechSeconds?: number;
+  actualTotalSeconds?: number;
   conceptMax: number;
   conceptUsed: number;
   lockedShotCount: number | null;
@@ -557,6 +582,7 @@ export interface ResearchNotes {
 export interface ScriptWorkspace {
   stage: ScriptStage;
   gate: ScriptGate;
+  scriptLanguage?: ScriptLanguage;
   intent: ScriptIntent | null;
   intentNotes: string;
   lockedTitle: string;

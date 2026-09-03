@@ -1,19 +1,29 @@
 import {
   BeatFunction,
+  CastCandidate,
   ForecastShot,
   ScriptGenre,
   VisualBible,
   VisualBibleMode,
+  VisualCastPolicy,
   VisualCharacter,
+  VisualCharacterKind,
   VisualCharacterRef,
   VisualContinuity,
   VisualLocation,
   VisualMotif
 } from '../types';
+import { candidateByName, extractCastCandidates, formatCandidatesForPrompt } from './castCandidates';
 
 export const STORY_BIBLE_GENRES: ScriptGenre[] = ['故事', '情绪'];
 
-const BIBLE_PREFIX = /^(?:【[^】]{1,16}】[^。\n]*。[ \t]*)+/;
+const CONTINUITY_PEEL = [
+  '回收开场构图或母题，只改一处',
+  '对照切换，主体可以不同',
+  '同一人，景别或状态变了',
+  '同一空间往前推',
+  '这一拍才允许看见的新信息'
+];
 
 export function visualBibleModeForGenre(genre?: ScriptGenre | null): VisualBibleMode {
   return genre && STORY_BIBLE_GENRES.includes(genre) ? 'story' : 'expository';
@@ -92,11 +102,21 @@ export function extractNarrativeCharacterHints(narration: string): NarrativeChar
   };
 }
 
-export function narrativeEntityContract(narration: string): string {
+export function narrativeEntityContract(
+  narration: string,
+  opts?: { title?: string; intentNotes?: string; candidates?: CastCandidate[] }
+): string {
+  const candidates = opts?.candidates || extractCastCandidates({
+    narration,
+    title: opts?.title,
+    intentNotes: opts?.intentNotes
+  });
+  const candidateBlock = formatCandidatesForPrompt(candidates);
   const hints = extractNarrativeCharacterHints(narration);
-  if (!hints.hasPerson) {
-    return '【文案实体硬约束】未识别到明确人物。characters 必须输出 []，不得新增女孩、男孩、学生或其他主角。';
+  if (!candidates.length && !hints.hasPerson) {
+    return candidateBlock;
   }
+  if (!candidates.length) {
   const facts = [
     hints.names.length ? `人物名：${hints.names.join('、')}` : '',
     hints.gender !== 'unknown' ? `性别线索：${hints.gender === 'male' ? '男性' : '女性'}` : '性别线索：未明确，不得擅自猜测',
@@ -104,11 +124,14 @@ export function narrativeEntityContract(narration: string): string {
     hints.occupations.length ? `身份/职业：${hints.occupations.join('、')}` : '',
     hints.evidence.length ? `原文证据：${hints.evidence.map((item) => `「${item}」`).join('；')}` : ''
   ].filter(Boolean);
-  return [
-    '【文案实体硬约束】角色只能对应以下文案实体，不得凭空新增人物。',
-    ...facts,
-    '若角色卡无法给出对应原文证据，characters 输出 []。sourceEvidence 必须填写原文短句。'
-  ].join('\n');
+    return [
+      candidateBlock,
+      '【人称线索】角色只能对应以下文案实体，不得凭空新增人物。',
+      ...facts,
+      '若角色卡无法给出对应原文证据，characters 输出 []。sourceEvidence 必须填写原文短句。'
+    ].filter(Boolean).join('\n');
+  }
+  return candidateBlock;
 }
 
 function normalizeRefs(raw: unknown): VisualCharacterRef[] {
@@ -150,7 +173,26 @@ function normalizeCharacter(raw: any, index: number): VisualCharacter | null {
       : undefined,
     locked: Boolean(raw?.locked),
     refs: normalizeRefs(raw?.refs),
-    seedHint: cleanText(raw?.seedHint) || undefined
+    seedHint: cleanText(raw?.seedHint) || undefined,
+    kind: raw?.kind === 'creature' || raw?.kind === 'object' || raw?.kind === 'person'
+      ? raw.kind as VisualCharacterKind
+      : undefined,
+    candidateId: cleanText(raw?.candidateId) || undefined
+  };
+}
+
+function normalizeCandidate(raw: any, index: number): CastCandidate | null {
+  const name = cleanText(raw?.name);
+  if (!name) return null;
+  const kind: VisualCharacterKind = raw?.kind === 'creature' || raw?.kind === 'object' ? raw.kind : 'person';
+  return {
+    id: cleanText(raw?.id, `cand-${index + 1}`),
+    name,
+    kind,
+    mentions: Math.max(1, Number(raw?.mentions) || 1),
+    evidence: asStringArray(raw?.evidence).slice(0, 4),
+    inTitle: Boolean(raw?.inTitle),
+    inNotes: Boolean(raw?.inNotes)
   };
 }
 
@@ -193,6 +235,7 @@ export function emptyVisualBible(mode: VisualBibleMode, sourceHash = ''): Visual
     characters: [],
     locations: [],
     motif: null,
+    castPolicy: 'evidence',
     continuityRule: mode === 'story'
       ? '同一人同一空间推进；对照才换主体；收束回收开场'
       : '色板和道具材质保持一致，允许按句图解',
@@ -224,6 +267,11 @@ export function normalizeVisualBible(raw: unknown, fallbackMode: VisualBibleMode
     characters,
     locations,
     motif: normalizeMotif(data.motif),
+    castPolicy: 'evidence' as VisualCastPolicy,
+    candidates: (Array.isArray((data as VisualBible).candidates) ? (data as VisualBible).candidates : [])
+      .map((item, index) => normalizeCandidate(item, index))
+      .filter((item): item is CastCandidate => Boolean(item))
+      .slice(0, 6),
     continuityRule: cleanText(
       data.continuityRule,
       mode === 'story' ? '同一人同一空间推进；对照才换主体；收束回收开场' : '色板和道具材质保持一致'
@@ -245,52 +293,66 @@ export function fallbackVisualBible(opts: {
   narration: string;
   genre?: ScriptGenre | null;
   title?: string;
+  intentNotes?: string;
+  candidates?: CastCandidate[];
 }): VisualBible {
   const mode = visualBibleModeForGenre(opts.genre);
   const hash = bibleSourceHash(opts.narration, opts.genre, mode);
-  if (mode === 'expository') {
-    return {
-      ...emptyVisualBible(mode, hash),
-      logline: cleanText(opts.title),
-      paletteLock: '全片同一色温与材质，不要无故换滤镜',
-      generatedAt: Date.now()
-    };
-  }
+  const candidates = opts.candidates || extractCastCandidates({
+    narration: opts.narration,
+    title: opts.title,
+    intentNotes: opts.intentNotes
+  });
   const hints = extractNarrativeCharacterHints(opts.narration);
-  const hasPerson = hints.hasPerson;
-  const primaryName = hints.names[0] || '文案人物';
-  const evidence = hints.evidence.length ? hints.evidence : ['文案明确出现人物，但未给出更多外形信息'];
+  const characters: VisualCharacter[] = candidates.slice(0, 2).map((candidate, index) => ({
+    id: index === 0 ? 'char-lead' : 'char-support',
+    name: candidate.name,
+    role: index === 0 ? 'lead' : 'support',
+    kind: candidate.kind,
+    candidateId: candidate.id,
+    ageBand: candidate.kind === 'person' ? (hints.ageBand || '文案未明确年龄') : '不适用',
+    look: candidate.kind === 'creature'
+      ? `拟人化的${candidate.name}，全片保持同一外形`
+      : candidate.kind === 'object'
+        ? `${candidate.name}的可指认外观，全片不换包装`
+        : `${hints.gender === 'male' ? '男性' : hints.gender === 'female' ? '女性' : '性别不擅自推断'}，外形由用户确认；全片不改五官和发型`,
+    wardrobe: candidate.kind === 'object'
+      ? '保持同一外观'
+      : hints.occupations.length
+        ? `符合${hints.occupations[0]}身份的服装，全片不换装`
+        : '全片不换装',
+    sourceEvidence: candidate.evidence.slice(0, 4),
+    confidence: 0.6,
+    locked: false,
+    refs: []
+  }));
+  const needsStage = mode === 'story' || characters.length > 0;
   return {
     version: 1,
-    mode: 'story',
-    logline: cleanText(opts.title) || '同一个人把这件事走完',
-    paletteLock: '全片同一时段、同一色温',
-    characters: hasPerson ? [{
-      id: 'char-lead',
-      name: primaryName,
-      role: 'lead',
-      ageBand: hints.ageBand || '文案未明确年龄',
-      look: `${hints.gender === 'male' ? '男性' : hints.gender === 'female' ? '女性' : '性别不擅自推断'}，外形由用户确认；全片不改五官和发型`,
-      wardrobe: hints.occupations.length ? `符合${hints.occupations[0]}身份的服装，全片不换装` : '符合文案身份的服装，全片不换装',
-      sourceEvidence: evidence,
-      confidence: 0.55,
-      locked: false,
-      refs: []
-    }] : [],
-    locations: [{
+    mode,
+    castPolicy: 'evidence',
+    candidates,
+    logline: cleanText(opts.title) || (characters.length ? '同一主体把这件事走完' : ''),
+    paletteLock: mode === 'expository' ? '全片同一色温与材质，不要无故换滤镜' : '全片同一时段、同一色温',
+    characters,
+    locations: needsStage ? [{
       id: 'loc-1',
       name: '主场景',
       look: '口播开始的那个空间，全片优先待在这里',
       timeOfDay: '同一时段',
       locked: false,
       refs: []
-    }],
+    }] : [],
     motif: null,
-    continuityRule: '同一人同一空间推进；对照才换主体；收束回收开场构图或物件',
+    continuityRule: characters.length
+      ? '有角色的镜子同一主体推进；insert 默认无人；对照才换主体；收束回收开场'
+      : '色板和道具材质保持一致，允许按句图解',
     sourceHash: hash,
     validation: {
       status: 'warning',
-      warnings: hasPerson ? ['模型未返回可验证角色，已使用文案保守角色卡'] : ['文案未识别到明确人物，未创建角色卡'],
+      warnings: characters.length
+        ? ['模型未返回可验证角色，已使用文案候选角色卡']
+        : ['文案未识别到可指认主体，未创建角色卡'],
       checkedAt: Date.now()
     },
     generatedAt: Date.now()
@@ -312,14 +374,29 @@ function characterMentionsMale(character: VisualCharacter): boolean {
 /** Validate model output against explicit narration facts before it becomes a hard constraint. */
 export function validateVisualBibleAgainstNarration(
   bible: VisualBible | null | undefined,
-  narration: string
+  narration: string,
+  opts?: { title?: string; intentNotes?: string; candidates?: CastCandidate[] }
 ): string[] {
-  if (!bible || bible.mode !== 'story') return [];
+  if (!bible) return [];
   const hints = extractNarrativeCharacterHints(narration);
+  const candidates = opts?.candidates || bible.candidates || extractCastCandidates({
+    narration,
+    title: opts?.title || bible.logline,
+    intentNotes: opts?.intentNotes
+  });
   const warnings: string[] = [];
-  if (!hints.hasPerson && bible.characters.length > 0) {
+  if (!candidates.length && !hints.hasPerson && bible.characters.length > 0) {
     warnings.push('文案没有明确人物，但画面圣经创建了角色卡');
   }
+  bible.characters.forEach((character) => {
+    if (character.locked) return;
+    const hit = character.candidateId
+      ? candidates.find((item) => item.id === character.candidateId)
+      : candidateByName(candidates, character.name);
+    if (candidates.length && !hit) {
+      warnings.push(`角色「${character.name}」不在文案候选名单中`);
+    }
+  });
   if (hints.gender === 'male' && bible.characters.some(characterMentionsFemale)) {
     warnings.push('文案出现男性线索，但角色卡包含女性外形/服装描述');
   }
@@ -348,12 +425,62 @@ export function validateVisualBibleAgainstNarration(
 /** Repair only unpinned model output; user-locked cards remain visible and are warned on. */
 export function groundVisualBible(
   bible: VisualBible,
-  narration: string
+  narration: string,
+  opts?: { title?: string; intentNotes?: string; candidates?: CastCandidate[] }
 ): VisualBible {
-  const warnings = validateVisualBibleAgainstNarration(bible, narration);
+  const candidates = opts?.candidates || bible.candidates || extractCastCandidates({
+    narration,
+    title: opts?.title || bible.logline,
+    intentNotes: opts?.intentNotes
+  });
+  const filtered = {
+    ...bible,
+    castPolicy: 'evidence' as const,
+    candidates,
+    characters: bible.characters.filter((character) => {
+      if (character.locked) return true;
+      if (!candidates.length) return false;
+      return Boolean(
+        (character.candidateId && candidates.some((item) => item.id === character.candidateId))
+        || candidateByName(candidates, character.name)
+      );
+    }).map((character) => {
+      const hit = character.candidateId
+        ? candidates.find((item) => item.id === character.candidateId)
+        : candidateByName(candidates, character.name);
+      if (!hit) return character;
+      return {
+        ...character,
+        candidateId: character.candidateId || hit.id,
+        kind: character.kind || hit.kind,
+        sourceEvidence: character.sourceEvidence?.length ? character.sourceEvidence : hit.evidence
+      };
+    })
+  };
+  const withCast = filtered.characters.length === 0 && candidates.length > 0 && !bible.pinned
+    ? {
+      ...filtered,
+      ...(() => {
+        const filled = fallbackVisualBible({
+          narration,
+          genre: bible.mode === 'story' ? '故事' : null,
+          title: opts?.title || bible.logline,
+          intentNotes: opts?.intentNotes,
+          candidates
+        });
+        return {
+          characters: filled.characters,
+          locations: filtered.locations.length ? filtered.locations : filled.locations,
+          continuityRule: filled.continuityRule,
+          logline: filtered.logline || filled.logline
+        };
+      })()
+    }
+    : filtered;
+  const warnings = validateVisualBibleAgainstNarration(withCast, narration, { ...opts, candidates });
   if (warnings.length === 0) {
     return {
-      ...bible,
+      ...withCast,
       validation: { status: 'ok', warnings: [], checkedAt: Date.now() }
     };
   }
@@ -363,8 +490,8 @@ export function groundVisualBible(
   if (hardWarnings.length === 0) {
     const hints = extractNarrativeCharacterHints(narration);
     const enriched = {
-      ...bible,
-      characters: bible.characters.map((character) => {
+      ...withCast,
+      characters: withCast.characters.map((character) => {
         const nameGrounded = hints.names.includes(character.name) || GENERIC_CHARACTER_NAMES.has(character.name);
         if (!nameGrounded || character.sourceEvidence?.length || !hints.evidence.length) return character;
         return {
@@ -380,14 +507,20 @@ export function groundVisualBible(
       validation: { status: remainingWarnings.length ? 'warning' : 'ok', warnings: remainingWarnings, checkedAt: Date.now() }
     };
   }
-  const hasUserLock = bible.pinned || bible.characters.some((item) => item.locked || item.refs.length > 0);
+  const hasUserLock = bible.pinned || bible.characters.some((item) => item.locked);
   if (hasUserLock) {
     return {
-      ...bible,
+      ...withCast,
       validation: { status: 'warning', warnings, checkedAt: Date.now() }
     };
   }
-  const safe = fallbackVisualBible({ narration, genre: bible.mode === 'story' ? '故事' : null, title: bible.logline });
+  const safe = fallbackVisualBible({
+    narration,
+    genre: bible.mode === 'story' ? '故事' : null,
+    title: opts?.title || bible.logline,
+    intentNotes: opts?.intentNotes,
+    candidates
+  });
   const repairedWarnings = validateVisualBibleAgainstNarration(safe, narration);
   return {
     ...bible,
@@ -410,26 +543,39 @@ export function visualBibleHasBlockingWarnings(bible?: VisualBible | null): bool
   if (!bible?.validation?.warnings?.length) return false;
   return bible.validation.warnings.some((warning) => {
     if (/没有明确人物，但画面圣经创建了角色卡/.test(warning) && bible.characters.length === 0) return false;
-    return /没有明确人物，但画面圣经创建了角色卡|出现男性线索，但角色卡包含女性|出现女性线索，但角色卡包含男性|年龄被写成成年|人物「.+」没有出现在角色卡证据中|文案职业「.+」未进入角色卡/.test(warning);
+    return /没有明确人物，但画面圣经创建了角色卡|出现男性线索，但角色卡包含女性|出现女性线索，但角色卡包含男性|年龄被写成成年|人物「.+」没有出现在角色卡证据中|文案职业「.+」未进入角色卡|不在文案候选名单中/.test(warning);
   });
 }
 
 function carryCharacter(previous: VisualCharacter | undefined, incoming: VisualCharacter): VisualCharacter {
-  if (!previous) return incoming;
-  const refs = incoming.refs.length ? incoming.refs : previous.refs;
-  const keepIdentity = previous.locked || refs.length > 0;
+  if (!previous) return { ...incoming, refs: incoming.refs || [], locked: Boolean(incoming.locked) };
+  if (previous.locked) {
+    return {
+      ...previous,
+      candidateId: incoming.candidateId || previous.candidateId,
+      kind: previous.kind || incoming.kind,
+      sourceEvidence: incoming.sourceEvidence?.length ? incoming.sourceEvidence : previous.sourceEvidence,
+      confidence: incoming.confidence ?? previous.confidence
+    };
+  }
   return {
     ...incoming,
-    refs,
-    locked: incoming.locked || previous.locked || refs.length > 0,
-    name: keepIdentity && previous.name ? previous.name : incoming.name,
-    look: keepIdentity && previous.look ? previous.look : incoming.look,
-    wardrobe: keepIdentity && previous.wardrobe ? previous.wardrobe : incoming.wardrobe,
-    ageBand: keepIdentity && previous.ageBand ? previous.ageBand : incoming.ageBand,
-    signature: keepIdentity ? (previous.signature || incoming.signature) : incoming.signature,
-    sourceEvidence: incoming.sourceEvidence?.length ? incoming.sourceEvidence : previous.sourceEvidence,
-    confidence: incoming.confidence ?? previous.confidence,
-    seedHint: previous.seedHint || incoming.seedHint
+    refs: [],
+    locked: false
+  };
+}
+
+export function lockedCastOnly(bible?: VisualBible | null): VisualBible | null {
+  if (!bible) return null;
+  if (bible.pinned) return bible;
+  const locked = (bible.characters || []).filter((item) => item.locked);
+  const lockedLoc = (bible.locations || []).filter((item) => item.locked);
+  if (locked.length === 0 && lockedLoc.length === 0) return null;
+  return {
+    ...bible,
+    characters: locked,
+    locations: lockedLoc.length ? lockedLoc : bible.locations,
+    pinned: false
   };
 }
 
@@ -448,7 +594,7 @@ export function mergeVisualBible(previous: VisualBible | null | undefined, incom
   });
   previous.characters.forEach((prev) => {
     if (used.has(prev.id)) return;
-    if (prev.locked || prev.refs.length > 0) characters.unshift(prev);
+    if (prev.locked) characters.unshift(prev);
   });
   const lockedLoc = new Map(previous.locations.filter((item) => item.locked).map((item) => [item.id, item]));
   const locations = incoming.locations.map((item) => lockedLoc.get(item.id) || item);
@@ -465,6 +611,49 @@ export function bibleHasCast(bible?: VisualBible | null): boolean {
   return Boolean(bible && bible.characters.length > 0);
 }
 
+function characterNameTokens(character: VisualCharacter): string[] {
+  const raw = [character.name, character.kind === 'creature' ? character.name : '']
+    .join(' ')
+    .toLowerCase();
+  const tokens = raw.split(/[\s/_-]+/).map((item) => item.trim()).filter((item) => item.length >= 2);
+  const extras: string[] = [];
+  if (/\bfox\b/i.test(character.name)) extras.push('fox');
+  if (/\bcrocodile\b/i.test(character.name) || /鳄/.test(character.name)) extras.push('crocodile', 'croc');
+  if (/\brabbit\b/i.test(character.name) || /兔/.test(character.name)) extras.push('rabbit', 'bunny');
+  return Array.from(new Set([...tokens, ...extras]));
+}
+
+export function speakerCharacterFromLine(
+  bible: VisualBible | null | undefined,
+  line: string
+): VisualCharacter | null {
+  if (!bibleHasCast(bible) || !line) return null;
+  const text = line.toLowerCase();
+  const quoted = /["“']([^"”']{2,120})["”']/.exec(line);
+  const quote = (quoted?.[1] || '').toLowerCase();
+  const quoteAt = quoted ? line.toLowerCase().indexOf(quote) : -1;
+  const afterQuote = quoteAt >= 0 ? text.slice(quoteAt + quote.length) : '';
+  const beforeQuote = quoteAt >= 0 ? text.slice(0, quoteAt) : '';
+  const attribution = `${afterQuote} ${beforeQuote}`.trim() || text;
+  const scored = bible!.characters.map((character) => {
+    const tokens = characterNameTokens(character);
+    const inAttribution = tokens.some((token) => attribution.includes(token));
+    const inQuote = quote ? tokens.some((token) => quote.includes(token)) : false;
+    const inLine = tokens.some((token) => text.includes(token));
+    let score = 0;
+    if (inAttribution && quote) score += 6;
+    if (inLine) score += 2;
+    if (inQuote) score -= 3;
+    return { character, score };
+  }).filter((item) => item.score > 0);
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.character || null;
+}
+
+export function isQuotedDialogueLine(line: string): boolean {
+  return /["“'][^"”']{2,120}["”']/.test(line || '');
+}
+
 export function leadCharacter(bible?: VisualBible | null): VisualCharacter | null {
   if (!bible) return null;
   return bible.characters.find((item) => item.role === 'lead') || bible.characters[0] || null;
@@ -472,7 +661,7 @@ export function leadCharacter(bible?: VisualBible | null): VisualCharacter | nul
 
 export function bibleContractForPrompt(bible?: VisualBible | null): string {
   if (!bible) return '';
-  if (bible.mode === 'expository') {
+  if (!bibleHasCast(bible) && bible.mode === 'expository') {
     return [
       '【画面文法】说明型：允许按句图解，不要硬拍成一部戏。',
       bible.paletteLock ? `【色板锁定】${bible.paletteLock}` : '',
@@ -498,7 +687,44 @@ export function bibleContractForPrompt(bible?: VisualBible | null): string {
 }
 
 export function stripBiblePrefix(intent: string): string {
-  return String(intent || '').replace(BIBLE_PREFIX, '').trim();
+  let text = String(intent || '').trim();
+  if (!text) return '';
+  const chunks = text.split('【').map((chunk, index) => (index === 0 ? chunk : `【${chunk}`));
+  const kept: string[] = [];
+  for (const chunk of chunks) {
+    const trimmed = chunk.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith('【')) {
+      const close = trimmed.indexOf('】');
+      if (close > 0) {
+        let rest = trimmed.slice(close + 1);
+        for (const label of CONTINUITY_PEEL) {
+          const at = rest.indexOf(label);
+          if (at >= 0) rest = rest.slice(at + label.length);
+        }
+        rest = rest.replace(/^[。,，、.\s]+/, '').trim();
+        if (rest && !rest.startsWith('【')) kept.push(rest);
+        continue;
+      }
+    }
+    let rest = trimmed;
+    for (const label of CONTINUITY_PEEL) {
+      if (rest.startsWith(label)) rest = rest.slice(label.length).replace(/^[。,，、.\s]+/, '').trim();
+    }
+    if (rest) kept.push(rest);
+  }
+  text = kept.join('。').replace(/^[。,，、.\s]+/, '').trim();
+  const parts = text.split(/[。]/).map((part) => part.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const part of parts) {
+    const key = part.replace(/\s+/g, ' ').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    if (CONTINUITY_PEEL.includes(part)) continue;
+    seen.add(key);
+    unique.push(part);
+  }
+  return unique.join('。');
 }
 
 function continuityLabel(kind?: VisualContinuity): string {
@@ -525,15 +751,62 @@ export function assignShotContinuity(shots: ForecastShot[], bible?: VisualBible 
         : index === 0
           ? 'new-info'
           : 'same-space';
+    const spoken = shot.sliceText || shot.narration || '';
+    const speaker = speakerCharacterFromLine(bible, spoken);
     const useSupport = isContrast && support;
-    const characterIds = bible.mode === 'story'
-      ? (useSupport ? [support.id] : lead ? [lead.id] : [])
-      : [];
+    const characterIds = speaker
+      ? [speaker.id]
+      : (lead ? (useSupport ? [support!.id] : [lead.id]) : []);
     return {
       ...shot,
       characterIds,
-      locationId: loc && bible.mode === 'story' && continuity !== 'contrast' ? loc.id : shot.locationId,
+      locationId: loc && characterIds.length && continuity !== 'contrast' ? loc.id : shot.locationId,
       continuity
+    };
+  });
+}
+
+export function applyOccupancyAfterCoverage(shots: ForecastShot[], bible?: VisualBible | null): ForecastShot[] {
+  if (!bible) return shots;
+  const lead = leadCharacter(bible);
+  const support = bible.characters.find((item) => item.role === 'support') || null;
+  const validIds = new Set(bible.characters.map((item) => item.id));
+  return shots.map((shot, index) => {
+    const prev = shots[index - 1];
+    const contrast = shot.splitReason?.includes('对照') || shot.continuity === 'contrast' || shot.voRole === 'continue';
+    let characterIds = Array.isArray(shot.characterIds)
+      ? shot.characterIds.filter((id) => validIds.has(id))
+      : [];
+    const spoken = shot.sliceText || shot.narration || '';
+    const speaker = speakerCharacterFromLine(bible, spoken);
+    const dialogue = isQuotedDialogueLine(spoken);
+    if (shot.coverageJob === 'insert' && !dialogue) {
+      characterIds = [];
+    } else if (speaker) {
+      characterIds = [speaker.id];
+    } else if (!characterIds.length && lead) {
+      if (shot.coverageJob === 'hook' || shot.coverageJob === 'establish' || shot.coverageJob === 'callback' || shot.function === 'cta') {
+        characterIds = [lead.id];
+      } else if (contrast && support) {
+        characterIds = [support.id];
+      }
+    }
+    if (
+      prev
+      && characterIds.length
+      && (prev.characterIds || []).length
+      && characterIds[0] !== prev.characterIds![0]
+      && shot.coverageJob !== 'contrast'
+      && !contrast
+      && !speaker
+    ) {
+      characterIds = prev.characterIds || [];
+    }
+    const loc = bible.locations[0] || null;
+    return {
+      ...shot,
+      characterIds,
+      locationId: loc && characterIds.length && shot.continuity !== 'contrast' ? loc.id : (characterIds.length ? shot.locationId : undefined)
     };
   });
 }
@@ -541,14 +814,16 @@ export function assignShotContinuity(shots: ForecastShot[], bible?: VisualBible 
 export function composeShotVisualIntent(shot: ForecastShot, bible?: VisualBible | null): string {
   const action = stripBiblePrefix(shot.visualIntent || shot.sliceText || shot.narration || '');
   if (!bible) return action;
-  if (bible.mode === 'expository') {
+  if (!bibleHasCast(bible) && bible.mode === 'expository') {
     return action;
   }
   const hasExplicitCharacterSelection = Array.isArray(shot.characterIds);
   const char = hasExplicitCharacterSelection
     ? bible.characters.find((item) => shot.characterIds?.includes(item.id))
     : leadCharacter(bible);
-  const loc = bible.locations.find((item) => item.id === shot.locationId) || bible.locations[0];
+  const loc = shot.locationId
+    ? bible.locations.find((item) => item.id === shot.locationId)
+    : (char ? bible.locations[0] : null);
   const parts: string[] = [];
   if (char) {
     parts.push(`【${char.name}】${char.look}，${char.wardrobe}${char.signature ? `，带着${char.signature}` : ''}`);
@@ -573,7 +848,7 @@ export function stampShotsWithBible(shots: ForecastShot[], bible?: VisualBible |
 }
 
 export function characterLockEnglish(bible?: VisualBible | null, characterIds?: string[]): string {
-  if (!bible || bible.mode !== 'story' || bible.characters.length === 0) {
+  if (!bible || !bibleHasCast(bible)) {
     return bible?.paletteLock ? `Keep a consistent color grade: ${bible.paletteLock}.` : '';
   }
   const chars = (Array.isArray(characterIds)
@@ -648,12 +923,12 @@ export function continuityShortLabel(kind?: VisualContinuity): string {
 
 export function bibleSummary(bible?: VisualBible | null): string {
   if (!bible) return '还没有画面圣经';
-  if (bible.mode === 'expository') return bible.paletteLock || '说明型：按句图解，锁色板';
-  const char = leadCharacter(bible);
+  if (!bibleHasCast(bible)) return bible.paletteLock || '纯图解：锁色板，不编主角';
+  const names = bible.characters.map((item) => item.name).filter(Boolean);
   const loc = bible.locations[0];
-  return [char ? char.name : '', loc ? loc.name : '', bible.motif?.name]
+  return [...names, loc ? loc.name : '', bible.motif?.name]
     .filter(Boolean)
-    .join(' · ') || bible.logline || '叙事圣经';
+    .join(' · ') || bible.logline || '有班底';
 }
 
 export function characterHasRef(character?: VisualCharacter | null): boolean {
@@ -677,7 +952,7 @@ export function setCharacterRef(bible: VisualBible, characterId: string, ref: Vi
     ...bible,
     characters: bible.characters.map((item) => (
       item.id === characterId
-        ? { ...item, refs: [ref], locked: true }
+        ? { ...item, refs: [ref] }
         : item
     ))
   };
@@ -696,15 +971,16 @@ export function characterForShot(
   bible?: VisualBible | null,
   characterIds?: string[]
 ): VisualCharacter | null {
-  if (!bible || bible.mode !== 'story') return null;
+  if (!bibleHasCast(bible)) return null;
   if (Array.isArray(characterIds)) {
-    return bible.characters.find((item) => characterIds.includes(item.id)) || null;
+    if (characterIds.length === 0) return null;
+    return bible!.characters.find((item) => characterIds.includes(item.id)) || null;
   }
   return leadCharacter(bible);
 }
 
 export function storyLeadMissingRef(bible?: VisualBible | null): boolean {
-  if (!bible || bible.mode !== 'story') return false;
+  if (!bibleHasCast(bible)) return false;
   const lead = leadCharacter(bible);
   return Boolean(lead && !characterHasRef(lead));
 }

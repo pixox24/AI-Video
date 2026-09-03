@@ -141,6 +141,9 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
               {clip.characterIds && clip.characterIds.length > 0 && (
                 <span className="text-[9px] text-amber-400/80 border border-amber-500/20 rounded px-1">角色锁</span>
               )}
+              {(!clip.characterIds || clip.characterIds.length === 0) && (
+                <span className="text-[9px] text-zinc-500">本镜无人</span>
+              )}
             </div>
             <p className="text-[11px] text-zinc-400 truncate">{voText || '暂无旁白'}</p>
           </div>
@@ -160,6 +163,12 @@ export const StoryboardClipCard: React.FC<StoryboardClipCardProps> = ({
               {failed && <span className="text-[10px] text-rose-300">失败</span>}
               {clip.referenceStatus === 'accepted' && <span className="text-[9px] text-emerald-300/80">参考图已送达</span>}
               {clip.referenceStatus === 'dropped' && <span className="text-[9px] text-rose-300">参考图未采用</span>}
+              {clip.characterIds && clip.characterIds.length > 0 && (
+                <span className="text-[9px] text-amber-400/80 border border-amber-500/20 rounded px-1">角色锁</span>
+              )}
+              {(!clip.characterIds || clip.characterIds.length === 0) && (
+                <span className="text-[9px] text-zinc-500">本镜无人</span>
+              )}
             </div>
             <div className="flex items-center gap-0.5">
               <button type="button" title="润色旁白" onClick={onPolish} disabled={polishing || !clip.narration || clip.voRole === 'continue'} className="p-1 hover:text-amber-400 disabled:opacity-20 text-zinc-500 cursor-pointer">
