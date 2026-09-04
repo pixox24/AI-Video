@@ -355,13 +355,13 @@ resp: { ok, pack: StylePack, warning? } | { ok: false, error }
 
 ## 9. 生图阶段
 
-P0：
+P0：`compileImagePrompt` 把 StylePack 折进 **Details**（介质 / 色板 / 光 / 材质），**不含镜头焦段**——机位只写在 Scene。hook 镜在 Details 末尾补一句主次光（世界背光轮廓 + 正面补光保表情）。DNA 里的 `Transparent` 会洗成 layered shadows，避免被理解成透明背景。
 
 ```
 finalPrompt = clip.visualPrompt
 ```
 
-若 `visualPrompt` 未含 render.quality 中的核心介质词，才追加 `render.medium + render.lighting`（逗号拼接，≤ 12 词）。
+若 `visualPrompt` 未含 render.quality 中的核心介质词，才追加 `render.medium + render.lighting`（逗号拼接，≤ 12 词）。GPT Image / `promptProfile=gpt-image` 保持五段结构，不再叠 cinematic enhancer。
 
 删除：
 

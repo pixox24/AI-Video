@@ -394,7 +394,7 @@ export function VoiceDesignWorkshop({
         </button>
       </div>
       <p className="text-[11px] text-zinc-500 leading-relaxed">
-        可以写描述生成新音色，也可以粘贴已有 voice_id 上架。绑定当前 3.0 模型，Plus / Flash 不能混用。
+        可以写描述生成新音色，也可以粘贴已有 voice_id 上架。设计音色会绑定当前 3.0 模型；换成 CosyVoice 后会从货架收起，不会丢失。
       </p>
       {open && (
         <div className="space-y-2.5 pt-1">
@@ -443,7 +443,7 @@ export function VoiceDesignWorkshop({
               <div className="text-[10px] text-zinc-500">或从描述生成新音色</div>
               {!canDesign && (
                 <p className="text-[10px] text-amber-200/80 leading-relaxed">
-                  当前模型只支持导入已有音色；声音描述生成请切换到 Audio 3.0 Plus 或 Flash。
+                  当前模型只支持导入已有音色；声音描述生成请切换到 Audio 3.0 Plus 或 Flash。已有设计音色不会丢失。
                 </p>
               )}
               <div className="flex flex-wrap gap-1">

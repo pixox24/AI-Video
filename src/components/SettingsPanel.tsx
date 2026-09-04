@@ -41,7 +41,7 @@ import {
   resolveTtsApi,
   isCustomTtsProvider
 } from '../utils/presets';
-import { defaultVoiceForModel, resolveBailianTtsEndpoint, resolveTtsVoiceId } from '../utils/ttsCatalog';
+import { defaultVoiceForModel, lastTtsVoiceForModel, resolveBailianTtsEndpoint, resolveTtsVoiceId } from '../utils/ttsCatalog';
 import { StyleDnaModule, StyleLibraryEntry, StylePack } from '../types';
 import {
   DEFAULT_STYLE_VISION_API,
@@ -1536,10 +1536,11 @@ function TtsProviderSection({
                       type="button"
                       onClick={() => {
                         const nextModel = model.id;
+                        const nextApi = { ...ttsApi, model: nextModel };
                         updateTtsApi({
                           model: nextModel,
                           endpoint: resolveBailianTtsEndpoint(ttsApi.endpoint, nextModel),
-                          voice: resolveTtsVoiceId(ttsApi.voice, { ...ttsApi, model: nextModel })
+                          voice: lastTtsVoiceForModel(nextModel) || resolveTtsVoiceId(ttsApi.voice, nextApi)
                         });
                       }}
                       className={`text-left rounded-xl border px-3.5 py-3 cursor-pointer transition-all ${

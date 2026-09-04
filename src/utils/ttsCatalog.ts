@@ -1,6 +1,8 @@
 import { AudioConfig, CustomTtsApiConfig, ProjectSettings, VideoProject } from '../types';
-import { resolveTtsApi } from './presets';
-import { findDesignedVoice } from './voiceLibrary';
+import { resolveTtsApi, TTS_PROVIDER_PRESETS } from './presets';
+import { findDesignedVoice, loadVoiceLibrary } from './voiceLibrary';
+
+const LAST_VOICE_KEY = 'ai_video_tts_last_voice';
 
 export interface TtsVoiceOption {
   id: string;
@@ -296,6 +298,54 @@ export function remapLibraryVoiceForModel(voiceId: string, model?: string | null
   return remapAudio30BaseVoice(voiceId, model);
 }
 
+export function ttsModelLabel(model?: string | null): string {
+  const id = (model || '').trim();
+  if (!id) return '当前模型';
+  for (const preset of TTS_PROVIDER_PRESETS) {
+    const hit = preset.popularModels.find((item) => item.id === id);
+    if (hit) return hit.label;
+  }
+  if (isQwenAudioPlusModel(id)) return 'Audio 3.0 Plus';
+  if (isQwenAudioFlashModel(id)) return 'Audio 3.0 Flash';
+  if (isCosyVoiceModel(id)) return 'CosyVoice';
+  return id;
+}
+
+export function ttsModelFamilyHint(model?: string | null): string | undefined {
+  if (isCosyVoiceModel(model)) return '这一族共用同一套系统音色';
+  return undefined;
+}
+
+function loadLastVoices(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LAST_VOICE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[0] === 'string' && typeof entry[1] === 'string' && entry[1].trim().length > 0)
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function persistLastTtsVoice(model: string | null | undefined, voiceId: string | null | undefined) {
+  const key = (model || '').trim();
+  const voice = (voiceId || '').trim();
+  if (!key || !voice) return;
+  try {
+    const next = { ...loadLastVoices(), [key]: voice };
+    localStorage.setItem(LAST_VOICE_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+export function lastTtsVoiceForModel(model?: string | null): string {
+  return loadLastVoices()[(model || '').trim()] || '';
+}
+
 export function shelfVoiceForModel(
   voiceId: string,
   model?: string | null,
@@ -307,10 +357,38 @@ export function shelfVoiceForModel(
   if (voicesForTtsModel(model).some((item) => item.id === id)) return { ok: true, voiceId: id };
   const remapped = remapLibraryVoiceForModel(id, model);
   if (remapped) return { ok: true, voiceId: remapped };
-  if ((targetModel || '').trim() && (targetModel || '').trim() === (model || '').trim()) {
+  const bound = (targetModel || '').trim();
+  if (bound && bound === (model || '').trim()) return { ok: true, voiceId: id };
+  if (
+    bound
+    && isCosyVoiceModel(model)
+    && isCosyVoiceModel(bound)
+    && !isEnrollmentVoiceId(id)
+    && !isDesignedVoiceId(id)
+  ) {
     return { ok: true, voiceId: id };
   }
   return { ok: false, voiceId: id };
+}
+
+export function designedVoiceUsableOnModel(
+  voiceId: string,
+  model?: string | null,
+  targetModel?: string | null
+): boolean {
+  return shelfVoiceForModel(voiceId, model, targetModel).ok;
+}
+
+export function archivedDesignedVoiceCount(model?: string | null): number {
+  return loadVoiceLibrary().filter((item) => !designedVoiceUsableOnModel(item.voiceId, model, item.targetModel)).length;
+}
+
+function usableVoiceOnModel(voiceId: string | null | undefined, model?: string | null): string {
+  const trimmed = (voiceId || '').trim();
+  if (!trimmed) return '';
+  const designed = findDesignedVoice(trimmed);
+  const usable = shelfVoiceForModel(trimmed, model, designed?.targetModel);
+  return usable.ok ? usable.voiceId : '';
 }
 
 function mapVoiceToModel(voiceId: string, model?: string | null): string {
@@ -464,16 +542,43 @@ export function applyVoiceToProject(project: Pick<VideoProject, 'audio' | 'setti
   const resolved = libraryHit
     ? shelfVoiceForModel(libraryHit.voiceId, api.model, libraryHit.targetModel)
     : { ok: false, voiceId: trimmed };
-  const voice = resolved.ok
-    ? resolved.voiceId
-    : libraryHit && libraryHit.status === 'ok'
-      ? libraryHit.voiceId
-      : resolveTtsVoiceId(trimmed, api);
+  if (libraryHit && !resolved.ok) {
+    return { audio: project.audio, settings: project.settings };
+  }
+  const voice = resolved.ok ? resolved.voiceId : resolveTtsVoiceId(trimmed, api);
+  persistLastTtsVoice(api.model, voice);
   return {
     audio: { ...project.audio, voiceCharacter: voice },
     settings: {
       ...project.settings,
       customTtsApi: { ...api, voice }
+    }
+  };
+}
+
+export function applyTtsModelAndVoice(
+  project: Pick<VideoProject, 'audio' | 'settings'>,
+  model: string,
+  voiceId?: string | null
+): { audio: AudioConfig; settings: ProjectSettings } {
+  const prevApi = resolveTtsApi(project.settings.customTtsApi);
+  persistLastTtsVoice(prevApi.model, project.audio.voiceCharacter);
+  const nextApi = resolveTtsApi({
+    ...prevApi,
+    provider: 'bailian',
+    enabled: true,
+    model,
+    endpoint: resolveBailianTtsEndpoint(prevApi.endpoint, model)
+  });
+  const preferred = usableVoiceOnModel(voiceId, nextApi.model)
+    || usableVoiceOnModel(lastTtsVoiceForModel(nextApi.model), nextApi.model)
+    || resolveTtsVoiceId(project.audio.voiceCharacter, nextApi);
+  persistLastTtsVoice(nextApi.model, preferred);
+  return {
+    audio: { ...project.audio, voiceCharacter: preferred },
+    settings: {
+      ...project.settings,
+      customTtsApi: { ...nextApi, voice: preferred }
     }
   };
 }
@@ -489,7 +594,10 @@ export function applyTtsSettingsToProject(
   const modelChanged = prevApi.model !== nextApi.model;
 
   if (providerChanged || modelChanged) {
-    const voice = resolveTtsVoiceId(project.audio.voiceCharacter, nextApi);
+    persistLastTtsVoice(prevApi.model, project.audio.voiceCharacter);
+    const remembered = usableVoiceOnModel(lastTtsVoiceForModel(nextApi.model), nextApi.model);
+    const voice = remembered || resolveTtsVoiceId(project.audio.voiceCharacter, nextApi);
+    persistLastTtsVoice(nextApi.model, voice);
     const endpoint =
       nextApi.provider === 'bailian' ? resolveBailianTtsEndpoint(nextApi.endpoint, nextApi.model) : nextApi.endpoint;
     return {
@@ -503,11 +611,13 @@ export function applyTtsSettingsToProject(
 
   if (nextApi.provider !== 'edge' && nextApi.voice && nextApi.voice !== project.audio.voiceCharacter) {
     const voice = resolveTtsVoiceId(nextApi.voice, nextApi);
+    persistLastTtsVoice(nextApi.model, voice);
     return {
       audio: { ...project.audio, voiceCharacter: voice },
       settings
     };
   }
 
+  persistLastTtsVoice(nextApi.model, project.audio.voiceCharacter);
   return { audio: project.audio, settings };
 }

@@ -220,8 +220,10 @@ function normalizeCharacter(raw: any, index: number): VisualCharacter | null {
     name: name || (role === 'lead' ? '主角' : `角色${index + 1}`),
     role,
     ageBand: kind === 'object' ? '不适用' : cleanText(raw?.ageBand, '成年'),
-    look: kind === 'object' ? look : (look || '可被连续认出的外形，全片不换发型'),
-    wardrobe: kind === 'object' ? wardrobe : (wardrobe || '全片不换装'),
+    look: kind === 'object'
+      ? look
+      : (look || '可被连续认出的体型、头型、主色与一个固定识别点，全片不换发型'),
+    wardrobe: kind === 'object' ? wardrobe : (wardrobe || '全片固定同一套服装，不换装'),
     signature: cleanText(raw?.signature) || undefined,
     sourceEvidence: asStringArray(raw?.sourceEvidence || raw?.evidence).slice(0, 4),
     confidence: Number.isFinite(Number(raw?.confidence))
@@ -377,15 +379,16 @@ export function fallbackVisualBible(opts: {
     candidateId: candidate.id,
     ageBand: candidate.kind === 'person' ? (hints.ageBand || '文案未明确年龄') : '不适用',
     look: candidate.kind === 'creature'
-      ? `拟人化的${candidate.name}，全片保持同一外形`
+      ? `拟人化的${candidate.name}：可指认体型、头/吻形状、眼睛颜色、主色与腹部颜色、一个固定识别点；全片同一外形`
       : candidate.kind === 'object'
         ? `${candidate.name}的可指认外观，全片保持同一实物，不更换`
-        : `${hints.gender === 'male' ? '男性' : hints.gender === 'female' ? '女性' : '性别不擅自推断'}，外形由用户确认；全片不改五官和发型`,
+        : `${hints.gender === 'male' ? '男性' : hints.gender === 'female' ? '女性' : '性别不擅自推断'}，可指认体型、发型、五官与一个固定识别点；全片不改五官和发型`,
     wardrobe: candidate.kind === 'object'
       ? '保持同一外观'
       : hints.occupations.length
-        ? `符合${hints.occupations[0]}身份的服装，全片不换装`
-        : '全片不换装',
+        ? `符合${hints.occupations[0]}身份的固定服装，全片不换装`
+        : '全片固定同一套服装，不换装',
+    signature: candidate.kind === 'object' ? undefined : '一个跨镜头可认出的固定识别点（斑纹、配饰或道具）',
     sourceEvidence: candidate.evidence.slice(0, 4),
     confidence: 0.6,
     locked: false,
@@ -768,7 +771,7 @@ export function bibleContractForPrompt(bible?: VisualBible | null): string {
     ].filter(Boolean).join('\n');
   }
   const chars = bible.characters.map((item) => (
-    `- ${item.id} ${item.name}（${item.role}，${item.ageBand}）：外形 ${item.look}；服装 ${item.wardrobe}${item.signature ? `；识别物 ${item.signature}` : ''}${item.sourceEvidence?.length ? `；文案依据「${item.sourceEvidence[0]}」` : ''}。禁止无故换脸、换发型、换装。`
+    `- ${item.id} ${item.name}（${item.role}，${item.ageBand}）：外形 ${item.look}；服装 ${item.wardrobe}${item.signature ? `；识别物 ${item.signature}` : ''}${item.sourceEvidence?.length ? `；文案依据「${item.sourceEvidence[0]}」` : ''}。外形必须落到体型、头型、主色、识别点，禁止只写物种名。禁止无故换脸、换发型、换装。`
   ));
   const locs = bible.locations.map((item) => (
     `- ${item.id} ${item.name}：${item.look}；时间 ${item.timeOfDay}`
@@ -949,33 +952,53 @@ export function stampShotsWithBible(shots: ForecastShot[], bible?: VisualBible |
   }));
 }
 
-export function characterLockEnglish(bible?: VisualBible | null, characterIds?: string[]): string {
+export function characterIdentityEnglish(character: VisualCharacter): string {
+  if (character.kind === 'object') {
+    return `OBJECT LOCK — same real object "${character.name}": ${character.look}. It may change doneness/stage across shots, but never swap in a different specimen.`;
+  }
+  const kind = character.kind === 'creature' ? 'anthropomorphic character' : 'character';
+  const signature = character.signature ? `, identifying detail: ${character.signature}` : '';
+  return `CHARACTER LOCK — same ${kind} "${character.name}": ${character.look}, wearing ${character.wardrobe}${signature}. Same face, body proportions, colors, and outfit in every frame.`;
+}
+
+export function resolveShotCharacter(
+  bible: VisualBible | null | undefined,
+  clip: { coverageJob?: string; characterIds?: string[] },
+  spoken = ''
+): VisualCharacter | null {
+  if (!bible) return null;
+  if (clip.coverageJob === 'insert' && (!clip.characterIds || clip.characterIds.length === 0)) return null;
+  const speaker = speakerCharacterFromLine(bible, spoken);
+  const hasExplicitCharacterSelection = Array.isArray(clip.characterIds);
+  const char = speaker
+    || (hasExplicitCharacterSelection
+      ? bible.characters.find((item) => clip.characterIds!.includes(item.id))
+      : (bible.mode === 'expository' && !bible.characters.length ? null : leadCharacter(bible)));
+  return char || null;
+}
+
+export function shotCharacterLockEnglish(
+  bible: VisualBible | null | undefined,
+  clip: { coverageJob?: string; characterIds?: string[] },
+  spoken = ''
+): string {
   if (!bible) return '';
   if (bible.mode === 'expository' && !bibleHasNarrativeCast(bible)) {
-    const objects = (Array.isArray(characterIds)
-      ? bible.characters.filter((item) => characterIds.includes(item.id) && item.kind === 'object')
+    const objects = (Array.isArray(clip.characterIds)
+      ? bible.characters.filter((item) => clip.characterIds!.includes(item.id) && item.kind === 'object')
       : bible.characters.filter((item) => item.kind === 'object')
     );
-    const objectLines = objects.map((item) => (
-      `keep the same real object "${item.name}": ${item.look}. It may change doneness/stage across shots, but never swap in a different specimen.`
-    ));
-    const palette = bible.paletteLock ? `Keep a consistent color grade: ${bible.paletteLock}.` : '';
-    return [palette, ...objectLines].filter(Boolean).join(' ');
+    return objects.map((item) => characterIdentityEnglish(item)).join(' ');
   }
-  if (!bibleHasNarrativeCast(bible)) {
-    return bible?.paletteLock ? `Keep a consistent color grade: ${bible.paletteLock}.` : '';
-  }
-  const chars = (Array.isArray(characterIds)
-    ? bible.characters.filter((item) => characterIds.includes(item.id))
-    : [leadCharacter(bible)]
-  ).filter((item): item is VisualCharacter => Boolean(item) && item.kind !== 'object');
-  const lines = chars.map((item) => (
-    `same character identity "${item.name}": ${item.look}, wearing ${item.wardrobe}. Do not change face, hair, age, or clothes.`
-  ));
-  if (bible.locations[0]) {
-    lines.push(`same location "${bible.locations[0].name}": ${bible.locations[0].look}, ${bible.locations[0].timeOfDay}.`);
-  }
-  return lines.join(' ');
+  const char = resolveShotCharacter(bible, clip, spoken);
+  if (!char) return '';
+  if (char.kind === 'object' && bible.mode === 'expository') return characterIdentityEnglish(char);
+  return characterIdentityEnglish(char);
+}
+
+export function characterLockEnglish(bible?: VisualBible | null, characterIds?: string[]): string {
+  if (!bible) return '';
+  return shotCharacterLockEnglish(bible, { characterIds }, '');
 }
 
 export function applyBibleToChineseIntent(

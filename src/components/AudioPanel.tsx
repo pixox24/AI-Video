@@ -1,14 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio, Loader2 } from 'lucide-react';
+import { Volume2, Music, Mic, Play, Pause, Upload, Sparkles, Check, VolumeX, RotateCcw, Trash2, Sliders, Radio, Loader2, ChevronDown } from 'lucide-react';
 import { AudioConfig, CustomTtsApiConfig, DesignedVoiceEntry, ScriptGenre, StoryboardClip, OutroConfig } from '../types';
 import { BGM_GENRE_ORDER, BGM_TRACKS, DEFAULT_BGM_TRACK_ID, bgmTracksForGenre } from '../utils/presets';
 import { audioEngine } from '../utils/audioEngine';
 import { GENRE_PACKS } from '../utils/scriptBudget';
 import {
   customVoiceBelongsToModel,
+  designedVoiceUsableOnModel,
   isEnrollmentVoiceId,
   shelfVoiceForModel,
   ttsEngineLabel,
+  ttsModelFamilyHint,
+  ttsModelLabel,
   ttsSourceKey,
   ttsSupportsSpeechRate,
   ttsVoicesForApi
@@ -67,6 +70,7 @@ interface AudioPanelProps {
   onPauseTimeline?: () => void;
   ttsApi?: CustomTtsApiConfig;
   onVoiceChange?: (voiceId: string) => void;
+  onAdoptVoiceModel?: (model: string, voiceId: string) => void;
   onOpenSettings?: () => void;
   onSentenceGapChange?: (seconds: number) => void;
   clips?: StoryboardClip[];
@@ -87,6 +91,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   onPauseTimeline,
   ttsApi,
   onVoiceChange,
+  onAdoptVoiceModel,
   onOpenSettings,
   onSentenceGapChange,
   clips = [],
@@ -102,6 +107,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
   const [customAudioUrl, setCustomAudioUrl] = useState<string | null>(null);
   const [genreFilter, setGenreFilter] = useState<ScriptGenre | 'all'>(recommendedGenre || 'all');
   const [voiceLibrary, setVoiceLibrary] = useState<DesignedVoiceEntry[]>(() => loadVoiceLibrary());
+  const [archiveOpen, setArchiveOpen] = useState(false);
 
   const voiceCharacters = ttsVoicesForApi(ttsApi);
   const supportsSpeechRate = ttsSupportsSpeechRate(ttsApi);
@@ -118,8 +124,8 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
     : null;
   const visibleVoices = customVoice ? [...voiceCharacters, customVoice] : voiceCharacters;
   const currentModel = (ttsApi?.model || '').trim();
-  const matchingDesigned = voiceLibrary.filter((item) => item.targetModel === currentModel);
-  const mismatchedDesigned = voiceLibrary.filter((item) => item.targetModel !== currentModel);
+  const matchingDesigned = voiceLibrary.filter((item) => designedVoiceUsableOnModel(item.voiceId, currentModel, item.targetModel));
+  const mismatchedDesigned = voiceLibrary.filter((item) => !designedVoiceUsableOnModel(item.voiceId, currentModel, item.targetModel));
   const selectedDesigned = voiceLibrary.find((item) => item.voiceId === config.voiceCharacter);
   const designedBlocked = Boolean(
     (selectedDesigned && selectedDesigned.status !== 'ok')
@@ -129,6 +135,8 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       && !shelfVoiceForModel(config.voiceCharacter, currentModel, selectedDesigned?.targetModel).ok
     )
   );
+  const modelTitle = ttsModelLabel(currentModel);
+  const familyHint = ttsModelFamilyHint(currentModel);
 
   const refreshVoiceLibrary = () => setVoiceLibrary(loadVoiceLibrary());
 
@@ -147,7 +155,25 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
       return;
     }
     const usable = shelfVoiceForModel(entry.voiceId, currentModel, entry.targetModel);
-    selectVoice(usable.ok ? usable.voiceId : entry.voiceId);
+    if (!usable.ok) {
+      showStatusToast(`这条音色绑定 ${ttsModelLabel(entry.targetModel)}，当前模型用不了`, { tone: 'warn', id: 'voice-design' });
+      return;
+    }
+    selectVoice(usable.voiceId);
+  };
+
+  const handleAdoptArchived = (entry: DesignedVoiceEntry) => {
+    if (entry.status !== 'ok') {
+      showStatusToast(entry.status === 'deploying' ? '这条音色还在审核' : '这条音色不可用', { tone: 'warn', id: 'voice-design' });
+      return;
+    }
+    if (!onAdoptVoiceModel) {
+      onOpenSettings?.();
+      showStatusToast(`先把设置里的模型换成 ${ttsModelLabel(entry.targetModel)}`, { tone: 'warn', id: 'voice-design' });
+      return;
+    }
+    onAdoptVoiceModel(entry.targetModel, entry.voiceId);
+    showStatusToast(`已切到 ${ttsModelLabel(entry.targetModel)} 并选用「${entry.title}」`, { tone: 'ok', id: 'voice-design' });
   };
 
   const stopVoicePreview = () => {
@@ -470,7 +496,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
             )}
             {designedBlocked && (
               <div className="text-[11px] text-amber-200/90 leading-relaxed">
-                当前设计音色还不能成片：要等审核通过，且必须和设置里的 3.0 模型一致。
+                当前设计音色还不能成片：要等审核通过，且必须属于当前模型。
               </div>
             )}
             {narrationError && (
@@ -504,11 +530,11 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
 
           <p className="text-[11px] text-zinc-500">点卡片选用，点圆形播放键试听。试听不必先选中。</p>
 
-          {(matchingDesigned.length > 0 || mismatchedDesigned.length > 0) && (
+          {matchingDesigned.length > 0 && (
             <div className="space-y-2">
-              <div className="text-[11px] text-zinc-400">我的音色</div>
+              <div className="text-[11px] text-zinc-400">我的音色 · {modelTitle}</div>
               <div className="grid grid-cols-1 gap-2">
-                {[...matchingDesigned, ...mismatchedDesigned].map((entry) => {
+                {matchingDesigned.map((entry) => {
                   const usableVoice = shelfVoiceForModel(entry.voiceId, currentModel, entry.targetModel);
                   const isSelected = config.voiceCharacter === entry.voiceId || config.voiceCharacter === usableVoice.voiceId;
                   const usable = entry.status === 'ok';
@@ -532,7 +558,7 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-semibold text-xs text-zinc-100">{entry.title}</span>
                             <span className="text-[10px] px-1.5 py-0.2 bg-amber-500/20 text-amber-400 rounded-full font-medium">
-                              {entry.targetModel.includes('plus') ? 'Plus' : 'Flash'}
+                              {ttsModelLabel(entry.targetModel)}
                             </span>
                             {entry.status !== 'ok' && (
                               <span className="text-[10px] text-amber-300">
@@ -575,7 +601,83 @@ export const AudioPanel: React.FC<AudioPanelProps> = ({
             </div>
           )}
 
-          <div className="text-[11px] text-zinc-400">系统音色</div>
+          {mismatchedDesigned.length > 0 && (
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setArchiveOpen((prev) => !prev)}
+                className="w-full flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 cursor-pointer"
+              >
+                <ChevronDown className={`w-3 h-3 transition-transform ${archiveOpen ? '' : '-rotate-90'}`} />
+                <span>另有 {mismatchedDesigned.length} 条音色绑定其他模型</span>
+              </button>
+              {archiveOpen && (
+                <div className="grid grid-cols-1 gap-2">
+                  {mismatchedDesigned.map((entry) => (
+                    <div
+                      key={entry.id}
+                      id={`voice-archived-${entry.id}`}
+                      className="p-2.5 rounded-xl border border-dashed border-[#2b2b38] bg-[#16161c] text-zinc-500"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-xs text-zinc-300">{entry.title}</span>
+                            <span className="text-[10px] px-1.5 py-0.2 bg-zinc-800 text-zinc-400 rounded-full font-medium">
+                              {ttsModelLabel(entry.targetModel)}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-zinc-500 line-clamp-2">{entry.prompt}</div>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          {entry.previewAudioUrl ? (
+                            <VoicePlayButton
+                              active={previewingVoiceId === entry.voiceId && isPlayingPreviewVoice}
+                              busy={previewBusyVoiceId === entry.voiceId}
+                              onClick={(event) => handlePreviewVoice(entry.voiceId, entry.previewAudioUrl, event)}
+                            />
+                          ) : (
+                            <span title="需先切回绑定模型" className="w-8 h-8 rounded-full border border-[#2b2b38] text-zinc-600 flex items-center justify-center">
+                              <Play className="w-3.5 h-3.5" />
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const next = removeDesignedVoice(entry.id);
+                              setVoiceLibrary(next);
+                              showStatusToast('已从货架移除', { tone: 'ok', id: 'voice-design' });
+                            }}
+                            className="w-8 h-8 rounded-full border border-[#3a3a4a] text-zinc-500 hover:text-rose-300 flex items-center justify-center cursor-pointer"
+                            aria-label="从货架移除"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleAdoptArchived(entry)}
+                        className="mt-2 text-[10px] text-amber-300 hover:text-amber-200 cursor-pointer"
+                      >
+                        切到该模型并选用
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+            <span>系统音色 · {modelTitle}</span>
+            {familyHint && (
+              <span title={familyHint} className="text-[10px] text-zinc-600 normal-case tracking-normal">
+                共用目录
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-1 gap-2">
             {visibleVoices.map((vc) => {
               const isSelected = config.voiceCharacter === vc.id;

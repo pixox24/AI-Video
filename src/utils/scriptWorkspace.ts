@@ -801,7 +801,8 @@ export function forecastToClips(
   previousClips: StoryboardClip[] = [],
   visualBible?: VisualBible | null,
   sentenceGap: number = SENTENCE_GAP_DEFAULT,
-  outroHold: number = 0
+  outroHold: number = 0,
+  genre?: ScriptGenre | string | null
 ): StoryboardClip[] {
   const pack = stylePack || presetStylePack(visualStyle);
   const prevByKey = new Map<string, StoryboardClip>();
@@ -857,6 +858,7 @@ export function forecastToClips(
       pack,
       bible: visualBible,
       aspectRatio,
+      genre,
       clipIndex: index,
       clipCount: shots.length
     });

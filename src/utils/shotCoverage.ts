@@ -78,7 +78,7 @@ export function assignRuleCoverage(
     const first = index === 0;
     const last = index === shots.length - 1;
     const contrast = isContrastShot(shot);
-    const firstSize: ShotSize = mode === 'story' ? 'cu' : 'ecu';
+    const firstSize: ShotSize = mode === 'story' ? 'ms' : 'ecu';
 
     let shotSize: ShotSize = 'ms';
     let cameraAngle: CameraAngle = 'eye';
@@ -88,6 +88,8 @@ export function assignRuleCoverage(
 
     if (first) {
       shotSize = firstSize;
+      cameraAngle = 'eye';
+      shotComposition = 'thirds';
       coverageJob = 'hook';
       coverageLink = 'advance';
     } else if (last) {
@@ -101,7 +103,7 @@ export function assignRuleCoverage(
       coverageLink = 'contrast-cut';
       shotComposition = prev?.shotComposition === 'negative-left' ? 'negative-right' : 'negative-left';
     } else if (index === 1) {
-      shotSize = differentSize(prev?.shotSize, mode === 'story' ? 'ms' : 'insert');
+      shotSize = differentSize(prev?.shotSize, mode === 'story' ? 'ws' : 'insert');
       coverageJob = mode === 'story' ? 'establish' : 'insert';
       coverageLink = 'same-axis';
     } else if (/["“'][^"”']{2,120}["”']/.test(shot.sliceText || shot.narration || '')) {
@@ -174,18 +176,36 @@ export function applyLlmCoverage(
   const stamped = shots.map((shot, index) => {
     const hit = byId.get(shot.id) || incoming[index];
     if (!hit) return shot;
-    const dialogue = /["“'][^"”']{2,120}["”']/.test(shot.sliceText || shot.narration || '');
+    const first = index === 0;
+    const dialogue = !first && /["“'][^"”']{2,120}["”']/.test(shot.sliceText || shot.narration || '');
     return {
       ...shot,
       shotSize: asEnum(dialogue ? 'cu' : hit.shotSize, SIZES, shot.shotSize || 'ms'),
       cameraAngle: asEnum(hit.cameraAngle, ANGLES, shot.cameraAngle || 'eye'),
       shotComposition: asEnum(hit.shotComposition, COMPS, shot.shotComposition || 'thirds'),
-      coverageJob: asEnum(dialogue ? 'evidence' : hit.coverageJob, JOBS, shot.coverageJob || 'evidence'),
+      coverageJob: asEnum(first ? 'hook' : (dialogue ? 'evidence' : hit.coverageJob), JOBS, shot.coverageJob || 'evidence'),
       coverageLink: asEnum(hit.coverageLink, LINKS, shot.coverageLink || 'advance'),
       coverageSource: 'llm' as CoverageSource
     };
   });
-  const sized = stamped.map((shot, index, list) => {
+  const mode = coverageModeFromBible(bible);
+  const clamped = stamped.map((shot, index): ForecastShot => {
+    if (index !== 0) return shot;
+    if (mode === 'story') {
+      return {
+        ...shot,
+        shotSize: shot.shotSize === 'ws' || shot.shotSize === 'insert' ? 'ms' : (shot.shotSize || 'ms'),
+        cameraAngle: shot.cameraAngle || 'eye',
+        coverageJob: 'hook'
+      };
+    }
+    return {
+      ...shot,
+      shotSize: shot.shotSize === 'ws' || shot.shotSize === 'ms' || shot.shotSize === 'insert' ? 'ecu' : (shot.shotSize || 'ecu'),
+      coverageJob: 'hook'
+    };
+  });
+  const sized = clamped.map((shot, index, list) => {
     if (index === 0) return shot;
     const prev = list[index - 1];
     if (shot.shotSize !== prev.shotSize) return shot;
@@ -215,12 +235,18 @@ export function coverageFramingLine(shot: {
   coverageJob?: CoverageJob;
 }): string {
   if (!shot.shotSize) return '';
+  const sizeLabel = shot.shotSize === 'ms' && shot.coverageJob === 'hook'
+    ? '中远景全身'
+    : SHOT_SIZE_LABEL[shot.shotSize];
   const parts = [
-    SHOT_SIZE_LABEL[shot.shotSize],
+    sizeLabel,
     shot.cameraAngle ? CAMERA_ANGLE_LABEL[shot.cameraAngle] : '',
     shot.shotComposition ? COMPOSITION_LABEL[shot.shotComposition] : '',
     shot.coverageJob ? COVERAGE_JOB_LABEL[shot.coverageJob] : ''
   ].filter(Boolean);
+  if (shot.coverageJob === 'hook' && (shot.shotSize === 'ms' || shot.shotSize === 'cu')) {
+    parts.push('主体约占画面高度一半，上三分留纵深');
+  }
   return parts.join('，');
 }
 

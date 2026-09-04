@@ -120,6 +120,7 @@ export async function migrateBrowserCopiesToLibrary(): Promise<number> {
 
   try {
     localStorage.setItem(MIGRATED_KEY, '1');
+    localStorage.removeItem('ai_video_saved_projects');
   } catch {
     // ignore
   }

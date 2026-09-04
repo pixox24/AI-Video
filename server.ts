@@ -1372,6 +1372,7 @@ ${budgetRule}
 - 第一拍 function 必须是 hook
 - 最后一拍 function 必须是 cta 或 reveal
 - visualIntent 必须写看得见的因果，禁止「很有氛围」「电影感」
+- 第一拍 visualIntent 必须同时有：主体足够大、正在做什么、一个尚未完成的可见异常（光种、未落下的动作、环境开始回应）。禁止只写「张嘴/很有氛围」，禁止把场景说明书再写一遍。
 - visualIntent 必须服从下面的美术世界契约（服饰、道具、建筑、时代）
 - 若体裁是故事或情绪：visualIntent 必须反复画同一个可指认的人（发型+服装锁定），优先待在同一空间；收束拍回收钩子的构图或物件。不要每拍换主角。
 - 若体裁是科普/教程/带货/反常识：允许按句图解，但色板和道具材质保持一致。
@@ -1633,7 +1634,8 @@ app.post("/api/script/split-spans", async (req, res) => {
 ${sentenceRule}
 - 一句默认 1 张图；只有新主体/对照翻转才 2 张；最多 3 张。
 - startRatio/endRatio 覆盖 0 到 1，sliceText 必须是互不重复的前后两截，合起来等于该句。禁止两张图都写成后半句。
-- visualIntent 写看得见的画面，不要写情绪形容词。
+- visualIntent 写看得见的画面，不要写情绪形容词，不要抄口播原句。
+- 第一格 visualIntent 必须是未完成的可见事件：主体足够大、正在做什么、一个尚未释放的异常（环境开始回应即可）。禁止只写张嘴或风景说明书。
 - 若下面有画面圣经：叙事型必须反复使用圣经里的角色和场景；说明型只锁色板，允许图解。
 
 ${bibleContractForPrompt(normalizeVisualBible(visualBible, visualBibleModeForGenre(genre)))}
@@ -1680,6 +1682,9 @@ app.post("/api/script/coverage", async (req, res) => {
 - 输出 shots 必须与输入同 id、同数量、同顺序。禁止增删格、禁止改口播。
 - 相邻两格 shotSize 不能相同。
 - 第一格 coverageJob=hook。最后一格 coverageJob=callback，构图尽量贴近第一格。
+- 叙事/情绪首镜 shotSize 必须是 ms（中远景全身，角色轮廓可读），cameraAngle=eye，shotComposition=thirds。禁止用 ws 开场。
+- 说明/科普首镜 shotSize 必须是 ecu 或 cu。
+- 叙事第二格优先 ws + establish；说明第二格优先 insert。
 - 对照格 coverageJob=contrast，coverageLink=contrast-cut。
 - 有角色卡时：叙事镜可出同一主体，insert 必须是无人机制/物件特写，不要把角色塞进 insert。
 - 无角色卡时：不要编男主走来走去；第二格优先 insert。
@@ -1738,6 +1743,8 @@ app.post("/api/script/visual-bible", async (req, res) => {
  硬规则：
 - mode 仍用 ${mode}（只影响机位先验，不决定能不能有角色）
 - 角色 0 到 3 个。只能从候选认领；人物/拟人动物用 kind=person / creature。
+- person/creature 的 look 必须写出：体型、头/吻形状、眼睛颜色、主色+腹色或肤色、一个独特识别点。禁止只写物种名或「拟人化的 X」。
+- signature 必填：跨镜头可认出的斑纹、配饰或固定道具。wardrobe 必须是全片固定的一套服装。
 - object（被加工对象/道具）不作为角色卡；它的外观与状态一致性写进 paletteLock / continuityRule。
 - 每张卡必须有 candidateId、sourceEvidence（原文短句）。不得发明讲解员/女孩/用户。
 - 场景 0 到 2 个。有角色时至少 1 个场景。
@@ -2284,6 +2291,7 @@ app.post("/api/style/rewrite-shots", async (req, res) => {
 请把下面每一镜改写成看得见的画面节拍。不要写生图英文长 prompt，不要把风格 DNA、参考图里的人或街道写进节拍。
 每一镜只要：setting（在哪）、subject（看见谁/什么）、action（在干什么）。chineseVisualPrompt 用中文把三要素连成一句。
 口播是台词，不是画面：把「别等到眼睛干涩」写成「黑暗里一双盯着手机的干涩眼睛」，不要抄口播原句。
+第一镜/钩子镜的 action 必须是未完成的可见前兆，不要只写张嘴或情绪词。setting 不要把世界观说明书再写一遍。
 若上文是风格基因：只在心里记住画法，节拍里不要出现厚涂/色板/参考图物体。若有画面圣经：叙事型同一角色同一空间；说明型不要编主角。不要改口播。
 ${bibleContractForPrompt(normalizeVisualBible(visualBible))}
 ${shotLines}
@@ -2421,7 +2429,7 @@ app.post("/api/visual/generate", async (req, res) => {
     const scenePrompt = extras.length ? `${cleanedPrompt}, ${extras.join(", ")}` : cleanedPrompt;
     const refName = String(characterRef?.name || "").trim();
     const refLock = characterRef?.url
-      ? `Keep the exact same person as the reference photo${refName ? ` (${refName})` : ""}: same face, hair, age, and clothing. This is a new camera shot — change pose, framing, and background to match the scene. Do not copy the reference composition.`
+      ? `Image 1 is a new-camera identity lock${refName ? ` for ${refName}` : ""}: keep the same face and costume, change pose and framing to this shot, do not copy the reference composition.`
       : "";
     const finalPrompt = refLock
       ? (keepStructure ? `${refLock}\n${scenePrompt}` : `${refLock} Scene: ${scenePrompt}`)

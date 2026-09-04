@@ -679,7 +679,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         existingClips,
         workspace.visualBible,
         sentenceGap,
-        outroHold
+        outroHold,
+        workspace.genrePackId
       );
       // 双语字幕：写入分镜时顺手把缺失/过期的翻译行按当前旁白补齐
       const translated = await translateClipsSecondary(clips, customLlmApi, scriptLanguage);

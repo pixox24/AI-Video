@@ -206,8 +206,8 @@ export function hydrateActiveStylePack(settings?: ProjectSettings | null): Style
   return presetStylePack(style);
 }
 
-export function renderLine(pack: StylePack): string {
-  return [pack.render.medium, pack.render.lighting, pack.render.lens, pack.render.quality]
+export function renderLine(pack: StylePack, opts?: { omitLens?: boolean }): string {
+  return [pack.render.medium, pack.render.lighting, opts?.omitLens ? '' : pack.render.lens, pack.render.quality]
     .map((item) => item.trim())
     .filter(Boolean)
     .join(', ');
@@ -246,9 +246,18 @@ function joinParts(parts: Array<string | undefined>): string {
   return parts.map((item) => (item || '').trim()).filter(Boolean).join(', ');
 }
 
-export function dnaTransferText(pack: StylePack): string {
+function sanitizeShadowLanguage(text: string): string {
+  let next = text
+    .replace(/\btransparent background\b/gi, 'fully painted scene')
+    .replace(/transparent,?\s*layered shadows rather than solid black/gi, 'semi-transparent layered shadow shapes, no pure black')
+    .replace(/(?<![-\w])Transparent(?![-\w])/g, 'semi-transparent layered shadow shapes, no pure black');
+  next = next.replace(/(?:semi-)?transparent layered shadow shapes, no pure black(?:(?:,\s*)?layered shadows rather than solid black)?/gi, 'semi-transparent layered shadow shapes, no pure black');
+  return next.replace(/\s+/g, ' ').trim();
+}
+
+export function dnaTransferText(pack: StylePack, opts?: { omitLens?: boolean }): string {
   const dna = pack.dna;
-  if (!dna) return renderLine(pack);
+  if (!dna) return renderLine(pack, opts);
   const mods = new Set(activeTransferModules(pack));
   const chunks: string[] = [];
   if (mods.has('rendering') && dna.rendering) {
@@ -266,7 +275,7 @@ export function dnaTransferText(pack: StylePack): string {
   if (mods.has('lighting') && dna.lighting) {
     chunks.push(joinParts([dna.lighting.key, dna.lighting.rim, dna.lighting.shadows, dna.lighting.atmosphere]));
   }
-  if (mods.has('lens') && dna.lens) {
+  if (!opts?.omitLens && mods.has('lens') && dna.lens) {
     chunks.push(joinParts([dna.lens.camera, dna.lens.depth, dna.lens.negativeSpace]));
   }
   if (mods.has('material') && dna.material) {
@@ -278,7 +287,21 @@ export function dnaTransferText(pack: StylePack): string {
   if (mods.has('mood') && dna.mood && dna.mood.length > 0) {
     chunks.push(`mood: ${dna.mood.join(', ')}`);
   }
-  return chunks.filter(Boolean).join('; ') || renderLine(pack);
+  return sanitizeShadowLanguage(chunks.filter(Boolean).join('; ') || renderLine(pack, opts));
+}
+
+export function styleDetailsForShot(
+  pack: StylePack,
+  shot?: { coverageJob?: string; shotSize?: string }
+): string {
+  const omitLens = Boolean(shot?.shotSize);
+  const base = usesStyleDna(pack)
+    ? dnaTransferText(pack, { omitLens }).replace(/;\s*/g, '; ')
+    : renderLine(pack, { omitLens });
+  const hookLight = shot?.coverageJob === 'hook'
+    ? 'Primary light: luminous rim from the world behind the subject; soft fill on the face so expression reads. No direct sunbeam, no hard cast shadows'
+    : '';
+  return sanitizeShadowLanguage([base, hookLight].filter(Boolean).join('; '));
 }
 
 export function contentLockText(pack: StylePack): string {

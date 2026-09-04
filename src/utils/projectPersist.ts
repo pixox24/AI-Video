@@ -157,34 +157,79 @@ export function subscribePersistStatus(listener: PersistListener): () => void {
   };
 }
 
-export function readLocalCurrentProject(): VideoProject | null {
+export interface CurrentProjectPointer {
+  id: string;
+  updatedAt: number;
+  saveRevision?: number;
+}
+
+function parseLocalCache(): { pointer: CurrentProjectPointer | null; legacy: VideoProject | null } {
   try {
     const raw = localStorage.getItem(PROJECT_KEY);
-    if (!raw) return null;
+    if (!raw) return { pointer: null, legacy: null };
     const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.clips)) return null;
-    return parsed as VideoProject;
+    if (parsed && Array.isArray(parsed.clips)) {
+      return { pointer: null, legacy: parsed as VideoProject };
+    }
+    if (parsed && typeof parsed.id === 'string') {
+      return {
+        pointer: {
+          id: parsed.id,
+          updatedAt: Number(parsed.updatedAt) || 0,
+          saveRevision: Number(parsed.saveRevision) || undefined
+        },
+        legacy: null
+      };
+    }
   } catch {
-    return null;
+    // ignore corrupt cache
   }
+  return { pointer: null, legacy: null };
+}
+
+export function readCurrentProjectPointer(): CurrentProjectPointer | null {
+  return parseLocalCache().pointer;
+}
+
+export function readLocalCurrentProject(): VideoProject | null {
+  return parseLocalCache().legacy;
 }
 
 export function writeCurrentProject(project: VideoProject): boolean {
+  const pointer: CurrentProjectPointer = {
+    id: project.id,
+    updatedAt: project.updatedAt,
+    saveRevision: project.saveRevision
+  };
   try {
-    localStorage.setItem(PROJECT_KEY, JSON.stringify(projectForPersist(project)));
+    localStorage.setItem(PROJECT_KEY, JSON.stringify(pointer));
     persistWarned = false;
     return true;
   } catch (err) {
-    console.warn('[Project Persist] Failed to save current project:', err);
-    if (!persistWarned) {
-      persistWarned = true;
-      showStatusToast('浏览器缓存写不下这份工程。磁盘保存仍会继续，刷新以服务器上的工程为准。', {
-        tone: 'warn',
-        id: 'persist',
-        durationMs: 4200
-      });
+    console.warn('[Project Persist] Pointer cache write failed:', err);
+    try {
+      localStorage.removeItem(PROJECT_KEY);
+    } catch {
+      // ignore
     }
     return false;
+  }
+}
+
+export function clearLegacyProjectCache(): void {
+  try {
+    const raw = localStorage.getItem(PROJECT_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.clips)) {
+      localStorage.removeItem(PROJECT_KEY);
+    }
+  } catch {
+    try {
+      localStorage.removeItem(PROJECT_KEY);
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -368,17 +413,11 @@ export function createBlankProject(from?: VideoProject): VideoProject {
   };
 }
 
-export function writeSavedProjects(projects: VideoProject[]): boolean {
+export function writeSavedProjects(_projects: VideoProject[]): boolean {
   try {
-    localStorage.setItem(SAVED_KEY, JSON.stringify(projects.map(projectForPersist)));
-    return true;
-  } catch (err) {
-    console.warn('[Project Persist] Failed to save project list:', err);
-    showStatusToast('工程列表缓存失败。工程文件仍在磁盘，可从工程库打开。', {
-      tone: 'warn',
-      id: 'persist-library',
-      durationMs: 4200
-    });
-    return false;
+    localStorage.removeItem(SAVED_KEY);
+  } catch {
+    // ignore
   }
+  return true;
 }

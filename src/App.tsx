@@ -6,7 +6,7 @@ import { generateImageWithRetry } from './utils/imageGenerateClient';
 import { classifyImageError } from './utils/imageGenerateRetry';
 import { defaultFontIdForScript, resolveSecondarySubtitleFontId, resolveSubtitleFontId, studioFontById } from './utils/subtitleFonts';
 import { normalizeScriptLanguage } from './utils/scriptLanguage';
-import { applyTtsSettingsToProject, applyVoiceToProject, bailianTtsConcurrency, customVoiceBelongsToModel, isEnrollmentVoiceId, resolveTtsVoiceId, ttsSourceKey } from './utils/ttsCatalog';
+import { applyTtsModelAndVoice, applyTtsSettingsToProject, applyVoiceToProject, archivedDesignedVoiceCount, bailianTtsConcurrency, designedVoiceUsableOnModel, resolveTtsVoiceId, ttsModelLabel, ttsSourceKey } from './utils/ttsCatalog';
 import { findDesignedVoice } from './utils/voiceLibrary';
 import { hydrateActiveStylePack, localRewriteClipPrompt, presetStylePack, renderLine } from './utils/stylePack';
 import { beatToChinese, clipImagePromptArgs } from './utils/imagePrompt';
@@ -72,6 +72,8 @@ import {
   rememberSaveRevision,
   RESET_TO_SAMPLE_KEY,
   stashPreviousProject,
+  readLocalCurrentProject,
+  clearLegacyProjectCache,
   writeCurrentProject,
   writeDiskCurrentProject
 } from './utils/projectPersist';
@@ -146,18 +148,7 @@ function hydratePersistedProject(raw: VideoProject): VideoProject {
 }
 
 export default function App() {
-  // Initialize with the rich Space Exploration sample project
-  const [project, setProject] = useState<VideoProject>(() => {
-    const saved = localStorage.getItem('ai_video_current_project');
-    if (saved) {
-      try {
-        return hydratePersistedProject(JSON.parse(saved));
-      } catch {
-        return hydratePersistedProject(SAMPLE_PROJECTS[0]);
-      }
-    }
-    return hydratePersistedProject(SAMPLE_PROJECTS[0]);
-  });
+  const [project, setProject] = useState<VideoProject>(() => hydratePersistedProject(SAMPLE_PROJECTS[0]));
 
   const [libraryItems, setLibraryItems] = useState<ProjectLibraryItem[]>([]);
 
@@ -319,16 +310,16 @@ export default function App() {
 
     const ttsForVoice = resolveTtsApi(project.settings.customTtsApi);
     const designed = findDesignedVoice(project.audio.voiceCharacter);
-    if (designed && (designed.status !== 'ok' || designed.targetModel !== ttsForVoice.model)) {
+    if (designed && designed.status !== 'ok') {
       const message = designed.status === 'deploying'
         ? '这条设计音色还在审核，通过后再生成旁白'
-        : '当前设计音色和设置里的 3.0 模型不一致，换模型或换一条音色';
+        : '这条设计音色不可用';
       setNarrationError(message);
       showStatusToast(message, { tone: 'warn', id: 'narration' });
       return;
     }
-    if (isEnrollmentVoiceId(project.audio.voiceCharacter) && !customVoiceBelongsToModel(project.audio.voiceCharacter, ttsForVoice.model)) {
-      const message = '这条设计音色不属于当前 3.0 模型';
+    if (designed && !designedVoiceUsableOnModel(designed.voiceId, ttsForVoice.model, designed.targetModel)) {
+      const message = `这条设计音色绑定 ${ttsModelLabel(designed.targetModel)}，先切回该模型或换一条音色`;
       setNarrationError(message);
       showStatusToast(message, { tone: 'warn', id: 'narration' });
       return;
@@ -614,17 +605,11 @@ export default function App() {
 
     (async () => {
       try {
+        clearLegacyProjectCache();
         if (skipDisk) return;
         const disk = await fetchDiskCurrentProject();
         if (cancelled) return;
-        const local = (() => {
-          try {
-            const raw = localStorage.getItem('ai_video_current_project');
-            return raw ? JSON.parse(raw) as VideoProject : null;
-          } catch {
-            return null;
-          }
-        })();
+        const local = readLocalCurrentProject();
         if (disk?.project) {
           const live = projectRef.current;
           const userTouched = live.updatedAt !== bootUpdatedAtRef.current;
@@ -1577,6 +1562,7 @@ export default function App() {
           onPauseTimeline={() => setIsPlaying(false)}
           ttsApi={resolveTtsApi(project.settings.customTtsApi)}
           onVoiceChange={(voiceId) => updateProject(applyVoiceToProject(project, voiceId))}
+          onAdoptVoiceModel={(model, voiceId) => updateProject(applyTtsModelAndVoice(project, model, voiceId))}
           onOpenSettings={() => setActiveTab('settings')}
           onSentenceGapChange={handleSentenceGapChange}
           outro={resolveOutro(project.settings)}
@@ -1620,7 +1606,21 @@ export default function App() {
       {activeTab === 'settings' ? (
         <SettingsPanel
           settings={project.settings}
-          onChange={(settings) => updateProject(applyTtsSettingsToProject(project, settings))}
+          onChange={(settings) => {
+            const prevModel = resolveTtsApi(project.settings.customTtsApi).model;
+            const next = applyTtsSettingsToProject(project, settings);
+            updateProject(next);
+            const nextApi = resolveTtsApi(next.settings.customTtsApi);
+            if (prevModel !== nextApi.model) {
+              const archived = archivedDesignedVoiceCount(nextApi.model);
+              showStatusToast(
+                archived > 0
+                  ? `系统音色已换成 ${ttsModelLabel(nextApi.model)}。${archived} 条设计音色已收起，切回原模型可用。`
+                  : `系统音色已换成 ${ttsModelLabel(nextApi.model)}`,
+                { tone: 'ok', id: 'tts-model' }
+              );
+            }
+          }}
           hasStoryboardClips={project.clips.length >= 2}
           onApplyStyleToExistingClips={handleApplyStyleToAllClips}
           onLibraryChange={setStyleLibrary}
