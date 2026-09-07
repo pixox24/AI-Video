@@ -80,6 +80,24 @@ const ZH_NAME_STOP = new Set([
   '逊丛林', '针不停', '子请去', '着条码', '不停打', '请去参'
 ]);
 
+/** 明确是称谓/关系/泛指，不是「可指认的人名」。角色可由这些词指代，但不应被当作名卡。 */
+const ZH_NOT_NAME = new Set([
+  '老板', '老师', '老婆', '老公', '老妈', '老爸', '老人', '老大', '老外', '老爷爷', '老大爷',
+  '小姐', '小孩', '小弟', '小妹', '妹子', '大哥', '大姐', '大叔', '大婶', '阿姨', '叔叔', '爷爷',
+  '奶奶', '外公', '外婆', '弟弟', '妹妹', '哥哥', '姐姐', '孩子', '朋友', '同学', '同事', '邻居',
+  '妈妈', '爸爸', '母亲', '父亲', '亲戚', '路人', '用户', '观众', '博主', '主播', '讲解员',
+  '店员', '医生', '护士', '顾客', '当事人'
+]);
+
+/** 以人称/疑问/指代词开头的 2-3 字串几乎不可能是人名。 */
+const PRONOUN_LEAD = /^(我|你|您|他|她|它|咱|谁|哪|这|那|怎|什|几|俩|们|此|其)/;
+
+/** 三字串以方位/处所词收尾时，多半是把「马路上/教室里」当成名字。 */
+const LOCATION_TAIL3 = /(上|里|中|前|后|旁|边|内|外|处|地)$/;
+
+/** 明显像动作/虚词开头的碎片，不属于任何真实人名。 */
+const FRAGMENT_LEAD = /^(只|为|就|都|还|也|想|要|会|能|该|再|又|遍|走|跑|看|听|说|问|找|寻|到|去|来|在|是|有|把|被|从|向|往|给|跟|和|对|于|过|很|更|最|太|刚|已|着|了|做|写|读|唱|喝|吃|画|拍|打|翻|放|拿|掏|递|迷|变|长|闻|尝|戴|穿|送|回|停下|一直|一路|不停)/;
+
 /** 仅保留强人物动作，避免「参加/发现」吞掉前后杂词。 */
 const PERSON_ACTION_ZH =
   '迷了路|迷了|掏出|递上|看着|喝了|打了个|打了|变成|长出|冲进|说|问|答|喊|跑|走|冲|掏|递|喝|看';
@@ -188,31 +206,49 @@ function hasChineseSurname(name: string): boolean {
 
 function isLikelyChinesePersonName(name: string, requireSurname = false): boolean {
   if (!/^[\u4e00-\u9fa5]{2,3}$/.test(name)) return false;
-  if (ZH_NAME_STOP.has(name)) return false;
+  if (ZH_NAME_STOP.has(name) || ZH_NOT_NAME.has(name)) return false;
   if (name.endsWith('地') || name.endsWith('的') || name.endsWith('得')) return false;
+  if (PRONOUN_LEAD.test(name)) return false;
+  if (name.length === 3 && LOCATION_TAIL3.test(name)) return false;
   if (isCreatureWord(name) || isFoodCreature(name)) return false;
   if (OBJECT_HINT.test(name)) return false;
   if (/第[一二三四五六七八九十百]+|今天|明天|昨天|现在|然后|接着|于是|因为|所以|但是|如果|虽然/.test(name)) {
     return false;
   }
-  if (requireSurname && !hasChineseSurname(name)) return false;
-  return true;
+  if (FRAGMENT_LEAD.test(name)) return false;
+  if (hasChineseSurname(name)) return true;
+  if (/^[小阿][\u4e00-\u9fa5]$/.test(name)) return true;
+  return !requireSurname;
 }
 
-/** 并列主语：许野和苏黎在… / 许野、苏黎走进… */
+/** 并列主语：许野和苏黎在… / 许野、苏黎走进…（两侧都必须是可信人名）。 */
 function pairedChineseNames(text: string): string[] {
   const names: string[] = [];
+  const push = (candidate: string | undefined) => {
+    if (candidate && isLikelyChinesePersonName(candidate, true)) names.push(candidate);
+  };
   const patterns = [
-    /([\u4e00-\u9fa5]{2,3})(?:和|与|跟|同)([\u4e00-\u9fa5]{2,3})(?:在|于|到|去|来|走进|冲进|迷了|发现|看着|被|把)/g,
-    /([\u4e00-\u9fa5]{2,3})[、，,]([\u4e00-\u9fa5]{2,3})(?:在|于|到|去|来|走进|冲进|迷了|发现|看着|被|把)/g
+    /([\u4e00-\u9fa5]{2,3})(?:和|与|跟|同)([\u4e00-\u9fa5]{2,3})(?:在|走进|冲进|看着|发现|被|把)/g,
+    /([\u4e00-\u9fa5]{2,3})[、，,]([\u4e00-\u9fa5]{2,3})(?:在|走进|冲进|看着|发现|被|把)/g
   ];
   for (const re of patterns) {
     for (const match of text.matchAll(re)) {
-      if (isLikelyChinesePersonName(match[1])) names.push(match[1]);
-      if (isLikelyChinesePersonName(match[2])) names.push(match[2]);
+      push(match[1]);
+      push(match[2]);
     }
   }
   return names;
+}
+
+/** 该名字是否像是「把口播里的动作/虚词片段错当成人名」（如「只为找」「遍全城」）。 */
+export function looksLikeFragmentPersonName(name: string): boolean {
+  const value = String(name || '').trim();
+  if (!value || !/^[\u4e00-\u9fa5]{2,3}$/.test(value)) return false;
+  if (isCreatureWord(value) || isFoodCreature(value) || OBJECT_HINT.test(value)) return false;
+  if (ZH_NOT_NAME.has(value) || PRONOUN_LEAD.test(value)) return true;
+  if (value.length === 3 && LOCATION_TAIL3.test(value)) return true;
+  if (FRAGMENT_LEAD.test(value)) return true;
+  return !isLikelyChinesePersonName(value, true);
 }
 
 /** 专名 + 人物动作：许野掏出 / 苏黎看着 / 许野喝了一口 */
@@ -227,7 +263,13 @@ function actionChineseNames(text: string): string[] {
 function explicitChineseNames(text: string): string[] {
   return [...text.matchAll(/(?:叫|名叫|名字是)([\u4e00-\u9fa5]{2,6})/g)]
     .map((match) => match[1])
-    .filter((name) => name && !ZH_NAME_STOP.has(name));
+    .filter((name) => (
+      name
+      && !ZH_NAME_STOP.has(name)
+      && !ZH_NOT_NAME.has(name)
+      && !PRONOUN_LEAD.test(name)
+      && !FRAGMENT_LEAD.test(name)
+    ));
 }
 
 /** 量词短语里的生物：一只戴草帽的巨嘴鸟 / 一条穿西装的森蚺 / 一群猴子 */

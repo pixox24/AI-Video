@@ -38,8 +38,10 @@ import {
   resolveTtsVoiceId
 } from "./src/utils/ttsCatalog";
 import {
+  applyAnalysisToBible,
   bibleContractForPrompt,
   bibleSourceHash,
+  extractNarrativeCharacterHints,
   fallbackVisualBible,
   groundVisualBible,
   hasNarrativeSignal,
@@ -49,6 +51,13 @@ import {
   visualBibleModeForGenre
 } from "./src/utils/visualBible";
 import { extractCastCandidates } from "./src/utils/castCandidates";
+import {
+  SCRIPT_ANALYSIS_SYSTEM,
+  SCRIPT_ANALYSIS_USER,
+  formatAnalysisContract,
+  needsScriptAnalysis,
+  parseScriptAnalysis
+} from "./src/utils/scriptAnalysis";
 
 function incomingStyleContract(raw: unknown): string {
   if (raw && typeof raw === "object" && (raw as StylePack).world && (raw as StylePack).render) {
@@ -1733,7 +1742,37 @@ app.post("/api/script/visual-bible", async (req, res) => {
   const resolvedCandidates = Array.isArray(candidates) && candidates.length
     ? candidates
     : extractCastCandidates({ narration: text, title: String(title || ""), intentNotes: notes });
-  const entityContract = narrativeEntityContract(text, { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates });
+  // 感知层：只有规则挖掘“模棱两可”时才做一次轻量整篇剧本解析，LLM 只提事实不做决策。
+  const hints = extractNarrativeCharacterHints(text);
+  const needsAnalysis = needsScriptAnalysis({
+    mode,
+    hasNarrativeSignal: hasNarrativeSignal(text, resolvedCandidates, notes),
+    hasPersonReference: hints.hasPerson,
+    candidates: resolvedCandidates
+  });
+  let analysis: ReturnType<typeof parseScriptAnalysis> = null;
+  if (needsAnalysis && isUsableLlmApi(llmApi)) {
+    try {
+      const rawAnalysis = await runScriptLlmJson({
+        llmApi,
+        system: SCRIPT_ANALYSIS_SYSTEM,
+        user: SCRIPT_ANALYSIS_USER({
+          narration: text,
+          genre: genre as string,
+          title: String(title || ""),
+          intentNotes: notes
+        }),
+        temperature: 0
+      });
+      analysis = parseScriptAnalysis(rawAnalysis);
+    } catch (err) {
+      console.warn("[Script Analysis] failed:", (err as Error)?.message || err);
+      analysis = null;
+    }
+  }
+  const entityContract = analysis
+    ? formatAnalysisContract(analysis, genre as string)
+    : narrativeEntityContract(text, { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates });
   const genreRule = mode === "expository"
     ? `- 本片为说明/教程型（${genre || "科普/教程/带货"}）：默认不建角色卡，把食材、厨具、产品当被加工对象（kind=object），禁止拟人化、禁止给物体表情动作。
 - 只有当口播有明显人物/对话/叙事证据时才允许建 person/creature 角色卡，否则 characters 必须输出 []。
@@ -1791,7 +1830,14 @@ ${text}
       intentNotes: notes,
       candidates: resolvedCandidates
     });
-    return res.json({ bible: merged });
+    const withAnalysis = analysis
+      ? applyAnalysisToBible(merged, analysis, genre as ScriptGenre, {
+          narration: text,
+          title: String(title || ""),
+          intentNotes: notes
+        })
+      : merged;
+    return res.json({ bible: withAnalysis, analysisApplied: Boolean(analysis) });
   } catch (error: any) {
     console.warn("[Visual Bible] fallback:", error?.message || error);
     return res.json({

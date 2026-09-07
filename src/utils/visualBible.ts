@@ -13,7 +13,9 @@ import {
   VisualLocation,
   VisualMotif
 } from '../types';
-import { candidateByName, extractCastCandidates, formatCandidatesForPrompt } from './castCandidates';
+import { candidateByName, extractCastCandidates, formatCandidatesForPrompt, looksLikeFragmentPersonName } from './castCandidates';
+import { deriveCastDecision } from './castStrategy';
+import { ScriptAnalysis, analysisEntityKind } from './scriptAnalysis';
 
 export const STORY_BIBLE_GENRES: ScriptGenre[] = ['故事', '情绪'];
 
@@ -596,16 +598,23 @@ export function groundVisualBible(
   narration: string,
   opts?: { title?: string; intentNotes?: string; candidates?: CastCandidate[] }
 ): VisualBible {
-  const baseCandidates = opts?.candidates || bible.candidates || extractCastCandidates({
+  const freshCandidates = opts?.candidates || extractCastCandidates({
     narration,
     title: opts?.title || bible.logline,
     intentNotes: opts?.intentNotes
   });
+  // 合并上一版已固化的候选（如 LLM 分析实体），但只保留仍出现在当前口播里的，避免跨稿残留。
+  const keptBibleCandidates = (bible.candidates || []).filter((candidate) => (
+    String(narration || '').includes(candidate.name)
+    || freshCandidates.some((item) => item.name === candidate.name)
+  ));
+  const baseCandidates = mergeCandidates(keptBibleCandidates, freshCandidates);
   const promoted = bible.characters
     .filter((character) => (
       character.locked
       || (
-        nameAppearsInNarration(character.name, narration)
+        !(character.kind === 'person' && looksLikeFragmentPersonName(character.name))
+        && nameAppearsInNarration(character.name, narration)
         && !FABRICATED_CAST_NAMES.has(character.name)
       )
     ))
@@ -617,6 +626,15 @@ export function groundVisualBible(
     candidates,
     characters: bible.characters.filter((character) => {
       if (character.locked) return true;
+      // 把口播片段错当人名的误卡（如「只为找」）——除非有真实候选/证据支撑，否则丢弃。
+      if (
+        character.kind === 'person'
+        && looksLikeFragmentPersonName(character.name)
+        && !(character.candidateId && candidates.some((item) => item.id === character.candidateId))
+        && !candidateByName(candidates, character.name)
+      ) {
+        return false;
+      }
       if (FABRICATED_CAST_NAMES.has(character.name) && !nameAppearsInNarration(character.name, narration)) {
         return false;
       }
@@ -756,6 +774,107 @@ export function visualBibleHasBlockingWarnings(bible?: VisualBible | null): bool
     if (/没有明确人物，但画面圣经创建了角色卡/.test(warning) && bible.characters.length === 0) return false;
     return /没有明确人物，但画面圣经创建了角色卡|出现男性线索，但角色卡包含女性|出现女性线索，但角色卡包含男性|年龄被写成成年|人物「.+」没有出现在角色卡证据中|文案职业「.+」未进入角色卡|不在文案候选名单中/.test(warning);
   });
+}
+
+/** 把剧本解析的实体转成候选卡（供决策后的卡面兜底与候选池使用）。 */
+function analysisEntitiesToCandidates(analysis: ScriptAnalysis): CastCandidate[] {
+  return analysis.entities.map((entity): CastCandidate | null => {
+    const kind = analysisEntityKind(entity.type);
+    if (!kind) return null;
+    return {
+      id: entity.id || 'an-0',
+      name: entity.name,
+      kind,
+      mentions: entity.recurs_throughout ? 2 : 1,
+      evidence: entity.evidence.slice(0, 4),
+      inTitle: false,
+      inNotes: false
+    };
+  }).filter((item): item is CastCandidate => Boolean(item));
+}
+
+function minimalCastCard(candidate: CastCandidate, index: number): VisualCharacter {
+  return {
+    id: index === 0 ? 'char-lead' : `char-${index + 1}`,
+    name: candidate.name,
+    role: index === 0 ? 'lead' : 'support',
+    kind: candidate.kind,
+    candidateId: candidate.id,
+    ageBand: candidate.kind === 'person' ? '成年（文案未明示年龄）' : '不适用',
+    look: candidate.kind === 'creature'
+      ? `拟人化的${candidate.name}：可指认体型、颜色与一个固定识别点；全片同一外形`
+      : '可指认的体型、发型、五官与一个固定识别点；全片不改五官和发型',
+    wardrobe: '全片固定同一套服装，不换装',
+    signature: candidate.kind === 'creature' ? '一个跨镜头可认出的固定识别点' : undefined,
+    sourceEvidence: candidate.evidence.slice(0, 4),
+    confidence: 0.65,
+    locked: false,
+    refs: []
+  };
+}
+
+/**
+ * 决策层落库：LLM 先做整篇剧本解析（感知），这里用规则决策收敛成最终的卡。
+ * - hasCast：只保留在“可认领名单”内的人物/动物；缺卡时用解析实体补齐（≤3）。
+ * - 无 cast：清掉所有非锁定的 person/creature 卡，避免把口播词头（如“只为找”）硬造角色。
+ */
+export function applyAnalysisToBible(
+  bible: VisualBible,
+  analysis: ScriptAnalysis,
+  genre?: ScriptGenre | null,
+  opts?: { narration?: string; title?: string; intentNotes?: string }
+): VisualBible {
+  const decision = deriveCastDecision(analysis, genre);
+  const analysisCands = analysisEntitiesToCandidates(analysis);
+  const allowedNames = new Set(decision.allowed.map((item) => item.name));
+
+  const castableCands = analysisCands.filter((candidate) => (
+    (candidate.kind === 'person' || candidate.kind === 'creature')
+    && allowedNames.has(candidate.name)
+  ));
+  const keptCandidates = decision.hasCast
+    ? mergeCandidates(castableCands, (bible.candidates || []).filter((candidate) => (
+        candidate.kind === 'object' || allowedNames.has(candidate.name)
+      )))
+    : (bible.candidates || []).filter((candidate) => candidate.kind === 'object');
+
+  const existingChars = bible.characters.filter((character) => {
+    if (character.locked) return true;
+    if (character.kind !== 'person' && character.kind !== 'creature') return true;
+    return decision.hasCast && allowedNames.has(character.name);
+  });
+
+  let characters = existingChars;
+  if (decision.hasCast) {
+    const missing = castableCands.filter((candidate) => !characters.some((item) => item.name === candidate.name));
+    if (missing.length) {
+      const extras = missing.map(minimalCastCard);
+      const mergedChars = [...characters, ...extras]
+        .filter((item, index, arr) => arr.findIndex((other) => other.name === item.name) === index)
+        .slice(0, 3)
+        .map((item, index) => item.kind === 'person'
+          ? { ...item, role: index === 0 ? 'lead' as const : item.role }
+          : { ...item, role: index === 0 && item.role === 'lead' ? 'lead' as const : item.role });
+      characters = mergedChars.map((item, index) => ({ ...item, id: index === 0 ? 'char-lead' : `char-${index + 1}` }));
+    }
+  }
+
+  const removedCount = bible.characters.length - characters.length;
+  const warn = removedCount > 0
+    ? `已按整篇剧本解析收起 ${removedCount} 张非贯穿角色卡；如需保留请上锁后手动补回`
+    : decision.hasCast
+      ? `角色已按整篇剧本解析锁定：${decision.allowed.map((item) => item.name).join('、')}`
+      : '';
+  const validation = warn
+    ? { status: 'warning' as const, warnings: Array.from(new Set([...(bible.validation?.warnings || []), warn])).slice(0, 8), checkedAt: Date.now() }
+    : bible.validation;
+
+  return {
+    ...bible,
+    characters,
+    candidates: keptCandidates,
+    validation
+  };
 }
 
 function carryCharacter(previous: VisualCharacter | undefined, incoming: VisualCharacter): VisualCharacter {

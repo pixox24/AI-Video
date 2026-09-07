@@ -61,7 +61,7 @@ import { VideoPlayerStage } from './components/VideoPlayerStage';
 import { TimelineBar } from './components/TimelineBar';
 import { ExportModal } from './components/ExportModal';
 import { StatusToastHost } from './components/StatusToastHost';
-import { showStatusToast } from './utils/statusToast';
+import { hideStatusToast, showStatusToast } from './utils/statusToast';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import {
   createBlankProject,
@@ -93,7 +93,8 @@ import {
   migrateBrowserCopiesToLibrary
 } from './utils/projectLibrary';
 import { createEditHistory } from './utils/editHistory';
-import { characterForShot, characterRefUrl, storyLeadMissingRef, isVisualBibleStale, visualBibleHasBlockingWarnings } from './utils/visualBible';
+import { characterForShot, characterHasRef, characterRefUrl, setCharacterRef, storyLeadMissingRef, isVisualBibleStale, visualBibleHasBlockingWarnings } from './utils/visualBible';
+import { buildCharacterCardPromptFor, shouldOfferAutoCard, CHARACTER_CARD_VARIANTS, CharacterCardVariant } from './utils/characterCardPrompt';
 
 function settleProjectImages(project: VideoProject): VideoProject {
   const settled: VideoProject = {
@@ -881,6 +882,104 @@ export default function App() {
     });
   };
 
+  // AI 自动生成角色卡参考图：中性棚拍身份锚 → 写入 character.refs[0] 并自动上锁。
+  const generateCharacterCard = async (
+    characterId: string,
+    variant: CharacterCardVariant
+  ): Promise<'ok' | 'fail'> => {
+    const workspace = project.scriptWorkspace;
+    const bible = workspace?.visualBible;
+    const character = bible?.characters.find((item) => item.id === characterId);
+    if (!workspace || !bible || !character) return 'fail';
+    if (visualBibleGenerationBlocked()) return 'fail';
+    if (!shouldOfferAutoCard(character)) {
+      showStatusToast('实物/道具走调色与实物锁定，不需要角色参考图', { tone: 'info', id: 'char-card' });
+      return 'fail';
+    }
+    if (!isImageApiReady(project.settings.customImageApi)) {
+      showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
+      setActiveTab('settings');
+      return 'fail';
+    }
+    const built = buildCharacterCardPromptFor(character, variant);
+    const anchor = characterRefUrl(character);
+    const label = variant === 'face' ? '半身正脸' : '全身正面';
+    recordHistory(project);
+    showStatusToast(`正在生成「${character.name}」${label}参考图…`, { tone: 'progress', id: 'char-card', durationMs: 0 });
+    try {
+      const result = await generateImageWithRetry(
+        {
+          prompt: built.prompt,
+          visualStyle: '',
+          styleRender: '',
+          aspectRatio: built.aspectRatio,
+          seed: Date.now(),
+          characterRef: anchor ? { url: anchor, name: character.name } : undefined
+        },
+        {
+          primary: project.settings.customImageApi,
+          backup: project.settings.backupImageApi,
+          retry: project.settings.imageRetry
+        }
+      );
+      const imageId = result.imageUrl.replace(/^\/generated\//, '') || `char-${Date.now()}`;
+      const ref = { imageId, imageUrl: result.imageUrl, kind: built.refKind, notes: `generated:${variant}` };
+      const withRef = setCharacterRef(bible, character.id, ref);
+      const nextBible = {
+        ...withRef,
+        characters: withRef.characters.map((item) => item.id === character.id ? { ...item, locked: true } : item)
+      };
+      updateProject({ scriptWorkspace: { ...workspace, visualBible: nextBible } });
+      hideStatusToast('char-card');
+      showStatusToast(`已生成并上锁「${character.name}」参考图${result.usedBackup ? '（备用通道）' : ''}`, { tone: 'ok', id: 'char-card' });
+      return 'ok';
+    } catch (err: any) {
+      hideStatusToast('char-card');
+      showStatusToast(err?.message || '角色参考图生成失败', { tone: 'error', id: 'char-card' });
+      return 'fail';
+    }
+  };
+
+  const handleGenerateCharacterRef = (characterId: string, variant: CharacterCardVariant): Promise<boolean> =>
+    generateCharacterCard(characterId, variant).then((state) => state === 'ok');
+
+  const runCharacterRefBatch = async (ids: string[]) => {
+    let ok = 0;
+    for (const id of ids) {
+      const state = await generateCharacterCard(id, 'face');
+      if (state === 'ok') ok += 1;
+    }
+    const done = ok === ids.length;
+    showStatusToast(
+      `角色参考图完成：成功 ${ok}/${ids.length}${done ? '' : '，其余失败可逐张重试'}`,
+      { tone: done ? 'ok' : 'warn', id: 'char-card' }
+    );
+  };
+
+  const handleGenerateAllCharacterRefs = () => {
+    const workspace = project.scriptWorkspace;
+    const bible = workspace?.visualBible;
+    if (!workspace || !bible) return;
+    if (visualBibleGenerationBlocked()) return;
+    if (!isImageApiReady(project.settings.customImageApi)) {
+      showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
+      setActiveTab('settings');
+      return;
+    }
+    const missing = bible.characters.filter((character) => shouldOfferAutoCard(character) && !characterHasRef(character));
+    if (!missing.length) {
+      showStatusToast('所有角色都已钉参考图', { tone: 'ok', id: 'char-card' });
+      return;
+    }
+    const faceLabel = CHARACTER_CARD_VARIANTS.find((item) => item.id === 'face')?.label || '半身正脸';
+    setConfirmState({
+      title: `为 ${missing.length} 个角色生成参考图？`,
+      detail: `将为没有参考图的角色各生成一张「${faceLabel}」（中性棚拍风格，生成后自动上锁）。消耗 ${missing.length} 次生图，与手动单张一致。`,
+      confirmLabel: '开始生成',
+      action: () => void runCharacterRefBatch(missing.map((item) => item.id))
+    });
+  };
+
   // Generate image for a single clip with live status
   const handleGenerateSingleClipImage = useCallback(async (clipId: string) => {
     const targetClip = project.clips.find(c => c.id === clipId);
@@ -1659,6 +1758,8 @@ export default function App() {
           onNeedFullNarration={handleApplyStoryboard}
           sentenceGap={resolveSentenceGap(project.audio)}
           outroHold={resolveOutro(project.settings).hold}
+          onGenerateCharacterRef={handleGenerateCharacterRef}
+          onGenerateCharacterRefAll={handleGenerateAllCharacterRefs}
           onApplyStyleOnly={handleApplyStyleToAllClips}
           isApplyingStyle={isGeneratingAllImages}
           isGeneratingNarration={isGeneratingNarration}

@@ -10,6 +10,7 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
+    "test": "tsx --test src/utils/castStrategy.test.ts src/utils/characterCardPrompt.test.ts",
     "lint": "tsc --noEmit",
     "test:cast": "tsx scripts/check-visual-bible-cast.mts"
   },

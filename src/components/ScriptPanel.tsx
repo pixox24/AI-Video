@@ -124,6 +124,11 @@ import {
 } from '../utils/visualBible';
 import { extractCastCandidates } from '../utils/castCandidates';
 import { prepareCharacterRefFile } from '../utils/characterRef';
+import {
+  CHARACTER_CARD_VARIANTS,
+  CharacterCardVariant,
+  shouldOfferAutoCard
+} from '../utils/characterCardPrompt';
 
 interface ScriptPanelProps {
   workspace: ScriptWorkspace;
@@ -152,6 +157,8 @@ interface ScriptPanelProps {
   onTogglePlay?: () => void;
   sentenceGap?: number;
   outroHold?: number;
+  onGenerateCharacterRef?: (characterId: string, variant: CharacterCardVariant) => Promise<boolean>;
+  onGenerateCharacterRefAll?: () => void;
 }
 
 const INTENT_CARDS: {
@@ -217,7 +224,9 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   currentTime = 0,
   onTogglePlay,
   sentenceGap = 0.2,
-  outroHold = 0
+  outroHold = 0,
+  onGenerateCharacterRef,
+  onGenerateCharacterRefAll
 }) => {
   const [busy, setBusy] = useState<'topics' | 'draft' | 'research' | 'reference' | 'concepts' | 'preview' | 'bible' | 'diagnose' | 'apply' | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -480,8 +489,10 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       const incoming = normalizeVisualBible(data?.bible, visualBibleModeForGenre(genre));
+      // 服务端已做整篇剧本解析并按规则收敛卡面时，本地不要再拿“挖掘候选”补角色，避免误卡复活。
+      const groundCandidates = data?.analysisApplied ? [] : groundOpts.candidates;
       const bible = incoming
-        ? groundVisualBible(mergeVisualBible(previousBible, incoming), narration, groundOpts)
+        ? groundVisualBible(mergeVisualBible(previousBible, incoming), narration, { ...groundOpts, candidates: groundCandidates })
         : groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, groundOpts);
       return { ...base, visualBible: bible };
     } catch {
@@ -1175,6 +1186,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
             onRebuildBible={() => void handleRebuildBible()}
             onAdoptScript={handleAdoptPastedScript}
             bibleBusy={busy === 'bible'}
+            onGenerateCharacterRef={onGenerateCharacterRef}
+            onGenerateCharacterRefAll={onGenerateCharacterRefAll}
           />
         </aside>
       </div>
@@ -1187,6 +1200,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           onAdoptScript={handleAdoptPastedScript}
           bibleBusy={busy === 'bible'}
           compact
+          onGenerateCharacterRef={onGenerateCharacterRef}
+          onGenerateCharacterRefAll={onGenerateCharacterRefAll}
         />
       </div>
 
@@ -2282,7 +2297,9 @@ function DirectorRail({
   onRebuildBible,
   onAdoptScript,
   bibleBusy,
-  compact
+  compact,
+  onGenerateCharacterRef,
+  onGenerateCharacterRefAll
 }: {
   workspace: ScriptWorkspace;
   onChange?: (workspace: ScriptWorkspace) => void;
@@ -2290,14 +2307,20 @@ function DirectorRail({
   onAdoptScript?: () => void;
   bibleBusy?: boolean;
   compact?: boolean;
+  onGenerateCharacterRef?: (characterId: string, variant: CharacterCardVariant) => Promise<boolean>;
+  onGenerateCharacterRefAll?: () => void;
 }) {
   const [compactOpen, setCompactOpen] = useState(false);
   const [refBusyId, setRefBusyId] = useState<string | null>(null);
+  const [cardBusyId, setCardBusyId] = useState<string | null>(null);
+  const [cardVariant, setCardVariant] = useState<Record<string, CharacterCardVariant>>({});
   const budget = workspace.durationBudget;
   const notes = workspace.directorNotes;
   const bible = workspace.visualBible;
   const stale = isVisualBibleStale(bible, workspace.fullNarration, workspace.genrePackId);
   const showCards = !compact || compactOpen;
+  const missingRefCount = (bible?.characters || [])
+    .filter((character) => shouldOfferAutoCard(character) && !characterHasRef(character)).length;
   const patchBible = (next: VisualBible) => {
     if (!onChange) return;
     const grounded = workspace.fullNarration.trim()
@@ -2319,6 +2342,16 @@ function DirectorRail({
       showStatusToast(err?.message || '参考图上传失败', { tone: 'error', id: 'character-ref' });
     } finally {
       setRefBusyId(null);
+    }
+  };
+  const handleAutoRef = async (characterId: string) => {
+    if (!onGenerateCharacterRef || !bible) return;
+    const variant = cardVariant[characterId] || 'face';
+    setCardBusyId(characterId);
+    try {
+      await onGenerateCharacterRef(characterId, variant);
+    } finally {
+      setCardBusyId(null);
     }
   };
   return (
@@ -2402,6 +2435,16 @@ function DirectorRail({
                 {bibleBusy ? '正在编圣经…' : bible ? '按口播重编' : '编画面圣经'}
               </button>
             )}
+            {showCards && onGenerateCharacterRefAll && missingRefCount > 0 && (
+              <button
+                type="button"
+                onClick={onGenerateCharacterRefAll}
+                disabled={bibleBusy || cardBusyId !== null}
+                className="w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-300 hover:bg-amber-500/20 cursor-pointer disabled:opacity-40"
+              >
+                一键生成 {missingRefCount} 张缺参考图
+              </button>
+            )}
             {bibleHasCast(bible) && bible.characters.map((character) => (
               <div key={character.id} className="rounded-xl border border-[#2b2b36] bg-[#18181f] p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
@@ -2439,9 +2482,46 @@ function DirectorRail({
                   onChange={(e) => patchBible(updateCharacterField(bible, character.id, { wardrobe: e.target.value }))}
                   className="w-full bg-[#121217] border border-[#2b2b36] rounded-lg px-1.5 py-1 text-[11px] text-zinc-300 focus:outline-none"
                 />
+                {shouldOfferAutoCard(character) && onGenerateCharacterRef && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <div className="flex rounded-lg border border-[#2b2b36] overflow-hidden flex-shrink-0">
+                        {CHARACTER_CARD_VARIANTS.map((item) => {
+                          const active = (cardVariant[character.id] || 'face') === item.id;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              aria-pressed={active}
+                              disabled={cardBusyId === character.id}
+                              onClick={() => setCardVariant((prev) => ({ ...prev, [character.id]: item.id }))}
+                              title={item.hint}
+                              className={`px-1.5 py-1 text-[10px] cursor-pointer disabled:opacity-40 ${
+                                active ? 'bg-amber-500 text-black font-medium' : 'text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={cardBusyId === character.id}
+                        onClick={() => void handleAutoRef(character.id)}
+                        className="flex-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-300 hover:bg-amber-500/20 cursor-pointer disabled:opacity-40"
+                      >
+                        {cardBusyId === character.id ? '正在生成…' : 'AI 生成参考图'}
+                      </button>
+                    </div>
+                    {cardBusyId === character.id && (
+                      <p className="text-[10px] text-amber-300">正在生成…完成后自动上锁</p>
+                    )}
+                  </div>
+                )}
                 <CharacterRefSlot
                   previewUrl={characterRefPreview(character)}
-                  disabled={refBusyId === character.id}
+                  disabled={refBusyId === character.id || cardBusyId === character.id}
                   onPick={(file) => void handlePickRef(character.id, file)}
                   onClear={() => patchBible(clearCharacterRef(bible, character.id))}
                 />
@@ -2449,7 +2529,9 @@ function DirectorRail({
                   <p className="text-[10px] text-amber-300">正在保存参考图…</p>
                 )}
                 {characterHasRef(character) && (
-                  <p className="text-[10px] text-zinc-600">生图时会按这张图锁脸和服装</p>
+                  <p className="text-[10px] text-zinc-600">
+                    {character.refs?.[0]?.notes?.startsWith('generated') ? 'AI 生成参考图 · 已自动上锁' : '生图时会按这张图锁脸和服装'}
+                  </p>
                 )}
               </div>
             ))}
