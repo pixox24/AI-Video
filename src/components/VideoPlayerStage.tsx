@@ -111,6 +111,10 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
   // Audio start/stop syncing with playback
   useEffect(() => {
+    audioEngine.setAudioDucking(audio.audioDucking !== false);
+  }, [audio.audioDucking]);
+
+  useEffect(() => {
     if (isPlaying) {
       if (audio.bgmEnabled && !isMuted) {
         audioEngine.startBgm(audio.bgmTrackId, audio.bgmVolume, audio.customBgmUrl);

@@ -4,7 +4,8 @@ import {
   Film,
   Palette, 
   Subtitles, 
-  Volume2, 
+  Mic,
+  Music,
   FolderGit2, 
   Settings,
   Sparkles
@@ -23,7 +24,8 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ activeTab, onTabChange }
     { id: 'storyboard', label: '分镜', icon: <Film className="w-5 h-5" /> },
     { id: 'style', label: '风格', icon: <Palette className="w-5 h-5" /> },
     { id: 'subtitles', label: '字幕', icon: <Subtitles className="w-5 h-5" /> },
-    { id: 'audio', label: '声音', icon: <Volume2 className="w-5 h-5" /> },
+    { id: 'voice', label: '旁白', icon: <Mic className="w-5 h-5" /> },
+    { id: 'music', label: '音乐', icon: <Music className="w-5 h-5" /> },
   ];
 
   const bottomTabs: { id: ActiveTab; label: string; icon: React.ReactNode }[] = [

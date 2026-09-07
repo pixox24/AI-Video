@@ -279,7 +279,7 @@ export const TTS_PROVIDER_PRESETS: TtsProviderPreset[] = [
       { id: 'Cherry', label: 'Cherry', hint: 'Qwen3 甜美活力女声' },
       { id: 'Ethan', label: 'Ethan', hint: 'Qwen3 沉稳磁性男声' }
     ],
-    docHint: '在百炼控制台创建北京地域 API Key（sk-...）。3.0 与 Qwen3 接口、音色都不能混用，切换模型会自动改地址和音色目录。目录外的 voice id 可在本页或声音页自定义填写。',
+    docHint: '在百炼控制台创建北京地域 API Key（sk-...）。3.0 与 Qwen3 接口、音色都不能混用，切换模型会自动改地址和音色目录。目录外的 voice id 可在本页或旁白页自定义填写。',
     available: true
   },
   {

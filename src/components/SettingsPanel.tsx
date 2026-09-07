@@ -1444,7 +1444,7 @@ function TtsProviderSection({
         <div>
           <h3 className="text-[15px] font-semibold text-zinc-100">TTS 配音供应商</h3>
           <p className="mt-1 text-[13px] text-zinc-500 leading-relaxed max-w-2xl">
-            选中即使用。后台选哪个模型，试听、整段旁白和导出都走同一个。内置 Edge TTS 无需密钥；阿里云百炼需填写北京地域 API Key。日常选音色请到「声音」页。
+            选中即使用。后台选哪个模型，试听、整段旁白和导出都走同一个。内置 Edge TTS 无需密钥；阿里云百炼需填写北京地域 API Key。日常选音色请到「旁白」页。
           </p>
         </div>
 

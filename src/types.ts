@@ -637,6 +637,6 @@ export interface ProjectLibraryItem {
   saveRevision?: number;
 }
 
-export type ActiveTab = 'script' | 'storyboard' | 'style' | 'subtitles' | 'audio' | 'projects' | 'settings';
+export type ActiveTab = 'script' | 'storyboard' | 'style' | 'subtitles' | 'voice' | 'music' | 'audio' | 'projects' | 'settings';
 
 export type StoryboardSubTab = 'split' | 'shots';

@@ -52,7 +52,8 @@ import { ScriptPanel } from './components/ScriptPanel';
 import { StoryboardPanel } from './components/StoryboardPanel';
 import { StylePanel } from './components/StylePanel';
 import { SubtitlePanel } from './components/SubtitlePanel';
-import { AudioPanel } from './components/AudioPanel';
+import { VoicePanel } from './components/VoicePanel';
+import { MusicPanel } from './components/MusicPanel';
 import { ProjectsPanel } from './components/ProjectsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { TopHeader } from './components/TopHeader';
@@ -152,7 +153,10 @@ export default function App() {
 
   const [libraryItems, setLibraryItems] = useState<ProjectLibraryItem[]>([]);
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('script');
+  const [activeTab, setActiveTabRaw] = useState<ActiveTab>('script');
+  const setActiveTab = (tab: ActiveTab) => {
+    setActiveTabRaw(tab === 'audio' ? 'voice' : tab);
+  };
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(() => project.clips[0]?.id || null);
@@ -1548,26 +1552,35 @@ export default function App() {
         />
       )}
 
-      {activeTab === 'audio' && (
-        <AudioPanel
+      {(activeTab === 'voice' || activeTab === 'audio') && (
+        <VoicePanel
           config={project.audio}
           onChange={(audio) => updateProject({ audio })}
-          sampleNarrationText={project.clips[0]?.narration || project.topic}
           narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
           isGeneratingNarration={isGeneratingNarration}
           narrationError={narrationError}
           onGenerateFullNarration={() => { void handleGenerateFullNarration(); }}
-          recommendedGenre={project.scriptWorkspace?.genrePackId || null}
           timelinePlaying={isPlaying}
           onPauseTimeline={() => setIsPlaying(false)}
           ttsApi={resolveTtsApi(project.settings.customTtsApi)}
           onVoiceChange={(voiceId) => updateProject(applyVoiceToProject(project, voiceId))}
           onAdoptVoiceModel={(model, voiceId) => updateProject(applyTtsModelAndVoice(project, model, voiceId))}
           onOpenSettings={() => setActiveTab('settings')}
+          onOpenMusic={() => setActiveTab('music')}
           onSentenceGapChange={handleSentenceGapChange}
+          clips={project.clips}
+        />
+      )}
+
+      {activeTab === 'music' && (
+        <MusicPanel
+          config={project.audio}
+          onChange={(audio) => updateProject({ audio })}
+          recommendedGenre={project.scriptWorkspace?.genrePackId || null}
+          timelinePlaying={isPlaying}
+          onPauseTimeline={() => setIsPlaying(false)}
           outro={resolveOutro(project.settings)}
           onOutroChange={handleOutroChange}
-          clips={project.clips}
         />
       )}
 

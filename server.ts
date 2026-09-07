@@ -1740,9 +1740,10 @@ app.post("/api/script/visual-bible", async (req, res) => {
 - characters=[] 时仍要写 paletteLock 与 continuityRule：锁定同一被加工对象的实物外观，状态随步骤递进（生→熟→成品），禁止每镜换另一块。`
     : "";
   const prompt = `根据整段口播编译「画面圣经 VisualBible」。有原文证据才能建角色；没有证据必须 characters=[]。有角色不等于每镜都上人。
- 硬规则：
+  硬规则：
 - mode 仍用 ${mode}（只影响机位先验，不决定能不能有角色）
 - 角色 0 到 3 个。只能从候选认领；人物/拟人动物用 kind=person / creature。
+- 开场并列出现的人名（如「A和B」）必须优先建为共同主角（role=lead，最多 2 个 person）；会说话的动物/物件建为配角（role=support），不得只因为出镜多就把动物升成唯一主角。
 - person/creature 的 look 必须写出：体型、头/吻形状、眼睛颜色、主色+腹色或肤色、一个独特识别点。禁止只写物种名或「拟人化的 X」。
 - signature 必填：跨镜头可认出的斑纹、配饰或固定道具。wardrobe 必须是全片固定的一套服装。
 - object（被加工对象/道具）不作为角色卡；它的外观与状态一致性写进 paletteLock / continuityRule。
