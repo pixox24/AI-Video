@@ -369,6 +369,7 @@ function LlmProviderSection({
 
   const llmApi = resolveLlmApi(settings.customLlmApi);
   const isBuiltin = llmApi.provider === 'builtin';
+  const isGeminiNative = llmApi.provider === 'gemini';
   const isCustomCompat = llmApi.provider === 'custom';
   const currentPreset = LLM_PROVIDER_PRESETS.find((p) => p.id === llmApi.provider) || LLM_PROVIDER_PRESETS[0];
   const filteredFetchedModels = fetchedModels.filter((item) =>
@@ -425,7 +426,8 @@ function LlmProviderSection({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           endpoint: sanitizeEndpoint(llmApi.endpoint),
-          apiKey: sanitizeKey(llmApi.apiKey)
+          apiKey: sanitizeKey(llmApi.apiKey),
+          provider: llmApi.provider
         })
       });
       const data = await res.json().catch(() => ({}));
@@ -508,7 +510,7 @@ function LlmProviderSection({
         <div>
           <h3 className="text-[15px] font-semibold text-zinc-100">LLM 文案模型</h3>
           <p className="mt-1 text-[13px] text-zinc-500 leading-relaxed max-w-2xl">
-            选中即使用。内置引擎无需密钥；DeepSeek 与自定义兼容接口需填写地址和 API Key，并可拉取模型列表。
+            选中即使用。内置引擎无需密钥；Gemini 原生、DeepSeek 与自定义接口需填写地址和 API Key。
           </p>
         </div>
 
@@ -563,7 +565,7 @@ function LlmProviderSection({
                   type="text"
                   value={llmApi.endpoint}
                   onChange={(e) => updateLlmApi({ endpoint: e.target.value })}
-                  placeholder={isCustomCompat ? 'https://your-api-domain.com/v1' : 'https://api.deepseek.com'}
+                  placeholder={isGeminiNative ? 'https://vpsairobot.com/v1beta' : isCustomCompat ? 'https://your-api-domain.com/v1' : 'https://api.deepseek.com'}
                   className="w-full bg-[#121217] border border-[#2b2b38] focus:border-amber-500 rounded-xl px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 font-mono outline-none"
                 />
               </div>
@@ -608,7 +610,7 @@ function LlmProviderSection({
                 type="text"
                 value={llmApi.model}
                 onChange={(e) => updateLlmApi({ model: e.target.value })}
-                placeholder={isCustomCompat ? '填写聊天模型 id，或点拉取后选择' : 'deepseek-v4-flash'}
+                placeholder={isGeminiNative ? 'gemini-3.7-flash' : isCustomCompat ? '填写聊天模型 id，或点拉取后选择' : 'deepseek-v4-flash'}
                 className="w-full bg-[#121217] border border-[#2b2b38] focus:border-amber-500 rounded-xl px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 font-mono outline-none"
               />
               {fetchModelsInfo && (

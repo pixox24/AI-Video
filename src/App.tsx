@@ -94,7 +94,7 @@ import {
   migrateBrowserCopiesToLibrary
 } from './utils/projectLibrary';
 import { createEditHistory } from './utils/editHistory';
-import { characterForShot, characterHasRef, characterRefUrl, setCharacterRef, storyLeadMissingRef, isVisualBibleStale, visualBibleHasBlockingWarnings } from './utils/visualBible';
+import { bibleHasNarrativeCast, characterForShot, characterHasRef, characterRefUrl, setCharacterRef, storyLeadMissingRef, isVisualBibleStale, shotImageGenerationBlockedByBible, visualBibleHasBlockingWarnings, workspaceBibleSource } from './utils/visualBible';
 import { buildCharacterCardPromptFor, shouldOfferAutoCard, CHARACTER_CARD_VARIANTS, CharacterCardVariant } from './utils/characterCardPrompt';
 
 function settleProjectImages(project: VideoProject): VideoProject {
@@ -841,14 +841,27 @@ export default function App() {
     return { url, name: character?.name || '' };
   };
 
-  const visualBibleGenerationBlocked = () => {
+  const visualBibleGenerationBlocked = (purpose: 'shots' | 'characters' = 'shots') => {
     const workspace = project.scriptWorkspace;
     const bible = workspace?.visualBible;
     if (!bible) return false;
-    if (isVisualBibleStale(bible, workspace?.fullNarration || '', workspace?.genrePackId, {
-      title: workspace?.lockedTitle || workspace?.draftedTitle,
-      intentNotes: workspace?.intentNotes
-    })) {
+    const src = workspaceBibleSource(workspace);
+    const stale = isVisualBibleStale(bible, src.narration, src.genre, src);
+    if (purpose === 'shots') {
+      if (stale && bibleHasNarrativeCast(bible)) {
+        showStatusToast('口播已改，画面圣经可能过时。仍按当前镜头生图。', {
+          tone: 'info', id: 'visual-bible-stale', actionLabel: '去核对', onAction: () => setActiveTab('script')
+        });
+      }
+      if (shotImageGenerationBlockedByBible(workspace)) {
+        showStatusToast('画面圣经与文案存在角色冲突，请先修正后再生图', {
+          tone: 'warn', id: 'visual-bible-conflict', actionLabel: '去核对', onAction: () => setActiveTab('script')
+        });
+        return true;
+      }
+      return false;
+    }
+    if (stale) {
       showStatusToast('口播已改，先按当前文案重编画面圣经', {
         tone: 'warn', id: 'visual-bible-stale', actionLabel: '去重编', onAction: () => setActiveTab('script')
       });
@@ -896,7 +909,7 @@ export default function App() {
     const bible = workspace?.visualBible;
     const character = bible?.characters.find((item) => item.id === characterId);
     if (!workspace || !bible || !character) return 'fail';
-    if (visualBibleGenerationBlocked()) return 'fail';
+    if (visualBibleGenerationBlocked('characters')) return 'fail';
     if (!shouldOfferAutoCard(character)) {
       showStatusToast('实物/道具走调色与实物锁定，不需要角色参考图', { tone: 'info', id: 'char-card' });
       return 'fail';
@@ -985,7 +998,7 @@ export default function App() {
     const workspace = project.scriptWorkspace;
     const bible = workspace?.visualBible;
     if (!workspace || !bible) return;
-    if (visualBibleGenerationBlocked()) return;
+    if (visualBibleGenerationBlocked('characters')) return;
     if (!isImageApiReady(project.settings.customImageApi)) {
       showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
       setActiveTab('settings');
@@ -1009,7 +1022,7 @@ export default function App() {
   const handleGenerateSingleClipImage = useCallback(async (clipId: string) => {
     const targetClip = project.clips.find(c => c.id === clipId);
     if (!targetClip) return;
-    if (visualBibleGenerationBlocked()) return;
+    if (visualBibleGenerationBlocked('shots')) return;
     if (!isImageApiReady(project.settings.customImageApi)) {
       showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
       setActiveTab('settings');
@@ -1093,7 +1106,7 @@ export default function App() {
   const handleGenerateAllImages = async (clipsOverride?: StoryboardClip[]) => {
     const sourceClips = Array.isArray(clipsOverride) ? clipsOverride : project.clips;
     if (sourceClips.length === 0) return;
-    if (visualBibleGenerationBlocked()) return;
+    if (visualBibleGenerationBlocked('shots')) return;
     if (!isImageApiReady(project.settings.customImageApi)) {
       showStatusToast('请先在设置里配置生图供应商和 API Key', { tone: 'warn', id: 'image-api' });
       setActiveTab('settings');
@@ -1134,10 +1147,10 @@ export default function App() {
     });
     skipHistoryRef.current = true;
 
-    // Concurrency limit: from settings or default to 3 (optimal balance between speed and rate limits)
+    // Concurrency limit: from settings or default to 3 (capped at 20)
     const concurrency = Math.min(
       Math.max(1, resolveImageApi(project.settings.customImageApi).concurrency || 3),
-      6
+      20
     );
 
     try {

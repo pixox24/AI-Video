@@ -86,6 +86,7 @@ import {
   resolveOpenAiModelsUrls,
   sanitizeOpenAiApiKey
 } from "./src/utils/openAiModels";
+import { callGeminiNativeChat, fetchGeminiNativeModelList } from "./src/utils/geminiNative";
 
 function incomingStyleContract(raw: unknown): string {
   if (raw && typeof raw === "object" && (raw as StylePack).world && (raw as StylePack).render) {
@@ -315,6 +316,9 @@ async function callOpenAiCompatibleChat(opts: {
   timeoutMs?: number;
   maxTokens?: number;
 }): Promise<{ ok: boolean; text?: string; model?: string; error?: string; status?: number }> {
+  if (String(opts.provider || '').toLowerCase() === 'gemini') {
+    return callGeminiNativeChat(opts);
+  }
   const urls = resolveChatCompletionUrls(opts.endpoint);
   const apiKey = sanitizeBearerKey(opts.apiKey);
   const provider = String(opts.provider || "").toLowerCase();
@@ -3773,7 +3777,7 @@ app.post("/api/llm/test", async (req, res) => {
 });
 
 app.post("/api/llm/fetch-models", async (req, res) => {
-  const { endpoint, apiKey } = req.body || {};
+  const { endpoint, apiKey, provider } = req.body || {};
   if (!endpoint || typeof endpoint !== "string" || !endpoint.trim()) {
     return res.status(400).json({ ok: false, error: "请输入 API 接口地址" });
   }
@@ -3781,15 +3785,19 @@ app.post("/api/llm/fetch-models", async (req, res) => {
     return res.status(400).json({ ok: false, error: "请输入 API 密钥" });
   }
 
-  const result = await fetchOpenAiCompatibleModelList(endpoint, apiKey);
+  const result = String(provider || '').toLowerCase() === 'gemini'
+    ? await fetchGeminiNativeModelList(endpoint, apiKey)
+    : await fetchOpenAiCompatibleModelList(endpoint, apiKey);
   if (result.ok === false) {
     const failure = result as Extract<typeof result, { ok: false }>;
     return res.status(failure.status || 500).json({
       ok: false,
       error: `无法从端点获取模型列表: ${failure.error}`,
       diagnosis: failure.status === 401
-        ? "API Key 无效或未授权访问 /v1/models 接口。"
-        : "该服务商可能未开放 /v1/models 接口，或端点地址不正确。您仍可以直接手动填入聊天模型 id。"
+        ? "API Key 无效或未授权访问模型列表接口。"
+        : String(provider || '').toLowerCase() === 'gemini'
+          ? "该 Gemini 服务商可能未开放 /models 接口。您仍可以直接手动填入模型 id。"
+          : "该服务商可能未开放 /v1/models 接口，或端点地址不正确。您仍可以直接手动填入聊天模型 id。"
     });
   }
 

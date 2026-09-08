@@ -9,6 +9,8 @@ import {
   ScriptEntityLedger,
   ScriptEntityRecord,
   ScriptGenre,
+  ScriptLanguage,
+  TopicCard,
   VisualBible,
   VisualBibleDiff,
   VisualBibleMode,
@@ -93,11 +95,44 @@ export function bibleSourceHash(
   });
 }
 
+export type BibleSourceExtras = {
+  title?: string;
+  intentNotes?: string;
+  language?: ScriptLanguage | string | null;
+};
+
+/** Fields used to stamp and later re-check the bible source key. Must stay in lockstep. */
+export function workspaceBibleSource(workspace?: {
+  fullNarration?: string;
+  intentNotes?: string;
+  lockedTitle?: string;
+  draftedTitle?: string;
+  genrePackId?: ScriptGenre | null;
+  scriptLanguage?: ScriptLanguage;
+  topicCards?: Array<Pick<TopicCard, 'id' | 'title'> & { genre?: ScriptGenre }>;
+  selectedTopicId?: string | null;
+} | null): {
+  narration: string;
+  title: string;
+  intentNotes: string;
+  genre: ScriptGenre | null;
+  language: ScriptLanguage | undefined;
+} {
+  const selected = workspace?.topicCards?.find((card) => card.id === workspace.selectedTopicId);
+  return {
+    narration: workspace?.fullNarration || '',
+    title: String(selected?.title || workspace?.lockedTitle || workspace?.draftedTitle || '').trim(),
+    intentNotes: workspace?.intentNotes || '',
+    genre: workspace?.genrePackId || selected?.genre || null,
+    language: workspace?.scriptLanguage
+  };
+}
+
 export function isVisualBibleStale(
   bible: VisualBible | null | undefined,
   narration: string,
   genre?: ScriptGenre | null,
-  extras?: { title?: string; intentNotes?: string }
+  extras?: BibleSourceExtras
 ): boolean {
   if (!bible) return true;
   if (bible.pinned) return false;
@@ -109,19 +144,24 @@ export function visualBibleSourceShift(
   bible: VisualBible | null | undefined,
   narration: string,
   genre?: ScriptGenre | null,
-  extras?: { title?: string; intentNotes?: string }
+  extras?: BibleSourceExtras
 ): boolean {
   if (!bible) return true;
   const next = currentSourceKey(narration, {
     title: extras?.title,
     intentNotes: extras?.intentNotes,
     genre,
-    language: bible.analysisInput?.language
+    language: extras?.language || bible.analysisInput?.language
   });
   const current = bible.sourceKey || bible.sourceFingerprint || '';
   if (current) return current !== next;
   return bible.sourceHash !== legacyBibleSourceHash(narration, genre, bible.mode)
     && bible.sourceHash !== next;
+}
+
+/** Shot image generation. A stale or empty-cast bible is not a hard stop. */
+export function shotImageGenerationBlockedByBible(workspace?: { visualBible?: VisualBible | null } | null): boolean {
+  return visualBibleHasBlockingWarnings(workspace?.visualBible);
 }
 
 function cleanText(value: unknown, fallback = ''): string {

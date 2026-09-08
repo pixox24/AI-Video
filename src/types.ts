@@ -189,7 +189,7 @@ export interface ImageRetryConfig {
 
 export interface CustomLlmApiConfig {
   enabled: boolean;
-  provider: 'builtin' | 'deepseek' | 'openai' | 'custom';
+  provider: 'builtin' | 'gemini' | 'deepseek' | 'openai' | 'custom';
   endpoint: string;
   apiKey: string;
   model: string;

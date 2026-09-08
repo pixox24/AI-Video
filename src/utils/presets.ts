@@ -109,6 +109,20 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     available: true
   },
   {
+    id: 'gemini',
+    name: 'Gemini 原生',
+    badge: '原生协议',
+    description: 'Google Gemini 原生 generateContent 接口，适配服务商提供的 @ai-sdk/google 配置',
+    defaultEndpoint: 'https://vpsairobot.com/v1beta',
+    defaultModel: 'gemini-3.7-flash',
+    popularModels: [
+      { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash', hint: '速度快，适合日常文案和分镜' },
+      { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', hint: '复杂长稿质量更高' }
+    ],
+    docHint: '使用 Gemini 原生协议：POST /models/{model}:generateContent，API Key 通过 x-goog-api-key 发送。接口地址填服务商提供的 baseURL，例如 https://vpsairobot.com/v1beta。',
+    available: true
+  },
+  {
     id: 'deepseek',
     name: 'DeepSeek',
     badge: '已接入',

@@ -141,7 +141,8 @@ import {
   bibleHasNarrativeCast,
   bibleLocksObject,
   visualBibleModeForGenre,
-  visualBibleSourceShift
+  visualBibleSourceShift,
+  workspaceBibleSource
 } from '../utils/visualBible';
 import { extractCastCandidates } from '../utils/castCandidates';
 import { receiveVisualBibleResponse } from '../services/visualBibleService';
@@ -519,12 +520,12 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   const ensureVisualBible = async (base: ScriptWorkspace, narration: string, operation: BibleOperation): Promise<ScriptWorkspace | null> => {
     if (!operationIsCurrent(operation)) { discardBibleOperation(); return null; }
     if (countBudgetUnits(narration, scriptLanguage) < 8) return base;
-    const baseSelected = base.topicCards.find((card) => card.id === base.selectedTopicId);
-    const genre = base.genrePackId || baseSelected?.genre || selected?.genre || null;
-    const bibleTitle = baseSelected?.title || selected?.title || topicTitle;
-    const intentNotes = (base.intentNotes || '').trim();
+    const src = workspaceBibleSource(base);
+    const genre = src.genre;
+    const bibleTitle = src.title;
+    const intentNotes = src.intentNotes;
     const candidates = extractCastCandidates({ narration, title: bibleTitle, intentNotes });
-    const groundOpts = { title: bibleTitle, intentNotes, candidates, language: base.scriptLanguage };
+    const groundOpts = { title: bibleTitle, intentNotes, candidates, language: src.language || base.scriptLanguage };
     const previousBible = base.visualBible || null;
     const requestId = `vb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
@@ -2486,11 +2487,8 @@ function DirectorRail({
   const budget = workspace.durationBudget;
   const notes = workspace.directorNotes;
   const bible = workspace.visualBible;
-  const bibleSource = {
-    title: workspace.lockedTitle || workspace.draftedTitle,
-    intentNotes: workspace.intentNotes
-  };
-  const sourceShift = visualBibleSourceShift(bible, workspace.fullNarration, workspace.genrePackId, bibleSource);
+  const bibleSource = workspaceBibleSource(workspace);
+  const sourceShift = visualBibleSourceShift(bible, bibleSource.narration, bibleSource.genre, bibleSource);
   const bibleDiff = previewBibleDiff(bible, {
     narration: workspace.fullNarration,
     title: bibleSource.title,

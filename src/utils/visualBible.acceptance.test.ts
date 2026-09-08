@@ -6,6 +6,9 @@ import {
   fallbackVisualBible,
   groundVisualBible,
   isVisualBibleStale,
+  bibleHasNarrativeCast,
+  shotImageGenerationBlockedByBible,
+  workspaceBibleSource,
   mergeVisualBible,
   normalizeVisualBible,
   rejectPendingCharacter,
@@ -34,6 +37,36 @@ function shot(narration: string, job = 'evidence') {
     coverageJob: job as any
   };
 }
+
+test('选题卡标题编圣经后，不因 lockedTitle 为空误报过期', () => {
+  const narration = '先把油热起来，再下鸡蛋，最后盛盘。';
+  const workspace = {
+    fullNarration: narration,
+    intentNotes: '',
+    lockedTitle: '',
+    draftedTitle: '',
+    genrePackId: null,
+    topicCards: [{ id: 't1', title: '十分钟煎蛋', genre: '教程' as const }],
+    selectedTopicId: 't1'
+  };
+  const src = workspaceBibleSource(workspace);
+  const bible = fallbackVisualBible({ narration: src.narration, title: src.title, intentNotes: src.intentNotes, genre: src.genre });
+  assert.equal(isVisualBibleStale(bible, src.narration, src.genre, src), false);
+  assert.equal(bibleHasNarrativeCast(bible), false);
+  assert.equal(shotImageGenerationBlockedByBible({ visualBible: bible }), false);
+  const oldCheck = isVisualBibleStale(bible, narration, workspace.genrePackId, {
+    title: workspace.lockedTitle,
+    intentNotes: workspace.intentNotes
+  });
+  assert.equal(oldCheck, true);
+});
+
+test('无班底圣经即使来源偏移也不阻拦镜头生图', () => {
+  const bible = fallbackVisualBible({ narration: '先热油再下蛋。', title: '煎蛋', genre: '教程' });
+  assert.equal(bibleHasNarrativeCast(bible), false);
+  assert.equal(shotImageGenerationBlockedByBible({ visualBible: bible }), false);
+  assert.equal(shotImageGenerationBlockedByBible({ visualBible: { ...bible, sourceKey: 'other' } }), false);
+});
 
 test('T01 刚生成不误报过期', async () => {
   resetVisualBibleServiceCache();

@@ -441,15 +441,15 @@ function ImageChannelEditor({
           </div>
           {showConcurrency && (
             <div className="space-y-2">
-              <FieldLabel title="并发" hint={`${resolved.concurrency || 3} 路`} />
-              <div className="grid grid-cols-4 gap-1.5">
-                {[1, 2, 3, 5].map((value) => (
+              <FieldLabel title="并发" hint={`${Math.min(20, Math.max(1, resolved.concurrency || 3))} 路 · 最高 20`} />
+              <div className="grid grid-cols-5 gap-1.5">
+                {[1, 2, 3, 5, 8, 10, 12, 15, 18, 20].map((value) => (
                   <button
                     key={value}
                     type="button"
                     onClick={() => patch({ concurrency: value })}
                     className={`py-2 rounded-xl text-[12px] border cursor-pointer ${
-                      (resolved.concurrency || 3) === value
+                      Math.min(20, Math.max(1, resolved.concurrency || 3)) === value
                         ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
                         : 'bg-[#121217] text-zinc-400 border-[#2b2b38] hover:text-zinc-200'
                     }`}
