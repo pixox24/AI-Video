@@ -1,4 +1,5 @@
 import { CastCandidate } from '../types';
+import { groundEvidenceList, ScriptSources } from './scriptEntity';
 
 /**
  * 剧本结构化分析（感知层）：LLM 只提取事实，不做“要不要上角色”的创作决策。
@@ -138,7 +139,7 @@ function pickEvidence(sentence: string): string {
   return String(sentence || '').replace(/\s+/g, ' ').trim().slice(0, 60);
 }
 
-export function parseScriptAnalysis(raw: unknown): ScriptAnalysis | null {
+export function parseScriptAnalysis(raw: unknown, sources?: ScriptSources): ScriptAnalysis | null {
   if (!raw || typeof raw !== 'object') return null;
   const data = raw as ScriptAnalysis;
   const allowedContent: ScriptContentType[] = [
@@ -155,9 +156,13 @@ export function parseScriptAnalysis(raw: unknown): ScriptAnalysis | null {
           .includes((item as ScriptEntity).type)
           ? (item as ScriptEntity).type
           : 'abstract';
-        const evidence = Array.isArray((item as ScriptEntity).evidence)
+        const quoted = Array.isArray((item as ScriptEntity).evidence)
           ? (item as ScriptEntity).evidence.map(pickEvidence).filter(Boolean).slice(0, 2)
           : [];
+        const grounded = sources
+          ? groundEvidenceList(quoted.length ? quoted : [name], sources).map((span) => span.text)
+          : quoted;
+        if (sources && !grounded.length) return null;
         return {
           id: `an-${index + 1}`,
           name,
@@ -168,7 +173,7 @@ export function parseScriptAnalysis(raw: unknown): ScriptAnalysis | null {
             ? (item as ScriptEntity).gender
             : 'unknown',
           ageBand: String((item as ScriptEntity).ageBand || '').trim() || undefined,
-          evidence: evidence.length ? evidence : [name]
+          evidence: grounded
         };
       }).filter((item): item is ScriptEntity => Boolean(item)).slice(0, 8)
     : [];
@@ -208,7 +213,7 @@ characters 必须输出 []。若正文是说明/教程/带货，把产品与实�
   const narrative = analysis.content_type === 'narrative_story' || analysis.content_type === 'emotional_essay';
   return [
     '【整篇剧本解析 · 可认领实体】只能从下列实体认领人物/动物角色，禁止发明名单外的人或动物。',
-    '每张卡必须带 sourceEvidence（引用原文）与 candidateId。',
+    '每张卡必须带 sourceEvidence（引用原文）、candidateId 与 entityId，且三者对应同一台账实体。',
     '优先选「贯穿全篇」的实体作主角；只出现一次的具名实体若承担收束可作配角。',
     narrative
       ? '本片为叙事型：角色必须做一致性锁定（同一脸/服装/识别点）。'

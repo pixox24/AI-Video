@@ -38,6 +38,7 @@ import {
   ShotEnergy,
   StoryboardClip,
   TopicCard,
+  NarratorMode,
   StylePack,
   VisualBible,
   VisualStyle
@@ -62,6 +63,21 @@ import {
   recommendDuration,
   usageRatio
 } from '../utils/scriptBudget';
+import {
+  FILL_RATIO_MIN,
+  LONG_FORM_SECONDS,
+  MAX_VIDEO_SECONDS,
+  MIN_VIDEO_SECONDS,
+  SPAN_BATCH_SIZE,
+  COVERAGE_BATCH_SIZE,
+  chunkItems,
+  clampVideoSeconds,
+  isLongForm,
+  maxForecastShotsForDuration
+} from '../utils/scriptDuration';
+import { splitCompleteSentences } from '../utils/speechSpans';
+import { splitCoversSource } from '../utils/scriptSplit';
+import { validateDraftResult } from '../utils/scriptDraft';
 import { translateClipsSecondary } from '../utils/secondaryText';
 import {
   adoptPastedScriptFromTitle,
@@ -73,7 +89,6 @@ import {
   canApplyStoryboard,
   diagnoseExistingScript,
   narrationForDiagnose,
-  fallbackDraft,
   fallbackTopicCards,
   forecastScriptHash,
   forecastSummary,
@@ -104,25 +119,34 @@ import { bgmById } from '../utils/presets';
 import { showStatusToast } from '../utils/statusToast';
 import {
   bibleSummary,
+  bibleSubjects,
   characterRefPreview,
   characterHasRef,
   clearCharacterRef,
+  confirmPendingCharacter,
   continuityShortLabel,
+  evidenceSourceLabel,
   fallbackVisualBible,
   groundVisualBible,
-  isVisualBibleStale,
-  lockedCastOnly,
   mergeVisualBible,
+  occupancyReasonLabel,
   normalizeVisualBible,
+  previewBibleDiff,
+  applyNarratorMode,
+  rejectPendingCharacter,
   setCharacterRef,
-  toggleCharacterLock,
+  toggleCharacterLockFlag,
   updateCharacterField,
   bibleHasCast,
   bibleHasNarrativeCast,
   bibleLocksObject,
-  visualBibleModeForGenre
+  visualBibleModeForGenre,
+  visualBibleSourceShift
 } from '../utils/visualBible';
 import { extractCastCandidates } from '../utils/castCandidates';
+import { receiveVisualBibleResponse } from '../services/visualBibleService';
+import { applyCharacterRefResponse, captureCharacterRefRequest, CharacterRefRequest, createBibleOperationGuard } from '../utils/visualBibleAsync';
+import { reduceBibleAction } from '../utils/visualBibleState';
 import { prepareCharacterRefFile } from '../utils/characterRef';
 import {
   CHARACTER_CARD_VARIANTS,
@@ -131,6 +155,7 @@ import {
 } from '../utils/characterCardPrompt';
 
 interface ScriptPanelProps {
+  projectId?: string;
   workspace: ScriptWorkspace;
   onChange: (workspace: ScriptWorkspace) => void;
   onTopicChange: (topic: string) => void;
@@ -199,6 +224,7 @@ const FUNCTION_LABEL: Record<BeatFunction, string> = {
 };
 
 export const ScriptPanel: React.FC<ScriptPanelProps> = ({
+  projectId = '',
   workspace,
   onChange,
   onTopicChange,
@@ -234,6 +260,13 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [focusTitle, setFocusTitle] = useState(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const liveWorkspace = useRef(workspace);
+  liveWorkspace.current = workspace;
+  const bibleOperations = useRef(createBibleOperationGuard());
+  useEffect(() => () => bibleOperations.current.cancel(), []);
+  type BibleOperation = ReturnType<typeof bibleOperations.current.start>;
+  const operationIsCurrent = (operation: BibleOperation) => bibleOperations.current.isCurrent(operation, liveWorkspace.current);
+  const discardBibleOperation = () => setStatus('文案或角色设置已更新，已忽略此前的处理结果');
 
   useEffect(() => {
     if (workspace.stage === 'intent' && focusTitle) {
@@ -273,7 +306,9 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   }, [speechRate, workspace.durationBudget.speechRate]);
 
   const commit = (next: ScriptWorkspace) => {
-    onChange(refreshWorkspaceDerived(next));
+    const committed = refreshWorkspaceDerived(next);
+    onChange(committed);
+    return committed;
   };
 
   const setStage = (stage: ScriptStage) => commit({ ...workspace, stage, gate: 'deep' });
@@ -426,8 +461,9 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       source = lockTitleFromIntent(workspace);
       card = source.topicCards.find((item) => item.id === source.selectedTopicId) || null;
       onTopicChange(source.lockedTitle);
-      commit(source);
+      source = commit(source);
     }
+    const operation = bibleOperations.current.start(source);
     const topic = card?.title || source.lockedTitle.trim() || source.intentNotes.trim();
     if (!topic) {
       setError(workspace.intent === 'have-title' ? '先回意图页写标题' : '先选定选题，或在意图里写方向');
@@ -435,7 +471,9 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     }
     setBusy('draft');
     setError(null);
-    setStatus(`按${unitLabel}数预算写节拍和口播...`);
+    setStatus(isLongForm(source.durationBudget.targetSeconds)
+      ? `长视频按章节写稿（目标 ${source.durationBudget.targetSeconds}s）...`
+      : `按${unitLabel}数预算写节拍和口播...`);
     try {
       const res = await fetch('/api/script/draft', {
         method: 'POST',
@@ -455,23 +493,40 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         })
       });
       const data = await res.json().catch(() => ({}));
-      await applyDraftResult(data, topic, source, card);
-    } catch {
-      await applyDraftResult(null, topic, source, card);
+      if (!operationIsCurrent(operation)) { discardBibleOperation(); return; }
+      if (!res.ok || data?.source === 'fallback') {
+        const parts = [
+          data?.error,
+          data?.detail && data.detail !== data?.error ? `原因：${data.detail}` : '',
+          data?.validationDetail && data.validationDetail !== data?.detail ? `校验：${data.validationDetail}` : '',
+          data?.recommendation
+        ].filter(Boolean);
+        const message = parts.join(' ') || data?.warnings?.[0] || `写稿失败${res.ok ? '' : `（HTTP ${res.status}）`}，未套用短稿。`;
+        setError(message);
+        setStatus(message);
+        return;
+      }
+      await applyDraftResult(data, topic, source, card, operation);
+    } catch (err: any) {
+      if (!operationIsCurrent(operation)) { discardBibleOperation(); return; }
+      setError(err?.message || '写稿请求失败，未套用短稿。');
+      setStatus('写稿请求失败，未套用短稿。');
     } finally {
-      setBusy(null);
+      if (bibleOperations.current.isCurrent(operation, operation.workspace)) setBusy(null);
     }
   };
 
-  const ensureVisualBible = async (base: ScriptWorkspace, narration: string): Promise<ScriptWorkspace> => {
+  const ensureVisualBible = async (base: ScriptWorkspace, narration: string, operation: BibleOperation): Promise<ScriptWorkspace | null> => {
+    if (!operationIsCurrent(operation)) { discardBibleOperation(); return null; }
     if (countBudgetUnits(narration, scriptLanguage) < 8) return base;
     const baseSelected = base.topicCards.find((card) => card.id === base.selectedTopicId);
     const genre = base.genrePackId || baseSelected?.genre || selected?.genre || null;
     const bibleTitle = baseSelected?.title || selected?.title || topicTitle;
     const intentNotes = (base.intentNotes || '').trim();
     const candidates = extractCastCandidates({ narration, title: bibleTitle, intentNotes });
-    const groundOpts = { title: bibleTitle, intentNotes, candidates };
-    const previousBible = lockedCastOnly(base.visualBible);
+    const groundOpts = { title: bibleTitle, intentNotes, candidates, language: base.scriptLanguage };
+    const previousBible = base.visualBible || null;
+    const requestId = `vb-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       const res = await fetch('/api/script/visual-bible', {
         method: 'POST',
@@ -484,41 +539,71 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           llmApi: customLlmApi,
           previousBible,
           intentNotes,
-          candidates
+          candidates,
+          requestId,
+          language: base.scriptLanguage
         })
       });
       const data = await res.json().catch(() => ({}));
+      if (!operationIsCurrent(operation)) { discardBibleOperation(); return null; }
+      if (data?.diagnostics && !receiveVisualBibleResponse({
+        narration,
+        title: bibleTitle,
+        intentNotes,
+        genre,
+        requestId,
+        bibleRevision: base.visualBible?.bibleRevision,
+        language: base.scriptLanguage
+      }, data)) {
+        discardBibleOperation();
+        return null;
+      }
       const incoming = normalizeVisualBible(data?.bible, visualBibleModeForGenre(genre));
       // 服务端已做整篇剧本解析并按规则收敛卡面时，本地不要再拿“挖掘候选”补角色，避免误卡复活。
       const groundCandidates = data?.analysisApplied ? [] : groundOpts.candidates;
       const bible = incoming
-        ? groundVisualBible(mergeVisualBible(previousBible, incoming), narration, { ...groundOpts, candidates: groundCandidates })
-        : groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, groundOpts);
+        ? groundVisualBible(mergeVisualBible(previousBible, incoming), narration, { ...groundOpts, candidates: groundCandidates, genre })
+        : groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, { ...groundOpts, genre });
       return { ...base, visualBible: bible };
     } catch {
+      if (!operationIsCurrent(operation)) { discardBibleOperation(); return null; }
       return {
         ...base,
-        visualBible: groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, groundOpts)
+        visualBible: groundVisualBible(mergeVisualBible(previousBible, fallbackVisualBible({ narration, genre, title: bibleTitle, intentNotes, candidates })), narration, { ...groundOpts, genre })
       };
     }
   };
 
   const refineSpeechSpans = async (base: ScriptWorkspace, narration: string): Promise<ScriptWorkspace> => {
+    const lang = normalizeScriptLanguage(base.scriptLanguage);
+    const sentences = splitCompleteSentences(narration, lang, { keepShort: true });
+    const batches = chunkItems(sentences.length ? sentences : [narration], SPAN_BATCH_SIZE);
+    const collected: ScriptWorkspace['speechSpans'] = [];
     try {
-      const res = await fetch('/api/script/split-spans', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          narration,
-          llmApi: customLlmApi,
-          visualBible: base.visualBible,
-          genre: base.genrePackId || selected?.genre || null,
-          scriptLanguage: normalizeScriptLanguage(base.scriptLanguage)
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (Array.isArray(data?.spans) && data.spans.length > 0) {
-        return rebuildForecast({ ...base, fullNarration: narration, speechSpans: data.spans });
+      for (const batch of batches) {
+        const part = batch.join(lang === 'en' ? ' ' : '');
+        let data: any = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const res = await fetch('/api/script/split-spans', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              narration: part,
+              llmApi: customLlmApi,
+              visualBible: base.visualBible,
+              genre: base.genrePackId || selected?.genre || null,
+              scriptLanguage: lang
+            })
+          });
+          data = await res.json().catch(() => ({}));
+          if (Array.isArray(data?.spans) && data.spans.length > 0) break;
+        }
+        if (Array.isArray(data?.spans) && data.spans.length > 0) {
+          collected.push(...data.spans);
+        }
+      }
+      if (collected.length > 0 && splitCoversSource(collected.map((span) => span.text), narration)) {
+        return rebuildForecast({ ...base, fullNarration: narration, speechSpans: collected });
       }
     } catch {
       // local sentence + contrast visuals
@@ -530,28 +615,38 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     const shots = base.forecastShots || [];
     if (shots.length < 2) return base;
     try {
-      const res = await fetch('/api/script/coverage', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          shots: shots.map((shot) => ({
-            id: shot.id,
-            function: shot.function,
-            voRole: shot.voRole,
-            splitReason: shot.splitReason,
-            sliceText: shot.sliceText,
-            narration: shot.narration,
-            visualIntent: shot.visualIntent
-          })),
-          visualBible: base.visualBible,
-          genre: base.genrePackId || selected?.genre || null,
-          stylePack,
-          llmApi: customLlmApi
-        })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (Array.isArray(data?.shots) && data.shots.length === shots.length) {
-        return { ...base, forecastShots: applyLlmCoverage(shots, data.shots, base.visualBible) };
+      const patches: any[] = [];
+      for (const batch of chunkItems(shots, COVERAGE_BATCH_SIZE)) {
+        let data: any = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const res = await fetch('/api/script/coverage', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              shots: batch.map((shot) => ({
+                id: shot.id,
+                function: shot.function,
+                voRole: shot.voRole,
+                splitReason: shot.splitReason,
+                sliceText: shot.sliceText,
+                narration: shot.narration,
+                visualIntent: shot.visualIntent
+              })),
+              visualBible: base.visualBible,
+              genre: base.genrePackId || selected?.genre || null,
+              stylePack,
+              llmApi: customLlmApi
+            })
+          });
+          data = await res.json().catch(() => ({}));
+          if (Array.isArray(data?.shots) && data.shots.length === batch.length) break;
+        }
+        if (Array.isArray(data?.shots) && data.shots.length === batch.length) {
+          patches.push(...data.shots);
+        }
+      }
+      if (patches.length === shots.length) {
+        return { ...base, forecastShots: applyLlmCoverage(shots, patches, base.visualBible) };
       }
     } catch {
       // keep rule coverage from rebuildForecast
@@ -562,21 +657,29 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   const applyDraftResult = async (
     data: any,
     topic: string,
-    source: ScriptWorkspace = workspace,
-    card: TopicCard | null = selected
+    source: ScriptWorkspace,
+    card: TopicCard | null,
+    operation: BibleOperation
   ) => {
-    const fallback = fallbackDraft({
-      topic,
-      hook: card?.hook,
-      insight: card?.insight || source.intentNotes,
-      genre: card?.genre,
+    const validation = validateDraftResult({
+      fullNarration: data?.fullNarration,
+      beats: data?.beats,
+      sections: data?.sections,
       maxChars: source.durationBudget.maxChars,
-      scriptLanguage: normalizeScriptLanguage(source.scriptLanguage)
+      targetSeconds: source.durationBudget.targetSeconds,
+      scriptLanguage: normalizeScriptLanguage(source.scriptLanguage),
+      source: data?.source === 'fallback' ? 'fallback' : 'llm'
     });
-    const beats = Array.isArray(data?.beats) && data.beats.length >= 2 ? data.beats : fallback.beats;
-    const fullNarration = typeof data?.fullNarration === 'string' && data.fullNarration.trim()
-      ? data.fullNarration.trim()
-      : fallback.fullNarration;
+    if (!validation.ok || validation.source === 'fallback') {
+      setError(data?.error || validation.warnings[0] || '写稿未通过校验，未套用短稿。');
+      return;
+    }
+    const beats = Array.isArray(data?.beats) && data.beats.length >= 2 ? data.beats : [];
+    const fullNarration = typeof data?.fullNarration === 'string' ? data.fullNarration.trim() : '';
+    if (!fullNarration || beats.length < 2) {
+      setError('写稿结果不完整，未套用短稿。');
+      return;
+    }
     const drafted: ScriptWorkspace = {
       ...source,
       beats: beats.map((beat: any, index: number) => ({
@@ -588,35 +691,47 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         targetSeconds: Number(beat.targetSeconds) || 0,
         energy: beat.energy || 'medium',
         visualIntent: beat.visualIntent || '',
-        needsHold: Boolean(beat.needsHold)
+        needsHold: Boolean(beat.needsHold),
+        sectionId: beat.sectionId
       })),
+      sections: Array.isArray(data?.sections) ? data.sections : undefined,
       fullNarration,
       speechSpans: [],
       draftedTitle: topic,
+      draftSource: 'llm',
+      draftWarnings: Array.isArray(data?.warnings) ? data.warnings : validation.warnings,
       stage: 'copy',
       gate: 'fast'
     };
-    const withBible = await ensureVisualBible(drafted, fullNarration);
+    const withBible = await ensureVisualBible(drafted, fullNarration, operation);
+    if (!withBible) return;
     const spanned = await refineSpeechSpans(withBible, fullNarration);
     const next = await refineCoverage(spanned);
+    if (!operationIsCurrent(operation)) { discardBibleOperation(); return; }
     const keepLockedTitle = card?.hookType === 'locked-title';
     if (!keepLockedTitle && typeof data?.title === 'string' && data.title.trim()) {
       onTopicChange(data.title.trim());
     }
     onChange(next);
-    const overBudget = countBudgetUnits(fullNarration, source.scriptLanguage) > source.durationBudget.maxChars;
+    const used = countBudgetUnits(fullNarration, source.scriptLanguage);
+    const overBudget = used > source.durationBudget.maxChars * 1.05;
+    const underBudget = used < source.durationBudget.maxChars * FILL_RATIO_MIN;
+    const warnText = Array.isArray(data?.warnings) && data.warnings.length ? ` ${data.warnings[0]}` : '';
     setStatus(
       overBudget
-        ? '文案已保留，但预计口播超出当前目标时长；可延长视频或压缩文案。'
-        : bibleHasNarrativeCast(withBible.visualBible)
-          ? '已编画面圣经。有证据的角色会在叙事镜上镜，insert 默认无人。'
-          : bibleHasCast(withBible.visualBible)
-            ? '已编画面圣经。教程/说明型内容，锁定同一被加工对象的实物状态，按句图解。'
-            : '口播按整句切开。未识别到可指认主体，按图解推进。'
+        ? `文案已保留，但预计口播超出当前目标时长；可延长视频或压缩文案。${warnText}`
+        : underBudget
+          ? `口播已写入，但只填了预算的 ${Math.round((used / Math.max(1, source.durationBudget.maxChars)) * 100)}%，目标是 90%–105%。${warnText}`
+          : bibleHasNarrativeCast(withBible.visualBible)
+            ? '已编画面圣经。有证据的角色会在叙事镜上镜，insert 默认无人。'
+            : bibleHasCast(withBible.visualBible)
+              ? '已编画面圣经。教程/说明型内容，锁定同一被加工对象的实物状态，按句图解。'
+              : '口播按整句切开。未识别到可指认主体，按图解推进。'
     );
   };
 
   const handleDiagnose = async () => {
+    const operation = bibleOperations.current.start(workspace);
     const pasted = narrationForDiagnose(workspace);
     if (countBudgetUnits(pasted, scriptLanguage) < 8) {
       setError('先把已有口播粘贴进来');
@@ -632,12 +747,14 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         fullNarration: pasted,
         intentNotes: pasted,
         speechSpans: [],
-        visualBible: scriptChanged && !workspace.visualBible?.pinned ? null : workspace.visualBible,
+        visualBible: workspace.visualBible,
         gate: 'fast'
       });
-      const withBible = await ensureVisualBible(diagnosed, pasted);
+      const withBible = await ensureVisualBible(diagnosed, pasted, operation);
+      if (!withBible) return;
       const spanned = await refineSpeechSpans(withBible, pasted);
       const next = await refineCoverage(spanned);
+      if (!operationIsCurrent(operation)) { discardBibleOperation(); return; }
       onChange(next);
       setStatus(
         bibleHasNarrativeCast(withBible.visualBible)
@@ -647,7 +764,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
             : '已按整句切口播；未识别到可指认主体，按图解推进。'
       );
     } finally {
-      setBusy(null);
+      if (bibleOperations.current.isCurrent(operation, operation.workspace)) setBusy(null);
     }
   };
 
@@ -658,6 +775,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   });
 
   const handleRebuildBible = async () => {
+    const operation = bibleOperations.current.start(workspace);
     const narration = workspace.fullNarration.trim();
     if (countBudgetUnits(narration, scriptLanguage) < 8) {
       setError('先写出口播，再编画面圣经');
@@ -669,12 +787,14 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       const next = await ensureVisualBible({
         ...workspace,
         visualBible: workspace.visualBible ? { ...workspace.visualBible, pinned: false } : null
-      }, narration);
+      }, narration, operation);
+      if (!next) return;
       const covered = await refineCoverage(rebuildForecast(next));
+      if (!operationIsCurrent(operation)) { discardBibleOperation(); return; }
       onChange(covered);
       setStatus(bibleHasNarrativeCast(next.visualBible) ? '画面圣经已按新口播重编。未上锁角色和参考图已清掉。' : '画面约束已更新。未发现叙事班底，按说明型/图解处理。');
     } finally {
-      setBusy(null);
+      if (bibleOperations.current.isCurrent(operation, operation.workspace)) setBusy(null);
     }
   };
 
@@ -1138,7 +1258,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
             <BeatsStage
               workspace={workspace}
               onChange={(beats) => {
-                const fullNarration = narrationFromBeats(beats);
+                const fullNarration = narrationFromBeats(beats, workspace.scriptLanguage);
                 onChange(rebuildForecast({ ...workspace, beats, fullNarration }));
               }}
               onFillHook={handleFillHook}
@@ -1148,7 +1268,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
             <CopyStage
               workspace={workspace}
               onChange={(fullNarration) => {
-                const beats = applyNarrationToBeats(workspace.beats, fullNarration);
+                const beats = applyNarrationToBeats(workspace.beats, fullNarration, workspace.scriptLanguage);
                 onChange(rebuildForecast({ ...workspace, fullNarration, beats }));
               }}
               onDraft={handleDraft}
@@ -1181,6 +1301,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
 
         <aside className="hidden xl:flex w-72 flex-shrink-0 border-l border-[#23232c] bg-[#14141a] flex-col overflow-hidden">
           <DirectorRail
+            projectId={projectId}
             workspace={workspace}
             onChange={onChange}
             onRebuildBible={() => void handleRebuildBible()}
@@ -1194,6 +1315,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
 
       <div className="xl:hidden border-t border-[#23232c] bg-[#14141a] px-5 py-3">
         <DirectorRail
+          projectId={projectId}
           workspace={workspace}
           onChange={onChange}
           onRebuildBible={() => void handleRebuildBible()}
@@ -1795,6 +1917,9 @@ function DurationStage({
   const lang = normalizeScriptLanguage(workspace.scriptLanguage);
   const unit = budgetUnitLabel(lang);
   const canDraft = hasUsableDraftTopic(workspace);
+  const plat = PLATFORM_OPTIONS.find((item) => item.id === budget.platform);
+  const longForm = isLongForm(budget.targetSeconds);
+  const lockMax = Math.min(Math.max(24, estimate.max), maxForecastShotsForDuration(budget.targetSeconds));
   const draftHint = workspace.intent === 'have-title' && !isLockedTitleValid(workspace.lockedTitle, lang) && !selected
     ? '先回意图页写标题'
     : undefined;
@@ -1803,7 +1928,7 @@ function DurationStage({
     <div className="space-y-5 max-w-4xl">
       <SectionIntro
         title="把时长当成预算"
-        desc={rec ? rec.reason : `改平台、节奏、秒数，${unit}数和停留会立刻重算。体裁包会带上节拍骨架。`}
+        desc={rec ? rec.reason : `改平台、节奏、秒数，${unit}数和停留会立刻重算。体裁包会带上节拍骨架。平台范围是推荐值，不是硬上限。`}
       />
       <div className="flex flex-wrap gap-2">
         {GENRE_PACKS.map((pack) => (
@@ -1826,6 +1951,9 @@ function DurationStage({
             {item.label}
           </Chip>
         ))}
+        {plat && (
+          <span className="text-[11px] text-zinc-500">推荐 {plat.min}–{plat.max}s · 最长 {MAX_VIDEO_SECONDS}s</span>
+        )}
       </div>
       <div className="flex flex-wrap gap-2">
         {(Object.values(PACE_PRESETS) as typeof PACE_PRESETS[ScriptPace][]).map((item) => (
@@ -1840,14 +1968,22 @@ function DurationStage({
             {seconds}s
           </Chip>
         ))}
+        {longForm && (
+          <span className="text-[10px] px-2 py-1 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/30">
+            长视频 · {budget.targetSeconds}s
+          </span>
+        )}
         <label className="text-[11px] text-zinc-500 flex items-center gap-1.5">
           自定义
           <input
             type="number"
-            min={8}
-            max={180}
+            min={MIN_VIDEO_SECONDS}
+            max={MAX_VIDEO_SECONDS}
             value={budget.targetSeconds}
-            onChange={(e) => onBudget(buildDurationBudget({ ...budget, targetSeconds: Number(e.target.value) }))}
+            onChange={(e) => {
+              const next = clampVideoSeconds(Number(e.target.value), budget.targetSeconds);
+              onBudget(buildDurationBudget({ ...budget, targetSeconds: next.seconds }));
+            }}
             className="w-16 bg-[#18181f] border border-[#2b2b36] rounded-lg px-2 py-1 text-zinc-200 text-[12px]"
           />
         </label>
@@ -1856,7 +1992,7 @@ function DurationStage({
           <input
             type="number"
             min={2}
-            max={24}
+            max={lockMax}
             placeholder="自动"
             value={budget.lockedShotCount ?? ''}
             onChange={(e) => onBudget(buildDurationBudget({
@@ -1895,7 +2031,8 @@ function DurationStage({
 
       <div className="text-[12px] text-zinc-400 flex flex-wrap items-center gap-2 leading-relaxed">
         <Clock className="w-3.5 h-3.5 text-amber-400" />
-        口播 {formatSeconds(budget.speechSeconds)} · 停留 {formatSeconds(budget.holdSeconds)} · {estimate.min}–{estimate.max} 镜
+        口播 {formatSeconds(budget.speechSeconds)} · 停留 {formatSeconds(budget.holdSeconds)} · {budget.lockedShotCount ? `锁 ${budget.lockedShotCount} 镜` : `${estimate.min}–${estimate.max} 镜`}
+        {longForm && <span className="text-amber-300/80">· ≥{LONG_FORM_SECONDS}s 按章节生成</span>}
         {budget.actualSpeechSeconds != null && (
           <span className="text-emerald-300">· 实测口播 {formatSeconds(budget.actualSpeechSeconds)}</span>
         )}
@@ -1932,7 +2069,21 @@ function BeatsStage({
   }
   return (
     <div className="space-y-4">
-      <SectionIntro title="节拍表" desc="改某一拍的口播，整段旁白和节奏带会一起重算。钩子行可以接调研笔记。" />
+      <SectionIntro
+        title="节拍表"
+        desc={workspace.sections && workspace.sections.length > 1
+          ? `长视频按 ${workspace.sections.length} 章展开。改某一拍的口播，整段旁白和节奏带会一起重算。`
+          : '改某一拍的口播，整段旁白和节奏带会一起重算。钩子行可以接调研笔记。'}
+      />
+      {workspace.sections && workspace.sections.length > 1 && (
+        <div className="flex flex-wrap gap-2">
+          {workspace.sections.map((section) => (
+            <span key={section.id} className="text-[10px] px-2 py-1 rounded-lg border border-[#2b2b36] text-zinc-400">
+              {section.order}. {section.title} · {section.targetSeconds}s
+            </span>
+          ))}
+        </div>
+      )}
       <HookDropZone onFillHook={onFillHook} />
       <div className="space-y-2">
         {workspace.beats.map((beat, index) => (
@@ -2005,7 +2156,8 @@ function CopyStage({
 }) {
   const budget = workspace.durationBudget;
   const unit = budgetUnitLabel(workspace.scriptLanguage);
-  const over = budget.usedChars > budget.maxChars;
+  const over = budget.usedChars > budget.maxChars * 1.05;
+  const under = budget.usedChars > 0 && budget.usedChars < budget.maxChars * FILL_RATIO_MIN && budget.durationMode === 'target-driven';
   const lockedTitle = workspaceTopicTitle(workspace);
   return (
     <div className="space-y-4 max-w-4xl">
@@ -2025,8 +2177,9 @@ function CopyStage({
       )}
       <HookDropZone onFillHook={onFillHook} />
       <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
-        <span className={over ? 'text-amber-300' : 'text-zinc-400'}>
+        <span className={over || under ? 'text-amber-300' : 'text-zinc-400'}>
           {budget.usedChars} / {budget.maxChars} {unit} · 预计口播 {formatSeconds(budget.usedChars / Math.max(0.1, budget.charsPerSecond))}
+          {under ? ' · 未填满 90%' : over ? ' · 超出 105%' : ''}
         </span>
         {workspace.intent === 'have-script' ? (
           <div className="flex items-center gap-3">
@@ -2046,7 +2199,7 @@ function CopyStage({
         rows={14}
         placeholder="口播写在这里。刷新后还在。"
         className={`w-full bg-[#18181f] border rounded-2xl p-4 text-[14px] leading-relaxed text-zinc-100 placeholder-zinc-600 focus:outline-none resize-none select-text ${
-          over ? 'border-amber-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
+          over || under ? 'border-amber-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
         }`}
       />
       <RhythmTape shots={workspace.forecastShots} onHoldChange={onHoldChange} />
@@ -2087,11 +2240,21 @@ function RhythmStage({
                   {shot.visualCount && shot.visualCount > 1 ? ` · 同一句图 ${(shot.visualIndex || 0) + 1}/${shot.visualCount}` : ''}
                   {shot.holdPinned ? ' · 停留已钉' : ''}
                   {continuityShortLabel(shot.continuity) ? ` · ${continuityShortLabel(shot.continuity)}` : ''}
-                  {shot.characterIds?.length
-                    ? ` · ${workspace.visualBible?.characters.find((item) => shot.characterIds!.includes(item.id))?.name || '角色'}`
-                    : shot.coverageJob === 'insert'
-                      ? ' · 无人'
-                      : ''}
+                  {shot.occupancyPlan
+                    ? ` · ${occupancyReasonLabel(shot.occupancyPlan.reason) || (shot.occupancyPlan.onCamera ? '上人' : '无人')}${
+                        shot.occupancyPlan.characterIds.length
+                          ? ` ${shot.occupancyPlan.characterIds.map((id) => workspace.visualBible?.characters.find((item) => item.id === id)?.name).filter(Boolean).join('、')}`
+                          : ''
+                      }${
+                        shot.occupancyPlan.subjectIds.length
+                          ? ` ${shot.occupancyPlan.subjectIds.map((id) => bibleSubjects(workspace.visualBible).find((item) => item.id === id)?.name).filter(Boolean).join('、')}`
+                          : ''
+                      }`
+                    : shot.characterIds?.length
+                      ? ` · ${workspace.visualBible?.characters.find((item) => shot.characterIds!.includes(item.id))?.name || '角色'}`
+                      : shot.coverageJob === 'insert'
+                        ? ' · 无人'
+                        : ''}
                 </div>
                 <div className="mt-0.5 text-[10px] text-zinc-600 truncate">{shot.splitReason}</div>
               </div>
@@ -2292,6 +2455,7 @@ function CharacterRefSlot({
 }
 
 function DirectorRail({
+  projectId,
   workspace,
   onChange,
   onRebuildBible,
@@ -2301,6 +2465,7 @@ function DirectorRail({
   onGenerateCharacterRef,
   onGenerateCharacterRefAll
 }: {
+  projectId: string;
   workspace: ScriptWorkspace;
   onChange?: (workspace: ScriptWorkspace) => void;
   onRebuildBible?: () => void;
@@ -2311,32 +2476,52 @@ function DirectorRail({
   onGenerateCharacterRefAll?: () => void;
 }) {
   const [compactOpen, setCompactOpen] = useState(false);
+  const latestWorkspace = useRef(workspace);
+  latestWorkspace.current = workspace;
+  const uploads = useRef(new Map<string, CharacterRefRequest>());
+  useEffect(() => () => uploads.current.clear(), []);
   const [refBusyId, setRefBusyId] = useState<string | null>(null);
   const [cardBusyId, setCardBusyId] = useState<string | null>(null);
   const [cardVariant, setCardVariant] = useState<Record<string, CharacterCardVariant>>({});
   const budget = workspace.durationBudget;
   const notes = workspace.directorNotes;
   const bible = workspace.visualBible;
-  const stale = isVisualBibleStale(bible, workspace.fullNarration, workspace.genrePackId);
+  const bibleSource = {
+    title: workspace.lockedTitle || workspace.draftedTitle,
+    intentNotes: workspace.intentNotes
+  };
+  const sourceShift = visualBibleSourceShift(bible, workspace.fullNarration, workspace.genrePackId, bibleSource);
+  const bibleDiff = previewBibleDiff(bible, {
+    narration: workspace.fullNarration,
+    title: bibleSource.title,
+    intentNotes: bibleSource.intentNotes,
+    genre: workspace.genrePackId
+  });
   const showCards = !compact || compactOpen;
   const missingRefCount = (bible?.characters || [])
     .filter((character) => shouldOfferAutoCard(character) && !characterHasRef(character)).length;
   const patchBible = (next: VisualBible) => {
     if (!onChange) return;
-    const grounded = workspace.fullNarration.trim()
-      ? groundVisualBible(next, workspace.fullNarration, {
-        title: workspace.lockedTitle || workspace.draftedTitle,
-        intentNotes: workspace.intentNotes
-      })
-      : next;
-    onChange(rebuildForecast({ ...workspace, visualBible: grounded }));
+    onChange(rebuildForecast({ ...workspace, visualBible: next }));
   };
   const handlePickRef = async (characterId: string, file: File) => {
     if (!bible) return;
+    const character = bible.characters.find(item => item.id === characterId);
+    if (!character) return;
+    const request = captureCharacterRefRequest(projectId, bible, character);
+    uploads.current.set(request.entityId, request);
     setRefBusyId(characterId);
     try {
       const ref = await prepareCharacterRefFile(file);
-      patchBible(setCharacterRef(bible, characterId, ref));
+      const live = latestWorkspace.current;
+      const next = live.visualBible && uploads.current.get(request.entityId) === request
+        && live.fullNarration === workspace.fullNarration
+        ? applyCharacterRefResponse(projectId, live.visualBible, request, ref) : null;
+      if (!next) {
+        showStatusToast('角色或参考图已更新，已忽略此前上传的图片', { tone: 'info', id: 'character-ref' });
+        return;
+      }
+      onChange?.(rebuildForecast({ ...live, visualBible: next }));
       showStatusToast('已钉参考图，生图时会锁脸和服装', { tone: 'ok', id: 'character-ref' });
     } catch (err: any) {
       showStatusToast(err?.message || '参考图上传失败', { tone: 'error', id: 'character-ref' });
@@ -2412,7 +2597,7 @@ function DirectorRail({
             onClick={() => setCompactOpen((open) => !open)}
             className="w-full text-left text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
           >
-            {bibleSummary(bible)}{stale ? ' · 口播已改' : ''}{bibleHasCast(bible) ? ' · 点开钉参考图' : ''}
+            {bibleSummary(bible)}{sourceShift ? (bible?.pinned ? ' · 来源已变' : ' · 口播已改') : ''}{bibleHasCast(bible) ? ' · 点开钉参考图' : ''}
           </button>
         )}
         {showCards && (
@@ -2422,9 +2607,47 @@ function DirectorRail({
               {bible ? bibleSummary(bible) : '写稿后会按整段口播编角色和场景，而不是一句一换人。'}
             </p>
             )}
-            {stale && bible && (
-              <p className="text-[11px] text-amber-300 leading-relaxed">口播已改，圣经可能过时。</p>
+            {sourceShift && bible && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10px] text-amber-200 leading-relaxed">
+                {bible.pinned
+                  ? '当前圣经与新口播来源不同。已钉住，不会自动重编。'
+                  : '口播已改，圣经可能过时。'}
+                {bibleDiff.summary ? <div className="mt-1 text-amber-100/80">{bibleDiff.summary}</div> : null}
+              </div>
             )}
+            {bible?.presentation === 'narrator_led' || (bible?.pendingCharacters || []).some((item) => item.kind === 'narrator') ? (
+              <div className="space-y-1.5">
+                <p className="text-[10px] text-zinc-500">第一人称：选择画面身份</p>
+                <div className="flex flex-wrap gap-1">
+                  {([
+                    ['voiceover', '旁白声音'],
+                    ['on_camera', '出镜讲解员'],
+                    ['story_character', '剧情角色']
+                  ] as Array<[NarratorMode, string]>).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => patchBible(applyNarratorMode(bible!, mode, {
+                        narration: workspace.fullNarration,
+                        title: bibleSource.title,
+                        intentNotes: bibleSource.intentNotes,
+                        genre: workspace.genrePackId
+                      }))}
+                      className={`px-2 py-1 rounded-lg text-[10px] border cursor-pointer ${
+                        (bible?.narratorMode || 'voiceover') === mode
+                          ? 'bg-amber-500/15 text-amber-200 border-amber-500/40'
+                          : 'bg-[#18181f] text-zinc-400 border-[#2b2b36] hover:text-zinc-200'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {bible?.analysisReason ? (
+              <p className="text-[10px] text-zinc-500 leading-relaxed">{bible.analysisReason}</p>
+            ) : null}
             {onRebuildBible && (
               <button
                 type="button"
@@ -2445,6 +2668,47 @@ function DirectorRail({
                 一键生成 {missingRefCount} 张缺参考图
               </button>
             )}
+            {Object.values(bible?.overrides || {}).filter(override => override.decision === 'exclude').map(override => (
+              <div key={override.entityId} className="flex items-center justify-between gap-2 text-[10px] text-zinc-500">
+                <span>已排除：{override.displayName || override.decisionCard?.name || bible?.entityLedger?.entities.find(entity => entity.id === override.entityId)?.name}</span>
+                <button type="button" className="text-amber-400" onClick={() => bible && patchBible(reduceBibleAction(bible, {
+                  type: 'set_entity_decision', entityId: override.entityId, decision: 'auto'
+                }))}>恢复自动</button>
+              </div>
+            ))}
+            {(bible?.pendingCharacters || []).map((character) => (
+              <div key={character.id} className="rounded-xl border border-dashed border-amber-500/30 bg-[#18181f] p-2.5 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[12px] text-zinc-100 font-medium">{character.name}</div>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-300">待确认</span>
+                </div>
+                <p className="text-[10px] text-zinc-500">{character.kind === 'narrator' ? '第一人称讲述者' : character.kind === 'anonymous' ? '匿名人物' : '待确认角色'} · 外形未知</p>
+                {character.evidenceSpans?.[0] ? (
+                  <p className="text-[10px] text-emerald-300/80 leading-relaxed">
+                    {evidenceSourceLabel(character.evidenceSpans[0].source)} {character.evidenceSpans[0].start}–{character.evidenceSpans[0].end} 「{character.evidenceSpans[0].text}」
+                  </p>
+                ) : character.sourceEvidence?.[0] ? (
+                  <p className="text-[10px] text-emerald-300/80 leading-relaxed">文案依据：{character.sourceEvidence[0]}</p>
+                ) : null}
+                {character.castReason ? <p className="text-[10px] text-zinc-500">{character.castReason}</p> : null}
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => patchBible(confirmPendingCharacter(bible!, character.id))}
+                    className="flex-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-300 cursor-pointer"
+                  >
+                    确认为角色
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => patchBible(rejectPendingCharacter(bible!, character.id))}
+                    className="flex-1 rounded-lg border border-[#2b2b36] px-2 py-1 text-[10px] text-zinc-400 cursor-pointer"
+                  >
+                    不建卡
+                  </button>
+                </div>
+              </div>
+            ))}
             {bibleHasCast(bible) && bible.characters.map((character) => (
               <div key={character.id} className="rounded-xl border border-[#2b2b36] bg-[#18181f] p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
@@ -2453,24 +2717,54 @@ function DirectorRail({
                     onChange={(e) => patchBible(updateCharacterField(bible, character.id, { name: e.target.value }))}
                     className="bg-transparent text-[12px] text-zinc-100 font-medium min-w-0 flex-1 focus:outline-none"
                   />
-                  <button
-                    type="button"
-                    title={character.locked ? '已上锁：写稿/重编时保留这张卡和参考图' : '未上锁：写稿/重编会按新口播重建并清掉参考图'}
-                    onClick={() => patchBible(toggleCharacterLock(bible, character.id))}
-                    className={`p-1 rounded cursor-pointer ${character.locked ? 'text-amber-300' : 'text-zinc-500 hover:text-zinc-300'}`}
-                  >
-                    {character.locked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-                  </button>
+                  {bible.overrides?.[character.entityId || character.candidateId || '']?.decision === 'include' && (
+                    <button type="button" className="text-[10px] text-zinc-400"
+                      onClick={() => patchBible(reduceBibleAction(bible, { type: 'set_entity_decision',
+                        entityId: character.entityId || character.candidateId || character.id, decision: 'auto' }))}>
+                      恢复自动
+                    </button>
+                  )}
                 </div>
-                <p className="text-[10px] text-zinc-500">{character.role === 'lead' ? '主角' : '配角'} · {character.ageBand}</p>
-                {character.sourceEvidence?.length ? (
+                <p className="text-[10px] text-zinc-500">
+                  {character.role === 'lead' ? '主角' : character.role === 'support' ? '配角' : '群众'}
+                  {' · '}{character.ageBand}
+                  {typeof character.confidence === 'number' ? ` · 置信 ${Math.round(character.confidence * 100)}%` : ''}
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {([
+                    ['identity', '锁身份', character.identityLocked],
+                    ['appearance', '锁外形', character.appearanceLocked],
+                    ['refs', '锁参考图', character.refsLocked]
+                  ] as Array<['identity' | 'appearance' | 'refs', string, boolean | undefined]>).map(([flag, label, on]) => (
+                    <button
+                      key={flag}
+                      type="button"
+                      title={label}
+                      onClick={() => patchBible(toggleCharacterLockFlag(bible, character.id, flag))}
+                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] border cursor-pointer ${
+                        on ? 'text-amber-300 border-amber-500/40 bg-amber-500/10' : 'text-zinc-500 border-[#2b2b36] hover:text-zinc-300'
+                      }`}
+                    >
+                      {on ? <Lock className="w-2.5 h-2.5" /> : <Unlock className="w-2.5 h-2.5" />}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {character.evidenceSpans?.[0] ? (
+                  <p className="text-[10px] text-emerald-300/80 leading-relaxed">
+                    {evidenceSourceLabel(character.evidenceSpans[0].source)} {character.evidenceSpans[0].start}–{character.evidenceSpans[0].end} 「{character.evidenceSpans[0].text}」
+                  </p>
+                ) : character.sourceEvidence?.length ? (
                   <p className="text-[10px] text-emerald-300/80 leading-relaxed">文案依据：{character.sourceEvidence[0]}</p>
                 ) : (
                   <p className="text-[10px] text-amber-300/80 leading-relaxed">未找到明确文案依据，请先核对角色</p>
                 )}
-                {typeof character.confidence === 'number' && (
-                  <p className="text-[10px] text-zinc-600">文案匹配度 {Math.round(character.confidence * 100)}%</p>
-                )}
+                {character.castReason ? (
+                  <p className="text-[10px] text-zinc-500 leading-relaxed">{character.castReason}</p>
+                ) : null}
+                {character.appearanceUnknown ? (
+                  <p className="text-[10px] text-zinc-500">外形未在文案中出现，请确认后再当生图硬约束。</p>
+                ) : null}
                 <textarea
                   value={character.look}
                   onChange={(e) => patchBible(updateCharacterField(bible, character.id, { look: e.target.value }))}
@@ -2533,6 +2827,22 @@ function DirectorRail({
                     {character.refs?.[0]?.notes?.startsWith('generated') ? 'AI 生成参考图 · 已自动上锁' : '生图时会按这张图锁脸和服装'}
                   </p>
                 )}
+              </div>
+            ))}
+            {bibleSubjects(bible).map((subject) => (
+              <div key={subject.id} className="rounded-xl border border-sky-500/20 bg-[#18181f] p-2.5 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[12px] text-zinc-100 font-medium">{subject.name}</div>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded border border-sky-500/30 text-sky-300">实物锁</span>
+                </div>
+                <p className="text-[10px] text-zinc-500 leading-relaxed">{subject.look}</p>
+                {subject.evidenceSpans?.[0] ? (
+                  <p className="text-[10px] text-emerald-300/80 leading-relaxed">
+                    {evidenceSourceLabel(subject.evidenceSpans[0].source)} 「{subject.evidenceSpans[0].text}」
+                  </p>
+                ) : subject.sourceEvidence?.[0] ? (
+                  <p className="text-[10px] text-emerald-300/80 leading-relaxed">文案依据：{subject.sourceEvidence[0]}</p>
+                ) : null}
               </div>
             ))}
             {bible?.locations[0] && (

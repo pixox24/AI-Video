@@ -13,6 +13,7 @@ import {
   looksLikeSecondary,
   normalizeScriptLanguage
 } from './scriptLanguage';
+import { TRANSLATE_BATCH_SIZE, chunkItems } from './scriptDuration';
 
 export interface SecondaryUnit {
   id: string;
@@ -125,7 +126,36 @@ function pickTranslatedText(item: { text?: unknown; en?: unknown; zh?: unknown }
   return '';
 }
 
-/** 批量补齐翻译行：发送显示单元，按 ID 锚定回填。 */
+async function translateSecondaryBatch(
+  units: SecondaryUnit[],
+  llmApi: unknown,
+  from: ScriptLanguage,
+  to: ScriptLanguage
+): Promise<{ map: Map<string, string>; error?: string }> {
+  let res: Response;
+  try {
+    res = await fetch('/api/script/translate-secondary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ units, llmApi, from, to, scriptLanguage: from })
+    });
+  } catch {
+    throw new Error('连不上应用服务，请确认 AI-Video 已启动（或刷新页面后重试）');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !Array.isArray(data?.items)) {
+    throw new Error(data?.error || `翻译服务返回异常（HTTP ${res.status}）`);
+  }
+  const map = new Map<string, string>();
+  for (const item of data.items) {
+    if (!item || typeof item.id !== 'string') continue;
+    const translated = pickTranslatedText(item);
+    if (translated) map.set(item.id, translated);
+  }
+  return { map, error: map.size === 0 ? String(data?.error || '模型没有返回可用翻译') : undefined };
+}
+
+/** 批量补齐翻译行：发送显示单元，按 ID 锚定回填。超过一批自动分片并允许单批重试。 */
 export async function translateClipsSecondary(
   clips: StoryboardClip[],
   llmApi?: unknown,
@@ -137,39 +167,32 @@ export async function translateClipsSecondary(
   const to = bilingualTarget(from);
   const units = pendingTranslateUnits(clips, from);
   if (units.length === 0) return { clips, translated: 0, failed: 0 };
-  try {
-    let res: Response;
-    try {
-      res = await fetch('/api/script/translate-secondary', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ units, llmApi, from, to, scriptLanguage: from })
-      });
-    } catch {
-      throw new Error('连不上应用服务，请确认 AI-Video 已启动（或刷新页面后重试）');
+  const map = new Map<string, string>();
+  const errors: string[] = [];
+  for (const batch of chunkItems(units, TRANSLATE_BATCH_SIZE)) {
+    let lastError = '';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await translateSecondaryBatch(batch, llmApi, from, to);
+        result.map.forEach((value, key) => map.set(key, value));
+        lastError = result.error || '';
+        if (result.map.size > 0) break;
+      } catch (err: any) {
+        lastError = err?.message || '翻译失败';
+      }
     }
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !Array.isArray(data?.items)) {
-      throw new Error(data?.error || `翻译服务返回异常（HTTP ${res.status}）`);
-    }
-    const map = new Map<string, string>();
-    for (const item of data.items) {
-      if (!item || typeof item.id !== 'string') continue;
-      const translated = pickTranslatedText(item);
-      if (translated) map.set(item.id, translated);
-    }
-    if (map.size === 0) {
-      throw new Error(String(data?.error || '模型没有返回可用翻译，请检查设置里的 LLM API 配置'));
-    }
-    return {
-      clips: applySecondaryTranslation(clips, map),
-      translated: map.size,
-      failed: units.length - map.size,
-      error: map.size < units.length ? `有 ${units.length - map.size} 条未译出` : undefined
-    };
-  } catch (err: any) {
-    return { clips, translated: 0, failed: units.length, error: err?.message || '翻译失败' };
+    const missing = batch.filter((unit) => !map.has(unit.id)).length;
+    if (missing > 0 && lastError) errors.push(lastError);
   }
+  if (map.size === 0) {
+    return { clips, translated: 0, failed: units.length, error: errors[0] || '模型没有返回可用翻译，请检查设置里的 LLM API 配置' };
+  }
+  return {
+    clips: applySecondaryTranslation(clips, map),
+    translated: map.size,
+    failed: units.length - map.size,
+    error: map.size < units.length ? `有 ${units.length - map.size} 条未译出` : undefined
+  };
 }
 
 export function secondaryLooksPlausible(source: string, translated: string, from: ScriptLanguage): boolean {

@@ -14,45 +14,148 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-const SENTENCE_SPLIT = /([。！？!?]+)/;
 const TURN_MARKER_ZH = /(而是|却是|其实是|其实|不如|但是|可是)/;
 const TURN_MARKER_EN = /(\bbut\b|\binstead\b|\bhowever\b|\brather\b)/i;
 const CONTRAST_SPAN_ZH = /(不是[^。！？]{1,30}[，,][^。！？]{0,20}(而是|却是|其实是)|虽然[^。！？]{1,30}[，,][^。！？]{0,20}(但是|可是)|与其[^。！？]{1,30}[，,][^。！？]{0,20}不如|[^。！？]{4,40}[，,](其实是|而是|却是))/;
 const CONTRAST_SPAN_EN = /\b(not\b[^.]{1,40},\s*(but|instead)\b|although\b[^.]{1,40},\s*(but|however)\b)/i;
+const EN_ABBREV = /^(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|Inc|Ltd|St|Ave|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec|No|Vol|Fig|U\.S|U\.K|e\.g|i\.e)$/i;
 
 function minUnits(language: ScriptLanguage, zh: number, en: number): number {
   return language === 'en' ? en : zh;
 }
 
-function closeSentence(text: string, language: ScriptLanguage): string {
+export function hasTerminalPunct(text: string): boolean {
+  return /[。！？.!?…]$/.test((text || '').trim());
+}
+
+export function closeSentence(text: string, language: ScriptLanguage): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
-  if (/[。！？!?]$/.test(trimmed)) return trimmed;
+  if (hasTerminalPunct(trimmed)) return trimmed;
   return language === 'en' ? `${trimmed}.` : `${trimmed}。`;
 }
 
-export function splitCompleteSentences(text: string, language?: ScriptLanguage): string[] {
-  const lang = normalizeScriptLanguage(language);
-  const cleaned = (text || '').replace(/\s+/g, ' ').trim();
-  if (!cleaned) return [];
-  const parts = cleaned.split(SENTENCE_SPLIT);
+function wordBefore(text: string, index: number): string {
+  const slice = text.slice(0, index);
+  const match = slice.match(/([A-Za-z.]+)\s*$/);
+  return match ? match[1].replace(/\.$/, '') : '';
+}
+
+function splitChineseSentences(cleaned: string, lang: ScriptLanguage, keepShort: boolean): string[] {
+  const parts = cleaned.split(/([。！？!?]+)/);
   const sentences: string[] = [];
   let current = '';
-  const minLen = minUnits(lang, 2, 2);
+  const minLen = keepShort ? 1 : minUnits(lang, 2, 2);
   for (const part of parts) {
     if (!part) continue;
     if (/^[。！？!?]+$/.test(part)) {
       current = `${current}${part}`;
       if (countBudgetUnits(current, lang) >= minLen) sentences.push(current.trim());
+      else if (keepShort && current.trim()) sentences.push(current.trim());
       current = '';
     } else {
       current = `${current}${part}`;
     }
   }
-  if (countBudgetUnits(current, lang) >= minLen) {
+  if (current.trim() && (keepShort || countBudgetUnits(current, lang) >= minLen)) {
     sentences.push(closeSentence(current, lang));
   }
-  return sentences.filter((sentence) => countBudgetUnits(sentence, lang) >= minLen);
+  return sentences.filter((sentence) => keepShort || countBudgetUnits(sentence, lang) >= minLen);
+}
+
+function splitEnglishSentences(cleaned: string, keepShort: boolean): string[] {
+  const sentences: string[] = [];
+  let last = 0;
+  const re = /[.!?]+(?:["')\]]+)?/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(cleaned))) {
+    const punct = match[0];
+    const end = match.index + punct.length;
+    const after = cleaned.slice(end);
+    const next = after.match(/^\s+([A-Z"'“])/) || after.match(/^\s*$/);
+    const isDecimal = punct === '.' && /[0-9]$/.test(cleaned.slice(0, match.index)) && /^[0-9]/.test(after);
+    const isAbbrev = punct.startsWith('.') && EN_ABBREV.test(wordBefore(cleaned, match.index));
+    if (isDecimal || isAbbrev) continue;
+    if (!next) continue;
+    const sentence = cleaned.slice(last, end).trim();
+    if (sentence && (keepShort || countBudgetUnits(sentence, 'en') >= 2)) {
+      sentences.push(sentence);
+    }
+    last = end;
+  }
+  const rest = cleaned.slice(last).trim();
+  if (rest && (keepShort || countBudgetUnits(rest, 'en') >= 2)) {
+    sentences.push(closeSentence(rest, 'en'));
+  }
+  return sentences;
+}
+
+export function splitCompleteSentences(
+  text: string,
+  language?: ScriptLanguage,
+  opts?: { keepShort?: boolean }
+): string[] {
+  const lang = normalizeScriptLanguage(language);
+  const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return [];
+  const keepShort = Boolean(opts?.keepShort);
+  if (lang === 'en') return splitEnglishSentences(cleaned, keepShort);
+  return splitChineseSentences(cleaned, lang, keepShort);
+}
+
+export interface BeatCharRange {
+  beat: ScriptBeat;
+  start: number;
+  end: number;
+}
+
+export function compactChars(text: string): string {
+  return (text || '').replace(/\s+/g, '');
+}
+
+export function beatRangesFromBeats(beats: ScriptBeat[] | undefined, totalChars: number): BeatCharRange[] {
+  const list = (beats || []).filter(Boolean);
+  if (list.length === 0) return [];
+  const narrated = list.map((beat) => compactChars(beat.narration || '').length);
+  const narratedSum = narrated.reduce((sum, value) => sum + value, 0);
+  if (narratedSum > 0) {
+    let cursor = 0;
+    return list.map((beat, index) => {
+      const len = Math.max(1, narrated[index] || 0);
+      const range = { beat, start: cursor, end: cursor + len };
+      cursor += len;
+      return range;
+    });
+  }
+  const weights = list.map((beat) => Math.max(1, Number(beat.targetSeconds) || 1));
+  const weightSum = weights.reduce((sum, value) => sum + value, 0) || 1;
+  const span = Math.max(1, totalChars);
+  let cursor = 0;
+  return list.map((beat, index) => {
+    const last = index === list.length - 1;
+    const len = last ? Math.max(1, span - cursor) : Math.max(1, Math.round((weights[index] / weightSum) * span));
+    const range = { beat, start: cursor, end: cursor + len };
+    cursor += len;
+    return range;
+  });
+}
+
+export function mapSentencesToBeats(
+  sentences: string[],
+  beats: ScriptBeat[] | undefined
+): Array<ScriptBeat | undefined> {
+  if (!beats || beats.length === 0) return sentences.map(() => undefined);
+  const total = sentences.reduce((sum, sentence) => sum + Math.max(1, compactChars(sentence).length), 0);
+  const ranges = beatRangesFromBeats(beats, total);
+  if (ranges.length === 0) return sentences.map(() => undefined);
+  let cursor = 0;
+  return sentences.map((sentence) => {
+    const len = Math.max(1, compactChars(sentence).length);
+    const mid = cursor + len / 2;
+    cursor += len;
+    const found = ranges.find((range) => mid >= range.start && mid < range.end) || ranges[ranges.length - 1];
+    return found?.beat;
+  });
 }
 
 export function isContrastSentence(text: string, language?: ScriptLanguage): boolean {
@@ -88,7 +191,7 @@ function makeVisual(sliceText: string, startRatio: number, endRatio: number, spl
     id: `vis-${startRatio}-${endRatio}`,
     startRatio,
     endRatio,
-    visualIntent: sliceText.replace(/[。！？!?]$/, ''),
+    visualIntent: sliceText.replace(/[。！？.!?]$/, ''),
     sliceText,
     splitReason
   };
@@ -99,21 +202,29 @@ export function buildSpeechSpans(narration: string, beats?: ScriptBeat[], langua
   const beatTexts = (beats || [])
     .map((beat) => (beat.narration || '').trim())
     .filter((text) => countBudgetUnits(text, lang) >= 2);
-  const source = (narration || '').trim() || beatTexts.join('');
-  const sentences = splitCompleteSentences(source, lang);
-  const count = Math.max(1, sentences.length);
+  const source = (narration || '').trim() || beatTexts.join(lang === 'en' ? ' ' : '');
+  const sentences = splitCompleteSentences(source, lang, { keepShort: true });
+  const mapped = mapSentencesToBeats(sentences, beats);
+  let cursor = 0;
   return sentences.map((text, index) => {
-    const progress = count <= 1 ? 0 : index / (count - 1);
-    const fn = functionAt(progress, index === count - 1);
-    const beat = beats && beats[Math.min(index, beats.length - 1)];
-    return {
+    const progress = sentences.length <= 1 ? 0 : index / (sentences.length - 1);
+    const fn = functionAt(progress, index === sentences.length - 1);
+    const beat = mapped[index];
+    const compact = compactChars(text);
+    const span: SpeechSpan = {
       id: `span-${index + 1}`,
       text,
       function: beat?.function || fn,
       energy: beat?.energy || energyAt(progress),
       needsHold: beat?.needsHold || fn === 'cta' || fn === 'reveal',
-      visuals: localVisualsForSentence(text, lang)
+      visuals: localVisualsForSentence(text, lang),
+      beatId: beat?.id,
+      sectionId: beat?.sectionId,
+      charStart: cursor,
+      charEnd: cursor + compact.length
     };
+    cursor += compact.length;
+    return span;
   });
 }
 
@@ -136,10 +247,11 @@ function energyAt(progress: number): ShotEnergy {
 
 export function normalizeSpeechSpans(raw: SpeechSpan[], originalNarration: string, language?: ScriptLanguage): SpeechSpan[] {
   const lang = normalizeScriptLanguage(language);
-  const sentences = splitCompleteSentences(originalNarration, lang);
+  const sentences = splitCompleteSentences(originalNarration, lang, { keepShort: true });
   if (!Array.isArray(raw) || raw.length === 0) {
     return buildSpeechSpans(originalNarration, undefined, lang);
   }
+  let cursor = 0;
   return raw.map((span, index) => {
     const text = (span.text || sentences[index] || '').trim();
     let visuals = Array.isArray(span.visuals) ? span.visuals.filter((visual) => visual.endRatio > visual.startRatio) : [];
@@ -171,14 +283,21 @@ export function normalizeSpeechSpans(raw: SpeechSpan[], originalNarration: strin
         splitReason: visual.splitReason || (aligned.length > 1 ? '句内换画面' : '一句一图')
       };
     });
-    return {
+    const compact = compactChars(sentence);
+    const next: SpeechSpan = {
       id: span.id || `span-${index + 1}`,
-      text: closeSentence(text, lang),
+      text: sentence,
       function: span.function || functionAt(index / Math.max(1, raw.length - 1), index === raw.length - 1),
       energy: span.energy || energyAt(index / Math.max(1, raw.length - 1)),
       needsHold: Boolean(span.needsHold) || span.function === 'cta' || span.function === 'reveal',
-      visuals: fixed
+      visuals: fixed,
+      beatId: span.beatId,
+      sectionId: span.sectionId,
+      charStart: span.charStart ?? cursor,
+      charEnd: span.charEnd ?? cursor + compact.length
     };
+    cursor += compact.length;
+    return next;
   });
 }
 
@@ -186,7 +305,7 @@ export function gateSpeechSpans(spans: SpeechSpan[], language?: ScriptLanguage):
   const lang = normalizeScriptLanguage(language);
   const issues: string[] = [];
   spans.forEach((span, index) => {
-    if (!/[。！？!?]$/.test(span.text.trim())) {
+    if (!hasTerminalPunct(span.text)) {
       issues.push(`第 ${index + 1} 段口播没有以句号结束，不能单独成段。`);
     }
     if (isContrastSentence(span.text, lang) && span.visuals.length < 2) {
@@ -230,7 +349,9 @@ export function shotsFromSpeechSpans(spans: SpeechSpan[], charsPerSecond: number
         spanId: span.id,
         visualIndex,
         visualCount: visuals.length,
-        voRole: visualIndex === 0 ? 'start' : 'continue'
+        voRole: visualIndex === 0 ? 'start' : 'continue',
+        beatId: span.beatId,
+        sectionId: span.sectionId
       });
       cursor += speechDuration + holdDuration;
       order += 1;

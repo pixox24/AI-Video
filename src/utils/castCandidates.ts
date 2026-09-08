@@ -41,6 +41,13 @@ const FOOD_PROCESS_ZH = [
 
 const OBJECT_HINT = /产品|商品|包装|瓶|盒|仪器|手机|app|品牌|榨汁机|口红|指南针|便利店/i;
 
+/** 常见可锁实物：教程/带货里反复出现，或操作语境中的被加工对象。 */
+const COMMON_OBJECT_ZH = [
+  '番茄炒蛋', '番茄蛋', '番茄', '西红柿', '鸡蛋', '咖啡', '药片', '胶囊', '药丸',
+  '面包', '牛奶', '水杯', '键盘', '鼠标', '相机', '面霜', '精华', '洗发水',
+  '运动鞋', '背包', '耳机', '充电器', '钥匙', '钱包', '口红', '榨汁机'
+];
+
 /** 常见中文姓：动作用人名必须命中，避免「针不停」「着条码」这类误召回。 */
 const ZH_SURNAMES = new Set([
   '赵', '钱', '孙', '李', '周', '吴', '郑', '王', '冯', '陈', '褚', '卫', '蒋', '沈', '韩', '杨',
@@ -181,7 +188,7 @@ function inferKind(name: string, corpus: string, personify = false): VisualChara
     if (isFoodCreature(name) && isFoodProcessContext(corpus)) return 'object';
     return 'creature';
   }
-  if (OBJECT_HINT.test(name)) return 'object';
+  if (OBJECT_HINT.test(name) || COMMON_OBJECT_ZH.includes(name)) return 'object';
   return 'person';
 }
 
@@ -304,6 +311,11 @@ function chineseCreatureMentions(text: string): string[] {
   return hits;
 }
 
+function commonObjectNames(text: string): string[] {
+  if (!text) return [];
+  return COMMON_OBJECT_ZH.filter((word) => text.includes(word));
+}
+
 function creatureNames(text: string): string[] {
   const lower = text.toLowerCase();
   const english = CREATURE_EN.filter((word) => new RegExp(`\\b${word}s?\\b`, 'i').test(lower)).map(titleCaseName);
@@ -360,17 +372,24 @@ export function extractCastCandidates(input: {
   const corpus = [title, notes, narration].filter(Boolean).join('\n');
   if (!corpus) return [];
 
-  const sentences = splitSentences(corpus);
+  const sentences = splitSentences(narration || corpus);
   const rawNames = [
-    ...englishProperNames(title),
     ...englishProperNames(narration),
-    ...englishProperNames(notes),
-    ...chineseNames(title),
-    ...chineseNames(notes),
     ...chineseNames(narration),
     ...creatureNames(corpus),
-    ...foodCreatureNames(corpus)
+    ...foodCreatureNames(corpus),
+    ...commonObjectNames(corpus)
   ];
+  // Title / notes may boost an entity that also appears in the narration, but
+  // cannot invent a character that the spoken copy never mentioned.
+  for (const name of [
+    ...englishProperNames(title),
+    ...englishProperNames(notes),
+    ...chineseNames(title),
+    ...chineseNames(notes)
+  ]) {
+    if (narration.includes(name) || notes.includes(name) && narration.includes(name)) rawNames.push(name);
+  }
 
   const personify = notesBoost(notes);
   const foodContext = isFoodProcessContext(corpus);
@@ -379,32 +398,37 @@ export function extractCastCandidates(input: {
   let index = 0;
   for (const name of mergeCandidateNames(rawNames)) {
     const mentions = countMentions(corpus, name);
+    const narrationMentions = countMentions(narration, name);
     const inTitle = title.toLowerCase().includes(name.toLowerCase()) || title.includes(name);
     const inNotes = notes.toLowerCase().includes(name.toLowerCase()) || notes.includes(name);
     const kind = inferKind(name, corpus, personify);
-    const personOnce = kind === 'person' && mentions >= 1 && (
-      pairedChineseNames(corpus).includes(name)
-      || actionChineseNames(corpus).includes(name)
-      || explicitChineseNames(corpus).includes(name)
+    const personOnce = kind === 'person' && narrationMentions >= 1 && (
+      pairedChineseNames(narration).includes(name)
+      || actionChineseNames(narration).includes(name)
+      || explicitChineseNames(narration).includes(name)
     );
-    const speakingCreatureOnce = kind === 'creature' && mentions >= 1 && (dialogue || personify);
-    // 操作语境中只出现一次的食物主料也算「被加工对象」候选，供画面圣经锁实物状态。
-    const processedFoodOnce = kind === 'object' && foodContext && isFoodCreature(name) && mentions >= 1;
-    const keep = mentions >= 2
-      || inTitle
-      || inNotes
+    const speakingCreatureOnce = kind === 'creature' && narrationMentions >= 1 && (dialogue || personify);
+    const processedFoodOnce = kind === 'object' && foodContext && isFoodCreature(name) && narrationMentions >= 1;
+    const commonObjectOnce = kind === 'object' && (
+      (foodContext && narrationMentions >= 1 && commonObjectNames(narration).includes(name))
+      || narrationMentions >= 2
+    );
+    const keep = narrationMentions >= 2
+      || (inTitle && narrationMentions >= 1)
+      || (inNotes && narrationMentions >= 1)
       || personOnce
       || speakingCreatureOnce
       || processedFoodOnce
-      || (personify && kind === 'creature' && mentions >= 1);
+      || commonObjectOnce
+      || (personify && kind === 'creature' && narrationMentions >= 1);
     if (!keep) continue;
     const evidence = evidenceFor(name, sentences);
     out.push({
       id: slugCandidate(name, index),
       name,
       kind,
-      mentions: Math.max(mentions, inTitle || inNotes || personOnce ? 1 : 0),
-      evidence: evidence.length ? evidence : [inTitle ? title : inNotes ? notes : name],
+      mentions: Math.max(narrationMentions, mentions, inTitle || inNotes || personOnce ? 1 : 0),
+      evidence: evidence.length ? evidence : (narrationMentions ? [name] : []),
       inTitle,
       inNotes
     });
@@ -439,7 +463,7 @@ export function formatCandidatesForPrompt(candidates: CastCandidate[]): string {
   ));
   return [
     '【文案实体硬约束】角色只能从下列候选认领，不得发明名单外的人/动物/产品。',
-    '每张卡必须带 sourceEvidence（原文短句）和 candidateId。',
+    '每张卡必须带 sourceEvidence（原文短句）、candidateId 与 entityId，且名字/类型必须与台账一致。',
     '开场并列出现的人名优先作共同主角（role=lead）；会说话的动物/物件作配角（role=support）。',
     '没有把握就不要建卡。人物/拟人动物才能当角色（kind=person / creature）；kind=object 是被加工对象/道具，禁止拟人化、禁止给表情动作。',
     ...lines

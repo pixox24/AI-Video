@@ -92,6 +92,7 @@ export interface StoryboardClip {
   duration: number; // in seconds (e.g. 3.5) = speechDuration + holdDuration
   speechDuration?: number; // locked narration span on the full track
   holdDuration?: number; // extra picture hold after speech ends
+  sceneId?: string; // visual scene group; multiple clips may reuse one image
   narration: string; // Spoken VO in scriptLanguage
   secondaryText?: string; // Bilingual translation line (the other language)
   secondaryHash?: string; // Hash of the primary display text when secondaryText was produced; stale hash = wrong pairing
@@ -123,6 +124,8 @@ export interface StoryboardClip {
   characterIds?: string[];
   locationId?: string;
   continuity?: VisualContinuity;
+  occupancyPlan?: OccupancyPlan;
+  subjectIds?: string[];
 }
 
 export interface SubtitleConfig {
@@ -352,9 +355,34 @@ export type ScriptGate = 'fast' | 'deep';
 export type VisualBibleMode = 'story' | 'expository';
 export type VisualContinuity = 'same-space' | 'same-subject' | 'contrast' | 'callback' | 'new-info';
 export type VisualCharacterRole = 'lead' | 'support' | 'extra';
-export type VisualCharacterKind = 'person' | 'creature' | 'object';
+export type VisualCharacterKind = 'person' | 'creature' | 'object' | 'anonymous' | 'narrator';
 export type VisualCastPolicy = 'evidence';
 export type VisualCharacterRefKind = 'none' | 'sheet' | 'face' | 'turnaround';
+export type ScriptEvidenceSource = 'narration' | 'title' | 'intentNotes';
+export type ScriptEntityOrigin = 'rule' | 'llm' | 'user';
+export type ScriptEntityStatus = 'confirmed' | 'pending' | 'rejected';
+export type AnonymousKind = 'unnamed_person' | 'first_person' | 'occupation';
+export type NarratorMode = 'voiceover' | 'on_camera' | 'story_character';
+export type CastPresentation =
+  | 'character_driven'
+  | 'product_showcase'
+  | 'narrator_led'
+  | 'motion_graphics'
+  | 'montage';
+export type OccupancyReason =
+  | 'named-in-line'
+  | 'dialogue'
+  | 'insert-object'
+  | 'establish-lead'
+  | 'contrast-support'
+  | 'pronoun-continue'
+  | 'empty'
+  | 'user';
+export type CharacterLockFlag = 'identity' | 'appearance' | 'refs';
+export type UserDecision = 'auto' | 'include' | 'exclude';
+export type IssueSeverity = 'info' | 'warning' | 'error';
+export type IssueTargetType = 'source' | 'entity' | 'character' | 'subject' | 'shot' | 'asset';
+export type IssueBlock = 'compile_prompt' | 'generate_image' | 'accept_entity';
 
 export interface VisualCharacterRef {
   imageId: string;
@@ -372,6 +400,115 @@ export interface CastCandidate {
   evidence: string[];
   inTitle?: boolean;
   inNotes?: boolean;
+  confidence?: number;
+}
+
+export interface ScriptEvidenceSpan {
+  text: string;
+  source: ScriptEvidenceSource;
+  start: number;
+  end: number;
+}
+
+/** Unique ScriptEntity ledger row. Character cards may only reference these IDs. */
+export interface ScriptEntityRecord {
+  id: string;
+  name: string;
+  kind: VisualCharacterKind;
+  isNamed: boolean;
+  anonymousKind?: AnonymousKind;
+  evidence: ScriptEvidenceSpan[];
+  confidence: number;
+  mentions: number;
+  inTitle?: boolean;
+  inNotes?: boolean;
+  origin: ScriptEntityOrigin;
+  status: ScriptEntityStatus;
+  /** Analysis status before any user override; never replaced by include/exclude. */
+  analysisStatus?: ScriptEntityStatus;
+  analysisType?: string;
+}
+
+export interface ScriptEntityLedger {
+  version: number;
+  fingerprint: string;
+  sourceKey?: string;
+  entities: ScriptEntityRecord[];
+  contentType?: string;
+  contentConfidence?: number;
+  perspective?: string;
+  hasDialogue?: boolean;
+  hasNarrativeArc?: boolean;
+  personificationDetected?: boolean;
+  visualDensity?: string;
+  provenance?: 'llm' | 'rule_fallback';
+  generatedAt: number;
+}
+
+export interface AnalysisInput {
+  inputSchemaVersion: 2;
+  narration: string;
+  title: string;
+  intentNotes: string;
+  language: 'zh' | 'en';
+  genreHint: string | null;
+}
+
+export interface EntityUserOverride {
+  entityId: string;
+  decision: UserDecision;
+  /** Retain the card/asset when a user excludes it, for restoring auto/include. */
+  decisionCard?: VisualCharacter;
+  displayName?: string;
+  role?: VisualCharacterRole;
+  locks: {
+    identity: boolean;
+    appearance: boolean;
+    refs: boolean;
+  };
+  appearance?: {
+    look: string;
+    wardrobe: string;
+    ageBand?: string;
+    signature?: string;
+    source: 'user' | 'accepted_design';
+  };
+}
+
+export interface ValidationIssue {
+  code: string;
+  severity: IssueSeverity;
+  targetType: IssueTargetType;
+  targetId?: string;
+  message: string;
+  blocks: IssueBlock[];
+  resolution?: string;
+}
+
+export interface RetiredEntity {
+  entityId: string;
+  name: string;
+  kind?: VisualCharacterKind;
+  character?: VisualCharacter;
+  subject?: VisualSubject;
+  override?: EntityUserOverride;
+  reason: string;
+}
+
+export interface OccupancyPlan {
+  onCamera: boolean;
+  characterIds: string[];
+  subjectIds: string[];
+  reason: OccupancyReason;
+}
+
+export interface VisualBibleDiff {
+  sourceChanged: boolean;
+  pinned: boolean;
+  addedNames: string[];
+  removedNames: string[];
+  pendingNames: string[];
+  summary: string;
 }
 
 export interface VisualCharacter {
@@ -379,6 +516,8 @@ export interface VisualCharacter {
   name: string;
   role: VisualCharacterRole;
   kind?: VisualCharacterKind;
+  /** Must match a ScriptEntityRecord.id after grounding. */
+  entityId?: string;
   candidateId?: string;
   ageBand: string;
   look: string;
@@ -386,11 +525,39 @@ export interface VisualCharacter {
   signature?: string;
   /** Short quotes or phrases from the narration that justify this character. */
   sourceEvidence?: string[];
+  evidenceSpans?: ScriptEvidenceSpan[];
   /** LLM/heuristic confidence that this card is grounded in the narration. */
   confidence?: number;
+  status?: ScriptEntityStatus;
+  castReason?: string;
+  appearanceUnknown?: boolean;
+  /** Preserve name / entity / role across rebuilds. */
+  identityLocked?: boolean;
+  /** Preserve look / wardrobe / age / signature across rebuilds. */
+  appearanceLocked?: boolean;
+  /** Preserve reference images across rebuilds. */
+  refsLocked?: boolean;
+  /** Backward-compatible keep-card flag; true if any of the three locks is on. */
   locked: boolean;
   refs: VisualCharacterRef[];
   seedHint?: string;
+}
+
+export interface VisualSubject {
+  id: string;
+  name: string;
+  kind: 'object' | 'product';
+  entityId?: string;
+  look: string;
+  locked: boolean;
+  identityLocked?: boolean;
+  appearanceLocked?: boolean;
+  refsLocked?: boolean;
+  refs: VisualCharacterRef[];
+  sourceEvidence?: string[];
+  evidenceSpans?: ScriptEvidenceSpan[];
+  confidence?: number;
+  castReason?: string;
 }
 
 export interface VisualLocation {
@@ -410,18 +577,34 @@ export interface VisualMotif {
 }
 
 export interface VisualBible {
-  version: 1;
+  version: 1 | 2;
   mode: VisualBibleMode;
   castPolicy?: VisualCastPolicy;
   candidates?: CastCandidate[];
+  entityLedger?: ScriptEntityLedger;
   logline: string;
   paletteLock: string;
   characters: VisualCharacter[];
+  subjects?: VisualSubject[];
+  pendingCharacters?: VisualCharacter[];
+  rejectedCast?: Array<{ name: string; reason: string }>;
   locations: VisualLocation[];
   motif: VisualMotif | null;
   continuityRule: string;
   sourceHash: string;
+  sourceFingerprint?: string;
+  sourceKey?: string;
+  bibleRevision?: string;
+  analysisCacheKey?: string;
+  analysisInput?: AnalysisInput;
+  analysisSnapshot?: import('./utils/scriptAnalysis').ScriptAnalysis;
   pinned?: boolean;
+  narratorMode?: NarratorMode;
+  presentation?: CastPresentation;
+  analysisReason?: string;
+  overrides?: Record<string, EntityUserOverride>;
+  retiredEntities?: RetiredEntity[];
+  issues?: ValidationIssue[];
   validation?: {
     status: 'ok' | 'warning';
     warnings: string[];
@@ -507,6 +690,9 @@ export interface DurationBudget {
   lockedShotCount: number | null;
 }
 
+export type ScriptSectionRole = 'hook' | 'setup' | 'body' | 'turn' | 'proof' | 'reveal' | 'cta';
+export type DraftSource = 'llm' | 'fallback';
+
 export interface ScriptBeat {
   id: string;
   order: number;
@@ -517,6 +703,20 @@ export interface ScriptBeat {
   energy: ShotEnergy;
   visualIntent: string;
   needsHold: boolean;
+  sectionId?: string;
+}
+
+export interface ScriptSection {
+  id: string;
+  order: number;
+  role: ScriptSectionRole;
+  title: string;
+  outline?: string;
+  targetSeconds: number;
+  minUnits: number;
+  maxUnits: number;
+  narration: string;
+  beats: ScriptBeat[];
 }
 
 export interface SpeechVisual {
@@ -535,6 +735,10 @@ export interface SpeechSpan {
   energy: ShotEnergy;
   needsHold: boolean;
   visuals: SpeechVisual[];
+  beatId?: string;
+  sectionId?: string;
+  charStart?: number;
+  charEnd?: number;
 }
 
 export interface ForecastShot {
@@ -554,9 +758,14 @@ export interface ForecastShot {
   visualCount?: number;
   voRole?: 'start' | 'continue';
   sliceText?: string;
+  sceneId?: string;
+  beatId?: string;
+  sectionId?: string;
   characterIds?: string[];
   locationId?: string;
   continuity?: VisualContinuity;
+  occupancyPlan?: OccupancyPlan;
+  subjectIds?: string[];
   shotSize?: ShotSize;
   cameraAngle?: CameraAngle;
   shotComposition?: ShotComposition;
@@ -569,7 +778,7 @@ export interface DirectorNote {
   id: string;
   level: DirectorNoteLevel;
   message: string;
-  target?: 'hook' | 'chars' | 'hold' | 'shot' | 'concept';
+  target?: 'hook' | 'chars' | 'hold' | 'shot' | 'concept' | 'duration' | 'draft';
 }
 
 export interface ResearchNotes {
@@ -592,10 +801,13 @@ export interface ScriptWorkspace {
   researchNotes: ResearchNotes;
   durationBudget: DurationBudget;
   beats: ScriptBeat[];
+  sections?: ScriptSection[];
   fullNarration: string;
   speechSpans: SpeechSpan[];
   forecastShots: ForecastShot[];
   directorNotes: DirectorNote[];
+  draftSource?: DraftSource;
+  draftWarnings?: string[];
   appliedShotCount?: number;
   appliedAt?: number;
   appliedScriptHash?: string;

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { applyCharacterRefResponse, captureCharacterRefRequest, CharacterRefRequest } from './utils/visualBibleAsync';
 import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry, ProjectLibraryItem, OutroConfig } from './types';
 import { clampOutro, resolveOutro } from './utils/outro';
 import { SAMPLE_PROJECTS, DEFAULT_SUBTITLE_CONFIG, DEFAULT_AUDIO_CONFIG, resolveBgmTrackId, resolveImageApi, isImageApiReady, resolveLlmApi, resolveTtsApi } from './utils/presets';
@@ -182,6 +183,7 @@ export default function App() {
   const bootUpdatedAtRef = useRef(project.updatedAt);
   const [historyVersion, setHistoryVersion] = useState(0);
   const characterRefWarnOnceRef = useRef(false);
+  const characterRefRequests = useRef(new Map<string, CharacterRefRequest>());
   const projectRef = useRef(project);
   projectRef.current = project;
   const bakeTimerRef = useRef<number | null>(null);
@@ -843,7 +845,10 @@ export default function App() {
     const workspace = project.scriptWorkspace;
     const bible = workspace?.visualBible;
     if (!bible) return false;
-    if (isVisualBibleStale(bible, workspace?.fullNarration || '', workspace?.genrePackId)) {
+    if (isVisualBibleStale(bible, workspace?.fullNarration || '', workspace?.genrePackId, {
+      title: workspace?.lockedTitle || workspace?.draftedTitle,
+      intentNotes: workspace?.intentNotes
+    })) {
       showStatusToast('口播已改，先按当前文案重编画面圣经', {
         tone: 'warn', id: 'visual-bible-stale', actionLabel: '去重编', onAction: () => setActiveTab('script')
       });
@@ -902,6 +907,9 @@ export default function App() {
       return 'fail';
     }
     const built = buildCharacterCardPromptFor(character, variant);
+    const refRequest = captureCharacterRefRequest(project.id, bible, character);
+    const requestKey = `${project.id}/${refRequest.entityId}`;
+    characterRefRequests.current.set(requestKey, refRequest);
     const anchor = characterRefUrl(character);
     const label = variant === 'face' ? '半身正脸' : '全身正面';
     recordHistory(project);
@@ -924,12 +932,29 @@ export default function App() {
       );
       const imageId = result.imageUrl.replace(/^\/generated\//, '') || `char-${Date.now()}`;
       const ref = { imageId, imageUrl: result.imageUrl, kind: built.refKind, notes: `generated:${variant}` };
-      const withRef = setCharacterRef(bible, character.id, ref);
-      const nextBible = {
-        ...withRef,
-        characters: withRef.characters.map((item) => item.id === character.id ? { ...item, locked: true } : item)
-      };
-      updateProject({ scriptWorkspace: { ...workspace, visualBible: nextBible } });
+      const live = projectRef.current;
+      if (characterRefRequests.current.get(requestKey) !== refRequest || !live.scriptWorkspace?.visualBible
+        || live.scriptWorkspace.fullNarration !== workspace.fullNarration
+        || !applyCharacterRefResponse(live.id, live.scriptWorkspace.visualBible, refRequest, ref)) {
+        hideStatusToast('char-card');
+        showStatusToast('角色或参考图已更新，已忽略此前生成的图片', { tone: 'info', id: 'char-card' });
+        return 'fail';
+      }
+      setProject((prev) => {
+        const liveWorkspace = prev.scriptWorkspace;
+        const liveBible = liveWorkspace?.visualBible;
+        if (!liveWorkspace || !liveBible || liveWorkspace.fullNarration !== workspace.fullNarration
+          || characterRefRequests.current.get(requestKey) !== refRequest) return prev;
+        const nextBible = applyCharacterRefResponse(prev.id, liveBible, refRequest, ref);
+        if (!nextBible) return prev;
+        return {
+          ...prev,
+          scriptWorkspace: {
+            ...liveWorkspace,
+            visualBible: nextBible
+          }
+        };
+      });
       hideStatusToast('char-card');
       showStatusToast(`已生成并上锁「${character.name}」参考图${result.usedBackup ? '（备用通道）' : ''}`, { tone: 'ok', id: 'char-card' });
       return 'ok';
@@ -1040,7 +1065,7 @@ export default function App() {
           imageError: result.usedBackup ? '备用通道出图' : undefined,
           referenceStatus: result.referenceAccepted ? 'accepted' : result.referenceDropped ? 'dropped' : undefined,
           visualPrompt: c.promptPinned ? c.visualPrompt : compiled.prompt,
-          visualBibleHash: c.promptPinned ? c.visualBibleHash : project.scriptWorkspace?.visualBible?.sourceHash,
+          visualBibleHash: c.promptPinned ? c.visualBibleHash : (project.scriptWorkspace?.visualBible?.bibleRevision || project.scriptWorkspace?.visualBible?.sourceHash),
           visualBeat: c.visualBeat || compiled.beat,
           chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(compiled.beat)
         } : c),
@@ -1084,7 +1109,14 @@ export default function App() {
     abortControllerRef.current = controller;
 
     setIsGeneratingAllImages(true);
-    const totalClips = sourceClips.length;
+    const sceneLeaders = new Map<string, string>();
+    const generateList = sourceClips.filter((clip) => {
+      if (!clip.sceneId) return true;
+      if (sceneLeaders.has(clip.sceneId)) return false;
+      sceneLeaders.set(clip.sceneId, clip.id);
+      return true;
+    });
+    const totalClips = generateList.length;
     setBatchGenerationProgress({ completed: 0, total: totalClips, activeCount: 0 });
     const targetIds = new Set(sourceClips.map((clip) => clip.id));
 
@@ -1161,34 +1193,44 @@ export default function App() {
           }));
         },
         onItemSuccess: (task: { item: StoryboardClip }, result: { imageUrl: string; prompt: string; beat: StoryboardClip['visualBeat']; usedBackup: boolean; referenceStatus?: 'accepted' | 'dropped' }) => {
+          const sceneId = task.item.sceneId;
           setProject(prev => ({
             ...prev,
-            clips: prev.clips.map(c => c.id === task.item.id ? {
-              ...c,
-              imageUrl: result.imageUrl,
-              visualPrompt: c.promptPinned ? c.visualPrompt : result.prompt,
-              visualBibleHash: c.promptPinned ? c.visualBibleHash : project.scriptWorkspace?.visualBible?.sourceHash,
-              visualBeat: c.visualBeat || result.beat,
-              chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(result.beat || {}),
-              imageStatus: 'success' as const,
-              isGeneratingImage: false,
-              imageError: result.usedBackup ? '备用通道出图' : undefined,
-              referenceStatus: result.referenceStatus
-            } : c),
+            clips: prev.clips.map(c => {
+              const sameScene = Boolean(sceneId && c.sceneId === sceneId);
+              if (c.id !== task.item.id && !sameScene) return c;
+              return {
+                ...c,
+                imageUrl: result.imageUrl,
+                visualPrompt: c.promptPinned ? c.visualPrompt : result.prompt,
+                visualBibleHash: c.promptPinned ? c.visualBibleHash : (project.scriptWorkspace?.visualBible?.bibleRevision || project.scriptWorkspace?.visualBible?.sourceHash),
+                visualBeat: c.visualBeat || result.beat,
+                chineseVisualPrompt: c.chineseVisualPrompt || beatToChinese(result.beat || {}),
+                imageStatus: 'success' as const,
+                isGeneratingImage: false,
+                imageError: result.usedBackup ? '备用通道出图' : undefined,
+                referenceStatus: result.referenceStatus
+              };
+            }),
             updatedAt: Date.now()
           }));
         },
         onItemError: (task: { item: StoryboardClip }, error: any) => {
           if (controller.signal.aborted) return;
+          const sceneId = task.item.sceneId;
           setProject(prev => ({
             ...prev,
-            clips: prev.clips.map(c => c.id === task.item.id ? {
-              ...c,
-              imageStatus: 'failed' as const,
-              isGeneratingImage: false,
-              imageError: `${error?.message || '生成失败'}${error?.referenceDropped ? '；参考图未采用' : ''}`,
-              referenceStatus: error?.referenceDropped ? 'dropped' : undefined
-            } : c),
+            clips: prev.clips.map(c => {
+              const sameScene = Boolean(sceneId && c.sceneId === sceneId);
+              if (c.id !== task.item.id && !sameScene) return c;
+              return {
+                ...c,
+                imageStatus: 'failed' as const,
+                isGeneratingImage: false,
+                imageError: `${error?.message || '生成失败'}${error?.referenceDropped ? '；参考图未采用' : ''}`,
+                referenceStatus: error?.referenceDropped ? 'dropped' : undefined
+              };
+            }),
             updatedAt: Date.now()
           }));
         },
@@ -1201,7 +1243,7 @@ export default function App() {
         }
       };
 
-      const firstPass = await runConcurrencyPool(sourceClips, runShot, poolOptions);
+      const firstPass = await runConcurrencyPool(generateList, runShot, poolOptions);
       if (!controller.signal.aborted) {
         const leftover = firstPass
           .filter((item) => !item.ok)
@@ -1274,7 +1316,7 @@ export default function App() {
           ...next,
           visualBeat: compiled.beat,
           visualPrompt: compiled.prompt,
-          visualBibleHash: visualBible?.sourceHash,
+          visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash,
           chineseVisualPrompt: beatToChinese(compiled.beat) || local.chineseVisualPrompt
         };
       });
@@ -1337,7 +1379,7 @@ export default function App() {
               ...next,
               visualBeat: compiled.beat,
               visualPrompt: compiled.prompt,
-              visualBibleHash: visualBible?.sourceHash,
+              visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash,
               chineseVisualPrompt: beatToChinese(compiled.beat) || next.chineseVisualPrompt
             };
           });
@@ -1741,6 +1783,8 @@ export default function App() {
       ) : activeTab === 'script' ? (
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <ScriptPanel
+          key={project.id}
+          projectId={project.id}
           workspace={project.scriptWorkspace || hydrateScriptWorkspace(project)}
           onChange={(scriptWorkspace) => updateProject({ scriptWorkspace })}
           onTopicChange={(topic) => updateProject({ topic, title: topic ? topic.slice(0, 20) : project.title })}

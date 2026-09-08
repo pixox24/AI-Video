@@ -76,6 +76,14 @@ export function isCustomLlmProvider(api?: CustomLlmApiConfig): boolean {
   return resolved.provider !== 'builtin' && !!resolved.apiKey.trim() && !!resolved.endpoint.trim();
 }
 
+export function llmApiLabel(api?: CustomLlmApiConfig): string {
+  const resolved = resolveLlmApi(api);
+  if (!isCustomLlmProvider(resolved)) return 'Gemini / 内置分镜';
+  const preset = LLM_PROVIDER_PRESETS.find((item) => item.id === resolved.provider);
+  const name = preset?.name || resolved.provider;
+  return resolved.model.trim() ? `${name} · ${resolved.model}` : name;
+}
+
 export interface LlmProviderPreset {
   id: CustomLlmApiConfig['provider'];
   name: string;
@@ -97,7 +105,7 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     defaultEndpoint: '',
     defaultModel: '',
     popularModels: [],
-    docHint: '适合先跑通流程。需要更高质量的中文分镜和润色时，改选 DeepSeek 并填写 API Key。',
+    docHint: '适合先跑通流程。需要更高质量的中文分镜和润色时，改选 DeepSeek 或自定义兼容接口并填写 API Key。',
     available: true
   },
   {
@@ -128,13 +136,13 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
   {
     id: 'custom',
     name: '自定义兼容接口',
-    badge: '即将开放',
-    description: '任意 OpenAI Chat Completions 兼容中转，后续开放',
-    defaultEndpoint: 'https://your-api-domain.com/v1',
+    badge: '自建',
+    description: '任意 OpenAI Chat Completions 兼容中转，可拉取模型列表后选用',
+    defaultEndpoint: '',
     defaultModel: '',
     popularModels: [],
-    docHint: '',
-    available: false
+    docHint: '填兼容 OpenAI 的 Base URL（如 https://your-api-domain.com/v1）和 API Key，点「拉取模型」从 /v1/models 选聊天模型。不会走内置 Gemini。',
+    available: true
   }
 ];
 

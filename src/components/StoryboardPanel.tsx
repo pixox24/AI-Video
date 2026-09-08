@@ -33,6 +33,10 @@ import { presetStylePack } from '../utils/stylePack';
 import { beatToChinese, clipImagePromptArgs } from '../utils/imagePrompt';
 import { newClipId } from '../utils/narrationTrack';
 import { isUtteranceTail } from '../utils/sentenceGap';
+import { inferScriptLanguage, normalizeScriptLanguage } from '../utils/scriptLanguage';
+import { splitCompleteSentences } from '../utils/speechSpans';
+import { splitCoversSource, splitPastedNarration } from '../utils/scriptSplit';
+import { suggestedSplitShotPresets } from '../utils/scriptDuration';
 import { storeImageDataUrl } from '../utils/projectPersist';
 import { ToolRail } from './ToolRail';
 import { StoryboardClipCard } from './StoryboardClipCard';
@@ -111,6 +115,9 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
   const [isSplittingScript, setIsSplittingScript] = useState(false);
   const [targetSplitShots, setTargetSplitShots] = useState<number>(4);
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const pasteLanguage = normalizeScriptLanguage(scriptLanguage || inferScriptLanguage(pastedScript));
+  const pasteSentenceCount = splitCompleteSentences(pastedScript, pasteLanguage, { keepShort: true }).length;
+  const splitPresets = suggestedSplitShotPresets(pasteSentenceCount);
 
   const totalDuration = clips.reduce((acc, c) => acc + (c.duration || 3.5), 0);
 
@@ -133,12 +140,17 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
             rawText: cleanText,
             visualStyle,
             targetShots: targetSplitShots,
-            llmApi: customLlmApi
+            llmApi: customLlmApi,
+            scriptLanguage: pasteLanguage
           })
         });
 
         const data = await res.json().catch(() => ({}));
-        if (data?.shots && Array.isArray(data.shots) && data.shots.length > 0) {
+        const aiChunks = Array.isArray(data?.shots) ? data.shots.map((shot: any) => String(shot?.narration || '')) : [];
+        if (Array.isArray(data?.shots) && data.shots.length > 0 && !splitCoversSource(aiChunks, cleanText)) {
+          setStatusMessage('AI 拆镜没有覆盖原文，已改用完整标点拆镜，避免丢掉后文');
+        }
+        if (data?.shots && Array.isArray(data.shots) && data.shots.length > 0 && splitCoversSource(aiChunks, cleanText)) {
           const usedIds = new Set<string>();
           const newClips: StoryboardClip[] = data.shots.map((shot: any, index: number) => {
             const draft: StoryboardClip = {
@@ -148,7 +160,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
               narration: shot.narration,
               secondaryText: typeof shot.secondaryText === 'string' ? shot.secondaryText : '',
               visualPrompt: '',
-              visualBibleHash: visualBible?.sourceHash,
+              visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash,
               chineseVisualPrompt: shot.chineseVisualPrompt || '',
               cameraMotion: (shot.cameraMotion as CameraMotion) || 'zoom-in',
               transition: (shot.transition as TransitionType) || 'crossfade',
@@ -173,28 +185,8 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
         }
       }
 
-      const rawSentences = cleanText
-        .split(/([。！？\n\r!?]+)/)
-        .map(s => s.trim())
-        .filter(Boolean);
-
-      const mergedChunks: string[] = [];
-      let currentChunk = '';
-
-      for (let i = 0; i < rawSentences.length; i++) {
-        const part = rawSentences[i];
-        if (/^[。！？\n\r!?]+$/.test(part)) {
-          currentChunk += (part.includes('\n') ? ' ' : part);
-        } else if (currentChunk.length >= 18) {
-          mergedChunks.push(currentChunk.trim());
-          currentChunk = part;
-        } else {
-          currentChunk = currentChunk ? `${currentChunk} ${part}` : part;
-        }
-      }
-      if (currentChunk.trim()) mergedChunks.push(currentChunk.trim());
-
-      const safeChunks = mergedChunks.length > 0 ? mergedChunks.slice(0, 8) : [cleanText];
+      const split = splitPastedNarration(cleanText, pasteLanguage);
+      const safeChunks = split.chunks.length > 0 ? split.chunks : [cleanText];
       const cameraMotions: CameraMotion[] = ['zoom-in', 'pan-left', 'zoom-out', 'pan-right', 'tilt-up', 'cinematic-orbit'];
       const transitions: TransitionType[] = ['crossfade', 'slide-left', 'crossfade', 'fade-black', 'zoom-in'];
 
@@ -209,7 +201,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           narration: chunk,
           secondaryText: '',
           visualPrompt: '',
-          visualBibleHash: visualBible?.sourceHash,
+          visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash,
           chineseVisualPrompt: '',
           cameraMotion: cameraMotions[idx % cameraMotions.length],
           transition: transitions[idx % transitions.length],
@@ -375,7 +367,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
           transition: 'crossfade'
         }, prev.length, prev.length + 1).prompt,
         chineseVisualPrompt: `第 ${newOrder} 幕画面`,
-        visualBibleHash: visualBible?.sourceHash,
+        visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash,
         cameraMotion: 'zoom-in',
         transition: 'crossfade',
         imageUrl: generateProceduralArtwork(`镜头 ${newOrder}`, visualStyle, aspectRatio, newOrder)
@@ -505,7 +497,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
                 <span className="text-amber-400 font-mono font-semibold">{targetSplitShots} 镜</span>
               </label>
               <div className="grid grid-cols-4 gap-1.5">
-                {[3, 4, 5, 6].map((num) => (
+                {splitPresets.map((num) => (
                   <button
                     key={num}
                     onClick={() => setTargetSplitShots(num)}
@@ -515,7 +507,7 @@ export const StoryboardPanel: React.FC<StoryboardPanelProps> = ({
                         : 'bg-[#1e1e24] text-zinc-400 border border-[#2b2b36] hover:bg-[#25252e]'
                     }`}
                   >
-                    {num} 镜
+                    {num === pasteSentenceCount ? `按句 ${num}` : `${num} 镜`}
                   </button>
                 ))}
               </div>

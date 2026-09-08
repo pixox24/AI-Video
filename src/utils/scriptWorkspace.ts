@@ -9,6 +9,7 @@ import {
   ScriptGenre,
   ScriptIntent,
   ScriptLanguage,
+  ScriptSection,
   ScriptPace,
   ScriptWorkspace,
   StoryboardClip,
@@ -30,6 +31,8 @@ import {
   stripBiblePrefix,
   visualBibleModeForGenre
 } from './visualBible';
+import { currentSourceKey } from './visualBibleSource';
+import { migrateDecisionFacts } from './visualBibleMigration';
 import { ensureUniqueClipIds, joinClipNarrations, newClipId, repairClipSlices } from './narrationTrack';
 import {
   countBudgetUnits,
@@ -51,7 +54,9 @@ import {
   predictShots,
   validateForecast
 } from './scriptBudget';
-import { buildSpeechSpans, gateSpeechSpans, normalizeSpeechSpans } from './speechSpans';
+import { buildSpeechSpans, gateSpeechSpans, normalizeSpeechSpans, splitCompleteSentences } from './speechSpans';
+import { isLongForm } from './scriptDuration';
+import { sectionsFromNarration } from './scriptSections';
 
 export const EMPTY_RESEARCH: ResearchNotes = {
   competitor: '',
@@ -172,6 +177,9 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     durationBudget,
     topicCards: Array.isArray(raw.topicCards) ? raw.topicCards : [],
     beats: Array.isArray(raw.beats) ? raw.beats : [],
+    sections: Array.isArray(raw.sections) ? raw.sections : undefined,
+    draftSource: raw.draftSource,
+    draftWarnings: Array.isArray(raw.draftWarnings) ? raw.draftWarnings : undefined,
     speechSpans: Array.isArray(raw.speechSpans) ? raw.speechSpans : [],
     forecastShots: Array.isArray(raw.forecastShots) ? raw.forecastShots : [],
     directorNotes: Array.isArray(raw.directorNotes) ? raw.directorNotes : [],
@@ -186,13 +194,25 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     genrePackId: raw.genrePackId || null,
     hookPreviewUrl: raw.hookPreviewUrl,
     visualBible: (() => {
-      const bible = normalizeVisualBible(raw.visualBible, visualBibleModeForGenre(raw.genrePackId));
-      return bible && raw.fullNarration
-        ? groundVisualBible(bible, raw.fullNarration, {
-          title: raw.lockedTitle || raw.draftedTitle,
-          intentNotes: raw.intentNotes
-        })
-        : bible;
+      let bible = normalizeVisualBible(raw.visualBible, visualBibleModeForGenre(raw.genrePackId));
+      if (!bible || !raw.fullNarration) return bible;
+      if (!bible.pinned || bible.analysisInput) bible = migrateDecisionFacts(bible, bible.analysisInput || {
+        narration: raw.fullNarration, title: raw.lockedTitle || raw.draftedTitle, intentNotes: raw.intentNotes
+      });
+      const key = currentSourceKey(raw.fullNarration, {
+        title: raw.lockedTitle || raw.draftedTitle,
+        intentNotes: raw.intentNotes,
+        genre: raw.genrePackId,
+        language: scriptLanguage
+      });
+      if (bible.pinned) return bible;
+      if (bible.sourceKey === key || bible.sourceFingerprint === key) return bible;
+      return groundVisualBible(bible, raw.fullNarration, {
+        title: raw.lockedTitle || raw.draftedTitle,
+        intentNotes: raw.intentNotes,
+        genre: raw.genrePackId,
+        language: scriptLanguage
+      });
     })()
   };
 }
@@ -214,7 +234,13 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
       shots: workspace.forecastShots,
       beats: workspace.beats,
       scriptLanguage
-    })
+    }),
+    ...(workspace.draftWarnings || []).map((message, index) => ({
+      id: `draft-warn-${index}`,
+      level: 'warn' as const,
+      target: 'draft' as const,
+      message
+    }))
   ];
   return { ...workspace, durationBudget, directorNotes };
 }
@@ -241,10 +267,20 @@ export function diagnoseExistingScript(workspace: ScriptWorkspace): ScriptWorksp
     scriptLanguage
   );
   const beats = beatsFromNarration(narration, durationBudget);
+  const sections = isLongForm(durationBudget.targetSeconds) || splitCompleteSentences(narration, scriptLanguage).length > 12
+    ? sectionsFromNarration({
+      narration,
+      targetSeconds: durationBudget.targetSeconds,
+      maxChars: durationBudget.maxChars,
+      scriptLanguage,
+      genre: workspace.genrePackId
+    })
+    : workspace.sections;
   return rebuildForecast({
     ...workspace,
     fullNarration: narration,
     beats,
+    sections,
     durationBudget: { ...durationBudget, usedChars: chars, durationMode: 'content-driven' },
     stage: 'copy'
   });
@@ -266,6 +302,7 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
   const speechSpans = spansFresh
     ? normalizeSpeechSpans(workspace.speechSpans, workspace.fullNarration, scriptLanguage)
     : buildSpeechSpans(workspace.fullNarration, workspace.beats, scriptLanguage);
+  const sections = syncSectionsWithBeats(workspace.sections, workspace.beats, scriptLanguage);
   const forecastShots = withCoverage(
     stampShotsWithBible(
       applyPinnedHolds(
@@ -283,11 +320,11 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
     workspace.visualBible,
     workspace.forecastShots
   );
-  const next = { ...workspace, durationBudget, speechSpans, forecastShots };
+  const next = { ...workspace, sections, durationBudget, speechSpans, forecastShots };
   const directorNotes = [
     ...titleDirectorNotes(next),
     ...validateForecast({ budget: durationBudget, shots: forecastShots, beats: workspace.beats }),
-    ...gateSpeechSpans(speechSpans).map((message, index) => ({
+    ...gateSpeechSpans(speechSpans, scriptLanguage).map((message, index) => ({
       id: `span-gate-${index}`,
       level: 'warn' as const,
       target: 'shot' as const,
@@ -295,6 +332,22 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
     }))
   ];
   return { ...next, directorNotes };
+}
+
+function syncSectionsWithBeats(
+  sections: ScriptSection[] | undefined,
+  beats: ScriptBeat[],
+  language: ScriptLanguage
+): ScriptSection[] | undefined {
+  if (!sections || sections.length === 0 || !beats.some((beat) => beat.sectionId)) return sections;
+  return sections.map((section) => {
+    const sectionBeats = beats.filter((beat) => beat.sectionId === section.id);
+    return {
+      ...section,
+      narration: narrationFromBeats(sectionBeats, language),
+      beats: sectionBeats
+    };
+  });
 }
 
 export function applyHoldToWorkspace(workspace: ScriptWorkspace, shotId: string, holdDuration: number): ScriptWorkspace {
@@ -358,7 +411,9 @@ export function applyResearchNoteToHook(workspace: ScriptWorkspace, key: keyof R
       };
     });
   }
-  const fullNarration = intoVisual ? (workspace.fullNarration || narrationFromBeats(beats)) : narrationFromBeats(beats);
+  const fullNarration = intoVisual
+    ? (workspace.fullNarration || narrationFromBeats(beats, workspace.scriptLanguage))
+    : narrationFromBeats(beats, workspace.scriptLanguage);
   return rebuildForecast({ ...workspace, beats, fullNarration });
 }
 
@@ -383,7 +438,9 @@ export function applyGenrePack(workspace: ScriptWorkspace, genre: ScriptGenre): 
   const durationBudget = buildDurationBudget({
     ...workspace.durationBudget,
     pace: pack.pace,
-    targetSeconds: pack.durationHint,
+    targetSeconds: isLongForm(workspace.durationBudget.targetSeconds)
+      ? workspace.durationBudget.targetSeconds
+      : pack.durationHint,
     usedChars: workspace.durationBudget.usedChars,
     conceptUsed: pack.maxConcepts,
     lockedShotCount: workspace.durationBudget.lockedShotCount,
@@ -823,7 +880,7 @@ export function forecastToClips(
     // Only reuse a previous clip when this exact utterance-visual slot matches.
     // Positional previousClips[index] collides once a continue shot is inserted.
     const prev = prevByKey.get(`${span}#${shot.visualIndex ?? 0}`);
-    const previousPromptMatchesBible = !visualBible || prev?.visualBibleHash === visualBible.sourceHash;
+    const previousPromptMatchesBible = !visualBible || prev?.visualBibleHash === (visualBible.bibleRevision || visualBible.sourceHash);
     const id = prev?.id && !usedIds.has(prev.id) ? prev.id : newClipId(index, usedIds);
     usedIds.add(id);
     const nextShot = shots[index + 1];
@@ -831,14 +888,21 @@ export function forecastToClips(
     const isFilmTail = index === shots.length - 1;
     const holdDuration = shot.holdPinned
       ? shot.holdDuration
-      : isTail
-        ? Math.max(clampSentenceGap(sentenceGap), isFilmTail ? clampOutroHold(outroHold) : 0)
-        : 0;
+      : Math.max(
+        isTail ? clampSentenceGap(sentenceGap) : 0,
+        isFilmTail ? clampOutroHold(outroHold) : 0,
+        Number(shot.holdDuration) || 0
+      );
+    const sceneMate = shot.sceneId
+      ? previousClips.find((clip) => clip.sceneId === shot.sceneId && clip.imageUrl)
+      : undefined;
     const draft = {
       narration: voRole === 'start' ? shot.narration : '',
       voSlice: shot.sliceText,
       chineseVisualPrompt: chineseVisual,
-      characterIds: shot.characterIds,
+      characterIds: shot.occupancyPlan?.characterIds ?? shot.characterIds,
+      subjectIds: shot.occupancyPlan?.subjectIds ?? shot.subjectIds,
+      occupancyPlan: shot.occupancyPlan,
       locationId: shot.locationId,
       continuity: shot.continuity,
       cameraMotion: prev?.cameraMotion || motion,
@@ -851,7 +915,7 @@ export function forecastToClips(
       coverageJob: shot.coverageJob,
       coverageLink: shot.coverageLink,
       coverageSource: shot.coverageSource,
-      visualBibleHash: visualBible?.sourceHash
+      visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash
     };
     const compiled = compileImagePrompt({
       clip: draft,
@@ -868,7 +932,10 @@ export function forecastToClips(
       speechDuration: shot.speechDuration,
       holdDuration,
       holdPinned: Boolean(shot.holdPinned),
-      characterIds: shot.characterIds,
+      sceneId: shot.sceneId,
+      characterIds: shot.occupancyPlan?.characterIds ?? shot.characterIds,
+      subjectIds: shot.occupancyPlan?.subjectIds ?? shot.subjectIds,
+      occupancyPlan: shot.occupancyPlan,
       locationId: shot.locationId,
       continuity: shot.continuity,
       duration: Math.max(0.05, shot.speechDuration + holdDuration),
@@ -880,7 +947,7 @@ export function forecastToClips(
       voSpanId: shot.spanId,
       voRole,
       voSlice: shot.sliceText,
-      visualBibleHash: visualBible?.sourceHash,
+      visualBibleHash: visualBible?.bibleRevision || visualBible?.sourceHash,
       visualBeat: compiled.beat,
       visualPrompt: compiled.prompt,
       chineseVisualPrompt: stripBiblePrefix(beatToChinese(compiled.beat) || chineseVisual),
@@ -893,13 +960,25 @@ export function forecastToClips(
       coverageSource: shot.coverageSource,
       cameraMotion: draft.cameraMotion,
       transition: prev?.transition || transition,
-      imageUrl: prev?.imageUrl || generateProceduralArtwork(shot.narration || visual, visualStyle, aspectRatio, index),
+      imageUrl: prev?.imageUrl || sceneMate?.imageUrl || generateProceduralArtwork(shot.narration || visual, visualStyle, aspectRatio, index),
       isGeneratingImage: false,
       imageStatus: prev?.imageUrl ? (prev.imageStatus || 'success') : 'idle',
       imageError: undefined
     };
   });
-  return ensureUniqueClipIds(repairClipSlices(clips));
+  return ensureUniqueClipIds(repairClipSlices(reuseSceneImages(clips)));
+}
+
+function reuseSceneImages(clips: StoryboardClip[]): StoryboardClip[] {
+  const first = new Map<string, string>();
+  clips.forEach((clip) => {
+    if (clip.sceneId && clip.imageUrl && !first.has(clip.sceneId)) first.set(clip.sceneId, clip.imageUrl);
+  });
+  return clips.map((clip) => {
+    if (!clip.sceneId) return clip;
+    const url = first.get(clip.sceneId);
+    return url ? { ...clip, imageUrl: url } : clip;
+  });
 }
 
 export function workspaceTopicTitle(workspace: ScriptWorkspace, fallback = ''): string {
@@ -1163,7 +1242,7 @@ export function fallbackDraft(input: {
   }).filter((beat) => beat.narration);
   return {
     title: topic.slice(0, 20),
-    fullNarration: narrationFromBeats(fitted.length >= 2 ? fitted : beats),
+    fullNarration: narrationFromBeats(fitted.length >= 2 ? fitted : beats, lang),
     beats: fitted.length >= 2 ? fitted : beats
   };
 }

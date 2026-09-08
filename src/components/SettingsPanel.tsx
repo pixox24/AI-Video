@@ -38,6 +38,7 @@ import {
   imageApiLabel,
   resolveLlmApi,
   isCustomLlmProvider,
+  llmApiLabel,
   resolveTtsApi,
   isCustomTtsProvider
 } from '../utils/presets';
@@ -352,6 +353,12 @@ function LlmProviderSection({
 }) {
   const [showApiKey, setShowApiKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchedChatModels, setFetchedChatModels] = useState<string[]>([]);
+  const [fetchModelsInfo, setFetchModelsInfo] = useState<{ ok: boolean; message?: string } | null>(null);
+  const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const [showAllModels, setShowAllModels] = useState(false);
   const [testResult, setTestResult] = useState<{
     ok: boolean;
     latencyMs?: number;
@@ -362,7 +369,18 @@ function LlmProviderSection({
 
   const llmApi = resolveLlmApi(settings.customLlmApi);
   const isBuiltin = llmApi.provider === 'builtin';
+  const isCustomCompat = llmApi.provider === 'custom';
   const currentPreset = LLM_PROVIDER_PRESETS.find((p) => p.id === llmApi.provider) || LLM_PROVIDER_PRESETS[0];
+  const filteredFetchedModels = fetchedModels.filter((item) =>
+    item.toLowerCase().includes(modelSearchQuery.trim().toLowerCase())
+  );
+  const resetFetchedModels = () => {
+    setFetchedModels([]);
+    setFetchedChatModels([]);
+    setFetchModelsInfo(null);
+    setModelSearchQuery('');
+    setShowAllModels(false);
+  };
 
   const updateLlmApi = (updates: Partial<CustomLlmApiConfig>) => {
     const nextProvider = updates.provider ?? llmApi.provider;
@@ -387,10 +405,50 @@ function LlmProviderSection({
         provider: providerId,
         enabled: true,
         endpoint: preset.defaultEndpoint || llmApi.endpoint,
-        model: preset.defaultModel || llmApi.model
+        model: preset.defaultModel || (providerId === llmApi.provider ? llmApi.model : '')
       });
     }
     setTestResult(null);
+    resetFetchedModels();
+  };
+
+  const handleFetchModels = async () => {
+    if (!llmApi.endpoint.trim() || !llmApi.apiKey.trim()) {
+      setFetchModelsInfo({ ok: false, message: '请先填写接口地址和 API Key' });
+      return;
+    }
+    setIsFetchingModels(true);
+    setFetchModelsInfo(null);
+    try {
+      const res = await fetch('/api/llm/fetch-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          endpoint: sanitizeEndpoint(llmApi.endpoint),
+          apiKey: sanitizeKey(llmApi.apiKey)
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        const chatModels: string[] = Array.isArray(data.chatModels) ? data.chatModels : [];
+        const allModels: string[] = Array.isArray(data.models) ? data.models : [];
+        setFetchedChatModels(chatModels);
+        setFetchedModels(allModels);
+        setFetchModelsInfo({
+          ok: true,
+          message: `拉取到 ${data.totalCount || allModels.length} 个模型，其中聊天 ${chatModels.length} 个`
+        });
+        if (!llmApi.model.trim() && chatModels.length > 0) {
+          updateLlmApi({ model: chatModels[0] });
+        }
+      } else {
+        setFetchModelsInfo({ ok: false, message: data.diagnosis || data.error || '获取模型列表失败' });
+      }
+    } catch (err: any) {
+      setFetchModelsInfo({ ok: false, message: err?.message || '无法访问 /v1/models' });
+    } finally {
+      setIsFetchingModels(false);
+    }
   };
 
   const handleTest = async () => {
@@ -400,6 +458,10 @@ function LlmProviderSection({
     }
     if (!llmApi.apiKey.trim()) {
       setTestResult({ ok: false, error: '请先填写 API Key' });
+      return;
+    }
+    if (!llmApi.model.trim()) {
+      setTestResult({ ok: false, error: '请先填写或拉取模型' });
       return;
     }
 
@@ -446,7 +508,7 @@ function LlmProviderSection({
         <div>
           <h3 className="text-[15px] font-semibold text-zinc-100">LLM 文案模型</h3>
           <p className="mt-1 text-[13px] text-zinc-500 leading-relaxed max-w-2xl">
-            选中即使用。内置引擎无需密钥；DeepSeek 需填写接口和 API Key。
+            选中即使用。内置引擎无需密钥；DeepSeek 与自定义兼容接口需填写地址和 API Key，并可拉取模型列表。
           </p>
         </div>
 
@@ -501,7 +563,7 @@ function LlmProviderSection({
                   type="text"
                   value={llmApi.endpoint}
                   onChange={(e) => updateLlmApi({ endpoint: e.target.value })}
-                  placeholder="https://api.deepseek.com"
+                  placeholder={isCustomCompat ? 'https://your-api-domain.com/v1' : 'https://api.deepseek.com'}
                   className="w-full bg-[#121217] border border-[#2b2b38] focus:border-amber-500 rounded-xl px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 font-mono outline-none"
                 />
               </div>
@@ -528,31 +590,129 @@ function LlmProviderSection({
             </div>
 
             <div className="space-y-2">
-              <FieldLabel icon={<Zap className="w-3.5 h-3.5 text-amber-400" />} title="模型" />
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {currentPreset.popularModels.map((model) => {
-                  const selected = llmApi.model === model.id;
-                  return (
+              <div className="flex items-center justify-between gap-3">
+                <FieldLabel icon={<Zap className="w-3.5 h-3.5 text-amber-400" />} title="模型" />
+                <button
+                  id="btn-fetch-llm-models"
+                  type="button"
+                  onClick={() => void handleFetchModels()}
+                  disabled={isFetchingModels}
+                  className="text-[12px] px-2.5 py-1.5 bg-amber-500/12 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-lg flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isFetchingModels ? 'animate-spin' : ''}`} />
+                  {isFetchingModels ? '拉取中' : '拉取模型'}
+                </button>
+              </div>
+              <input
+                id="input-llm-model"
+                type="text"
+                value={llmApi.model}
+                onChange={(e) => updateLlmApi({ model: e.target.value })}
+                placeholder={isCustomCompat ? '填写聊天模型 id，或点拉取后选择' : 'deepseek-v4-flash'}
+                className="w-full bg-[#121217] border border-[#2b2b38] focus:border-amber-500 rounded-xl px-3 py-2.5 text-[13px] text-zinc-100 placeholder-zinc-600 font-mono outline-none"
+              />
+              {fetchModelsInfo && (
+                <div
+                  id="llm-fetch-models-result"
+                  className={`rounded-xl border px-3 py-2 text-[12px] flex items-start gap-2 ${
+                    fetchModelsInfo.ok
+                      ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                      : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+                  }`}
+                >
+                  {fetchModelsInfo.ok ? <CheckCircle2 className="w-4 h-4 mt-0.5" /> : <AlertCircle className="w-4 h-4 mt-0.5" />}
+                  <span>{fetchModelsInfo.message}</span>
+                </div>
+              )}
+              {currentPreset.popularModels.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {currentPreset.popularModels.map((model) => {
+                    const selected = llmApi.model === model.id;
+                    return (
+                      <button
+                        key={model.id}
+                        type="button"
+                        onClick={() => updateLlmApi({ model: model.id })}
+                        className={`text-left rounded-xl border px-3.5 py-3 cursor-pointer transition-all ${
+                          selected
+                            ? 'bg-amber-500/12 border-amber-500/50'
+                            : 'bg-[#121217] border-[#2b2b38] hover:border-zinc-600'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-[13px] font-medium text-zinc-100">{model.label}</span>
+                          {selected && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                        </div>
+                        <div className="mt-1 text-[11px] font-mono text-zinc-500">{model.id}</div>
+                        <div className="mt-1 text-[11px] text-zinc-500">{model.hint}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {(fetchedChatModels.length > 0 || fetchedModels.length > 0) && (
+                <div className="flex flex-wrap gap-1.5">
+                  {(fetchedChatModels.length ? fetchedChatModels : fetchedModels).slice(0, 16).map((model) => (
                     <button
-                      key={model.id}
+                      key={model}
                       type="button"
-                      onClick={() => updateLlmApi({ model: model.id })}
-                      className={`text-left rounded-xl border px-3.5 py-3 cursor-pointer transition-all ${
-                        selected
-                          ? 'bg-amber-500/12 border-amber-500/50'
-                          : 'bg-[#121217] border-[#2b2b38] hover:border-zinc-600'
+                      onClick={() => updateLlmApi({ model })}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-mono border cursor-pointer ${
+                        llmApi.model === model
+                          ? 'bg-amber-500/20 text-amber-200 border-amber-500/50'
+                          : 'bg-[#121217] text-zinc-400 border-[#2b2b38] hover:text-zinc-200'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span className="text-[13px] font-medium text-zinc-100">{model.label}</span>
-                        {selected && <Check className="w-3.5 h-3.5 text-amber-400" />}
-                      </div>
-                      <div className="mt-1 text-[11px] font-mono text-zinc-500">{model.id}</div>
-                      <div className="mt-1 text-[11px] text-zinc-500">{model.hint}</div>
+                      {model}
                     </button>
-                  );
-                })}
-              </div>
+                  ))}
+                </div>
+              )}
+              {fetchedModels.length > 0 && (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAllModels((value) => !value)}
+                    className="text-[11px] text-zinc-500 hover:text-amber-400 flex items-center gap-1 cursor-pointer"
+                  >
+                    <ListFilter className="w-3 h-3" />
+                    {showAllModels ? '收起全部模型' : `查看全部 ${fetchedModels.length} 个`}
+                  </button>
+                  {showAllModels && (
+                    <div className="mt-2 rounded-xl border border-[#2c2c3c] bg-[#121217] p-2.5 space-y-2">
+                      <div className="relative">
+                        <Search className="w-3 h-3 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={modelSearchQuery}
+                          onChange={(e) => setModelSearchQuery(e.target.value)}
+                          placeholder="搜索模型..."
+                          className="w-full bg-[#0e0e12] border border-[#262634] rounded-lg pl-7 pr-2 py-1.5 text-[12px] text-zinc-200 outline-none"
+                        />
+                      </div>
+                      <div className="max-h-40 overflow-y-auto space-y-0.5 custom-scrollbar">
+                        {filteredFetchedModels.map((model) => (
+                          <button
+                            key={model}
+                            type="button"
+                            onClick={() => updateLlmApi({ model })}
+                            className={`w-full text-left px-2 py-1 rounded text-[11px] font-mono cursor-pointer ${
+                              llmApi.model === model
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : 'text-zinc-400 hover:bg-[#22222e] hover:text-zinc-200'
+                            }`}
+                          >
+                            {model}
+                          </button>
+                        ))}
+                        {filteredFetchedModels.length === 0 && (
+                          <p className="px-2 py-1 text-[11px] text-zinc-500">没有匹配的模型</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -571,6 +731,7 @@ function LlmProviderSection({
                 onClick={() => {
                   onChange({ ...settings, customLlmApi: { ...DEFAULT_CUSTOM_LLM_API } });
                   setTestResult(null);
+                  resetFetchedModels();
                 }}
                 className="px-3 py-2 text-[12px] text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5 cursor-pointer"
               >
@@ -1735,7 +1896,7 @@ function SystemSection({
             <div className="rounded-xl bg-[#121217] border border-[#2b2b38] px-3.5 py-3 flex items-center justify-between gap-3">
               <span className="text-zinc-400">LLM 文案</span>
               <span className="text-zinc-100 font-medium truncate">
-                {isCustomLlmProvider(llmApi) ? `${llmApi.provider} · ${llmApi.model}` : 'Gemini / 内置分镜'}
+                {llmApiLabel(llmApi)}
               </span>
             </div>
             <div className="rounded-xl bg-[#121217] border border-[#2b2b38] px-3.5 py-3 flex items-center justify-between gap-3">

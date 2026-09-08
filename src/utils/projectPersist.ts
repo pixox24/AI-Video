@@ -31,9 +31,31 @@ function slimBible(bible?: VisualBible): VisualBible | undefined {
   if (!bible) return bible;
   return {
     ...bible,
+    overrides: Object.fromEntries(Object.entries(bible.overrides || {}).map(([id, override]) => [id, {
+      ...override,
+      decisionCard: override.decisionCard ? { ...override.decisionCard,
+        refs: override.decisionCard.refs.map(ref => slimAssetRef(ref)) } : undefined
+    }])),
     characters: (bible.characters || []).map((character) => ({
       ...character,
       refs: (character.refs || []).map((ref) => slimAssetRef(ref))
+    })),
+    subjects: (bible.subjects || []).map((subject) => ({
+      ...subject,
+      refs: (subject.refs || []).map((ref) => slimAssetRef(ref))
+    })),
+    pendingCharacters: (bible.pendingCharacters || []).map((character) => ({
+      ...character,
+      refs: (character.refs || []).map((ref) => slimAssetRef(ref))
+    })),
+    retiredEntities: (bible.retiredEntities || []).map((item) => ({
+      ...item,
+      character: item.character
+        ? { ...item.character, refs: (item.character.refs || []).map((ref) => slimAssetRef(ref)) }
+        : item.character,
+      subject: item.subject
+        ? { ...item.subject, refs: (item.subject.refs || []).map((ref) => slimAssetRef(ref)) }
+        : item.subject
     })),
     locations: (bible.locations || []).map((location) => ({
       ...location,
@@ -342,8 +364,33 @@ export function collectReferencedAssetUrls(project: VideoProject): Set<string> {
   add(project.audio?.customBgmUrl);
 
   const bible = project.scriptWorkspace?.visualBible;
+  for (const override of Object.values(bible?.overrides || {})) {
+    for (const ref of override.decisionCard?.refs || []) { add(ref.imageUrl); add(ref.imageId); }
+  }
   for (const character of bible?.characters || []) {
     for (const ref of character.refs || []) {
+      add(ref.imageUrl);
+      add(ref.imageId);
+    }
+  }
+  for (const subject of bible?.subjects || []) {
+    for (const ref of subject.refs || []) {
+      add(ref.imageUrl);
+      add(ref.imageId);
+    }
+  }
+  for (const pending of bible?.pendingCharacters || []) {
+    for (const ref of pending.refs || []) {
+      add(ref.imageUrl);
+      add(ref.imageId);
+    }
+  }
+  for (const retired of bible?.retiredEntities || []) {
+    for (const ref of retired.character?.refs || []) {
+      add(ref.imageUrl);
+      add(ref.imageId);
+    }
+    for (const ref of retired.subject?.refs || []) {
       add(ref.imageUrl);
       add(ref.imageId);
     }

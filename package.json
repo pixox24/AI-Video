@@ -10,9 +10,10 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "test": "tsx --test src/utils/castStrategy.test.ts src/utils/characterCardPrompt.test.ts",
+    "test": "tsx --test src/utils/castStrategy.test.ts src/utils/characterCardPrompt.test.ts src/utils/scriptLongform.test.ts src/utils/visualBible.contract.test.ts src/utils/visualBible.acceptance.test.ts src/utils/visualBible.workflow.test.ts src/utils/openAiModels.test.ts",
     "lint": "tsc --noEmit",
-    "test:cast": "tsx scripts/check-visual-bible-cast.mts"
+    "test:cast": "tsx scripts/check-visual-bible-cast.mts",
+    "test:bible": "tsx --test src/utils/visualBible.contract.test.ts src/utils/visualBible.acceptance.test.ts src/utils/visualBible.workflow.test.ts && tsx scripts/audit-visual-bible-2026-09-08.mts && tsx scripts/audit-visual-bible-round2-2026-09-08.mts && tsx scripts/audit-visual-bible-round3-2026-09-08.mts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

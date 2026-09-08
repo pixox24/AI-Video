@@ -20,6 +20,7 @@ import {
   countBudgetUnits,
   countCjk,
   countLatin,
+  inferScriptLanguage,
   languageProfile,
   normalizeScriptLanguage
 } from "./src/utils/scriptLanguage";
@@ -51,6 +52,9 @@ import {
   visualBibleModeForGenre
 } from "./src/utils/visualBible";
 import { extractCastCandidates } from "./src/utils/castCandidates";
+import { buildEntityLedger } from "./src/utils/scriptEntity";
+import { currentSourceKey } from "./src/utils/visualBibleSource";
+import { compileVisualBible } from "./src/services/visualBibleService";
 import {
   SCRIPT_ANALYSIS_SYSTEM,
   SCRIPT_ANALYSIS_USER,
@@ -58,6 +62,30 @@ import {
   needsScriptAnalysis,
   parseScriptAnalysis
 } from "./src/utils/scriptAnalysis";
+import {
+  FILL_RATIO_MIN,
+  LLM_JSON_MAX_TOKENS,
+  LLM_LONGFORM_MAX_TOKENS,
+  TRANSLATE_BATCH_SIZE,
+  chunkItems,
+  clampVideoSeconds,
+  isLongForm,
+  llmMaxTokensForSeconds,
+  llmTimeoutMsForSeconds,
+  maxForecastShotsForDuration,
+  longFormTotalTimeoutMsForSeconds
+} from "./src/utils/scriptDuration";
+import { emptySectionFromPlan, flattenSectionBeats, joinSectionNarrations, planScriptSections } from "./src/utils/scriptSections";
+import { fitTextChunksToCount, splitCoversSource, splitPastedNarration } from "./src/utils/scriptSplit";
+import { normalizeDraftBeats, validateDraftResult, validateScriptSections } from "./src/utils/scriptDraft";
+import { splitCompleteSentences } from "./src/utils/speechSpans";
+import type { ScriptSection } from "./src/types";
+import {
+  classifyLlmChatModels,
+  parseOpenAiModelsPayload,
+  resolveOpenAiModelsUrls,
+  sanitizeOpenAiApiKey
+} from "./src/utils/openAiModels";
 
 function incomingStyleContract(raw: unknown): string {
   if (raw && typeof raw === "object" && (raw as StylePack).world && (raw as StylePack).render) {
@@ -285,10 +313,15 @@ async function callOpenAiCompatibleChat(opts: {
   temperature?: number;
   json?: boolean;
   timeoutMs?: number;
+  maxTokens?: number;
 }): Promise<{ ok: boolean; text?: string; model?: string; error?: string; status?: number }> {
   const urls = resolveChatCompletionUrls(opts.endpoint);
   const apiKey = sanitizeBearerKey(opts.apiKey);
-  const model = (opts.model || "").trim() || "deepseek-v4-flash";
+  const provider = String(opts.provider || "").toLowerCase();
+  const model = (opts.model || "").trim() || (provider === "deepseek" ? "deepseek-v4-flash" : "");
+  if (!model) {
+    return { ok: false, error: "请填写模型" };
+  }
   let lastError = "请求失败";
   let lastStatus: number | undefined;
 
@@ -306,7 +339,10 @@ async function callOpenAiCompatibleChat(opts: {
     if (opts.json) {
       baseBody.response_format = { type: "json_object" };
     }
-    if ((opts.provider || "").toLowerCase() === "deepseek") {
+    if (opts.maxTokens) {
+      baseBody.max_tokens = opts.maxTokens;
+    }
+    if (provider === "deepseek") {
       attemptBodies.push({ ...baseBody, thinking: { type: "disabled" } });
     }
     attemptBodies.push(baseBody);
@@ -561,7 +597,7 @@ function generateIntelligentShots(
   targetDuration: number = 30,
   tone: string = "punchy"
 ) {
-  const safeCount = Math.max(3, Math.min(8, clipCount));
+  const safeCount = Math.max(3, Math.min(maxForecastShotsForDuration(targetDuration), Math.round(clipCount) || 4));
   const avgDuration = Math.round((targetDuration / safeCount) * 10) / 10;
   
   // Style keyword dictionary for prompt generation
@@ -771,8 +807,15 @@ app.post("/api/script/generate", async (req, res) => {
   }
 
   const cleanTopic = topic.trim();
+  const requestedDuration = Number(targetDuration) || 30;
+  if (Number.isFinite(requestedDuration) && requestedDuration > 120) {
+    return res.status(410).json({
+      error: "长视频请使用 /api/script/draft；/api/script/generate 仅保留短视频兼容能力。",
+      code: "legacy_shortform_endpoint"
+    });
+  }
+  const safeDuration = clampVideoSeconds(requestedDuration, 30).seconds;
   const safeCount = Math.max(3, Math.min(8, Number(clipCount) || 4));
-  const safeDuration = Math.max(10, Math.min(120, Number(targetDuration) || 30));
 
   const ai = getGeminiClient();
   const fallbackResult = () => ({
@@ -850,7 +893,7 @@ app.post("/api/script/generate", async (req, res) => {
     let responseText: string | undefined;
 
     if (ai) {
-      const modelsToTry = ["gemini-3.7-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
+      const modelsToTry = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"];
       let lastError: any = null;
 
       for (const modelName of modelsToTry) {
@@ -1186,12 +1229,30 @@ async function fetchPageFinding(rawUrl: string) {
   }
 }
 
-async function runScriptLlmJson(opts: {
+type ScriptLlmJsonAttempt = {
+  data: any | null;
+  reason?: string;
+};
+
+function compactLlmFailureReason(raw: unknown): string {
+  const text = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!text) return "模型没有返回可用结果";
+  if (/location is not supported|user location/i.test(text)) {
+    return "内置 Gemini 在当前网络或地区不可用";
+  }
+  if (/abort|timeout|timed out|请求超时/i.test(text)) return "模型请求超时";
+  return text.slice(0, 240);
+}
+
+async function runScriptLlmJsonDetailed(opts: {
   llmApi: any;
   system: string;
   user: string;
   temperature?: number;
-}): Promise<any | null> {
+  timeoutMs?: number;
+  maxTokens?: number;
+}): Promise<ScriptLlmJsonAttempt> {
+  const failures: string[] = [];
   if (isUsableLlmApi(opts.llmApi)) {
     const llmResult = await callOpenAiCompatibleChat({
       endpoint: String(opts.llmApi.endpoint),
@@ -1201,26 +1262,115 @@ async function runScriptLlmJson(opts: {
       system: opts.system,
       user: opts.user,
       temperature: opts.temperature ?? 0.6,
-      json: true
+      json: true,
+      timeoutMs: opts.timeoutMs,
+      maxTokens: opts.maxTokens || LLM_JSON_MAX_TOKENS
     });
     if (llmResult.ok && llmResult.text) {
-      return cleanAndParseJSON<any>(llmResult.text);
+      const data = cleanAndParseJSON<any>(llmResult.text);
+      if (data) return { data };
+      failures.push("自定义 LLM 返回的内容不是有效 JSON");
+    } else {
+      failures.push(`自定义 LLM：${compactLlmFailureReason(llmResult.error)}`);
     }
   }
   const ai = getGeminiClient();
   if (ai) {
     try {
-      const response = await ai.models.generateContent({
+      const response = await promiseWithTimeout(ai.models.generateContent({
         model: "gemini-3.7-flash",
         contents: opts.user,
-        config: { systemInstruction: opts.system, temperature: opts.temperature ?? 0.6, responseMimeType: "application/json" }
-      });
-      return cleanAndParseJSON<any>(response.text);
+        config: {
+          systemInstruction: opts.system,
+          temperature: opts.temperature ?? 0.6,
+          responseMimeType: "application/json",
+          maxOutputTokens: opts.maxTokens || LLM_JSON_MAX_TOKENS
+        }
+      }), opts.timeoutMs || 60000);
+      const data = cleanAndParseJSON<any>(response.text);
+      if (data) return { data };
+      failures.push("内置 Gemini 返回的内容不是有效 JSON");
     } catch (err: any) {
-      console.warn("[Script LLM] gemini failed:", err?.message || err);
+      const reason = compactLlmFailureReason(err?.message || err);
+      console.warn("[Script LLM] gemini failed:", reason);
+      failures.push(`内置 Gemini：${reason}`);
+    }
+  } else if (!isUsableLlmApi(opts.llmApi)) {
+    failures.push("未配置可用的自定义 LLM，且内置 Gemini 不可用");
+  }
+  return { data: null, reason: failures.join("；") || "模型没有返回可用结果" };
+}
+
+async function runScriptLlmJson(opts: {
+  llmApi: any;
+  system: string;
+  user: string;
+  temperature?: number;
+  timeoutMs?: number;
+  maxTokens?: number;
+}): Promise<any | null> {
+  return (await runScriptLlmJsonDetailed(opts)).data;
+}
+
+async function fetchOpenAiCompatibleModelList(endpoint: string, apiKey: string): Promise<{
+  ok: true;
+  models: string[];
+  modelUrlUsed: string;
+} | {
+  ok: false;
+  error: string;
+  status: number;
+}> {
+  const cleanApiKey = sanitizeOpenAiApiKey(apiKey);
+  const candidateUrls = resolveOpenAiModelsUrls(endpoint);
+  if (candidateUrls.length === 0) {
+    return { ok: false, error: "请输入 API 接口地址", status: 400 };
+  }
+  let lastError = "";
+  let lastStatus = 500;
+  for (const modelUrl of candidateUrls) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(modelUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${cleanApiKey}`,
+          Accept: "application/json"
+        },
+        signal: controller.signal
+      });
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          ok: true,
+          models: parseOpenAiModelsPayload(data),
+          modelUrlUsed: modelUrl
+        };
+      }
+      lastStatus = response.status;
+      const errBody = await response.text();
+      lastError = `[HTTP ${response.status}] ${String(errBody || "").slice(0, 400) || "获取模型列表失败"}`;
+    } catch (err: any) {
+      lastError = err?.name === "AbortError" ? "请求超时" : (err?.message || "请求超时或网络异常");
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
-  return null;
+  return { ok: false, error: lastError || "无法从端点获取模型列表", status: lastStatus };
+}
+
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("请求超时")), Math.max(1, timeoutMs));
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }).catch((error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 app.post("/api/script/topics", async (req, res) => {
@@ -1351,11 +1501,14 @@ app.post("/api/script/draft", async (req, res) => {
   const title = String(
     (intent === "have-title" ? lockedTitle : "") || topicCard?.title || topic || intentNotes || "这件事"
   ).trim();
-  const maxChars = Math.max(24, Number(budget?.maxChars) || 110);
-  const targetSeconds = Number(budget?.targetSeconds) || 30;
+  const requestedMaxChars = Number(budget?.maxChars);
+  const maxChars = Math.min(20000, Math.max(24, Number.isFinite(requestedMaxChars) && requestedMaxChars > 0 ? requestedMaxChars : 110));
+  const minChars = Math.max(16, Math.ceil(maxChars * FILL_RATIO_MIN));
+  const targetSeconds = clampVideoSeconds(Number(budget?.targetSeconds) || 30, 30).seconds;
   const pace = budget?.pace || "medium";
   const notes = String(intentNotes || topicCard?.insight || "").trim();
-  const fallback = () => fallbackDraftServer(title, String(topicCard?.hook || ""), maxChars, language, notes);
+  const longForm = isLongForm(targetSeconds);
+  let latestLlmFailureReason = "";
   const beatPlan = Array.isArray(genrePack?.beatPlan) ? genrePack.beatPlan.join(" → ") : "";
   const haveTitleRule = intent === "have-title"
     ? `\n- 输出 title 必须逐字等于「${title}」，不得改写、不得加修饰\n- 口播是展开题目，禁止只换说法把标题重复三遍\n- 若备注为空，把推断的「要讲清什么」写在第二节拍的 intent，不要写进 title`
@@ -1367,15 +1520,116 @@ app.post("/api/script/draft", async (req, res) => {
     if (intent === "have-title" && parsed && typeof parsed === "object") parsed.title = title;
     return parsed;
   };
+  const rejectFallback = (warnings: string[] = [], error?: string) => {
+    const validationDetail = String(warnings[0] || "").trim();
+    const detail = String(latestLlmFailureReason || validationDetail).trim();
+    const reason = `${validationDetail} ${latestLlmFailureReason}`.toLowerCase();
+    const customLlmFailed = latestLlmFailureReason.startsWith("自定义 LLM：")
+      || latestLlmFailureReason === "自定义 LLM 返回的内容不是有效 JSON";
+    let code = "draft_contract_failed";
+    let message = "模型输出未满足完整长稿的质量约束，未套用短稿。";
+    let recommendation = "请重试；若持续出现，换用支持 JSON 输出且上下文更长的模型。";
+
+    if (/超时|timeout|timed out|abort/.test(reason)) {
+      code = "llm_timeout";
+      message = "模型没有在长稿生成时限内完成，未套用短稿。";
+      recommendation = "请换用更快的模型，或先降低视频时长/节奏预算后重试。";
+    } else if (/fetch failed|network|网络异常|econn|enotfound|socket/.test(reason)) {
+      code = "llm_connection_failed";
+      message = "无法连接到 LLM 服务，未生成完整稿。";
+      recommendation = "请检查网络、接口地址和服务商可用性；自定义 LLM 请先在设置 > LLM 点击“测试连接”。";
+    } else if (customLlmFailed && /api key|密钥|unauthorized|forbidden|401|403|404|model.*not/.test(reason)) {
+      code = "llm_configuration_failed";
+      message = "LLM 配置或模型服务不可用，未生成完整稿。";
+      recommendation = "请在设置 > LLM 检查接口地址、API Key、模型名称，并点击“测试连接”。";
+    } else if (customLlmFailed && /不是有效 json/.test(reason)) {
+      code = "llm_response_invalid";
+      message = "模型没有返回可校验的完整稿，未套用短稿。";
+      recommendation = "请重试；持续失败时请换用支持 JSON 模式的模型，并在设置中测试连接。";
+    } else if (customLlmFailed) {
+      code = "llm_configuration_failed";
+      message = "自定义 LLM 未能完成长稿请求，未生成完整稿。";
+      recommendation = "请在设置 > LLM 测试当前模型；确认它支持 JSON 输出和足够长的回复。";
+    } else if (/location is not supported|当前网络或地区不可用|user location/.test(reason)) {
+      code = "builtin_llm_region_unsupported";
+      message = "内置 Gemini 在当前网络或地区不可用，无法生成完整稿。";
+      recommendation = "请在设置 > LLM 配置一个可用的 OpenAI-compatible 服务商，并先点击“测试连接”。";
+    } else if (/未配置|api key|密钥|unauthorized|forbidden|401|403|404|model.*not/.test(reason)) {
+      code = "llm_configuration_failed";
+      message = "LLM 配置或模型服务不可用，未生成完整稿。";
+      recommendation = "请在设置 > LLM 检查接口地址、API Key、模型名称，并点击“测试连接”。";
+    } else if (/不是有效 json|没有返回可用|没有口播/.test(reason)) {
+      code = "llm_response_invalid";
+      message = "模型没有返回可校验的完整稿，未套用短稿。";
+      recommendation = "请重试；持续失败时请换用支持 JSON 模式的模型，并在设置中测试连接。";
+    }
+
+    return res.status(503).json({
+      source: "fallback",
+      code,
+      error: error || message,
+      detail: detail || undefined,
+      validationDetail: validationDetail || undefined,
+      recommendation,
+      warnings,
+      longForm
+    });
+  };
 
   const styleContract = incomingStyleContract(stylePack);
-
+  const unitName = language === "en" ? "词" : "字";
   const budgetRule = language === "en"
     ? `- Write fullNarration and every beat.narration in natural spoken English. Do not write Chinese voiceover.
-- fullNarration word count (whitespace-separated) ≤ ${maxChars}`
-    : `- fullNarration 去掉空白后的汉字数 ≤ ${maxChars}`;
+- fullNarration word count must be between ${minChars} and ${Math.round(maxChars * 1.05)} (target ${maxChars}). Do not stop early.`
+    : `- fullNarration 去掉空白后的汉字数必须在 ${minChars}–${Math.round(maxChars * 1.05)} 之间（目标 ${maxChars}），不要只写「不超过」，必须填满约 90%–105%。`;
 
-  const prompt = `你是短视频口播导演。按${language === "en" ? "词数" : "字数"}预算写一整段连续口播，并拆成节拍。秒数不要你估，只写${language === "en" ? "词" : "字"}。
+  const contextBlock = `【题目】${title}
+【钩子】${topicCard?.hook || ""}
+【洞察】${topicCard?.insight || ""}
+【结构】${topicCard?.structure || genrePack?.structure || ""}
+【体裁包】${genrePack?.id || topicCard?.genre || ""} ${genrePack?.draftHint || ""}
+【入口】${intent || ""}
+【备注】${intentNotes || ""}
+【调研】对标:${researchNotes?.competitor || ""}；问题:${researchNotes?.audienceQuestion || ""}；事实:${researchNotes?.fact || ""}；画面:${researchNotes?.visualRef || ""}
+【目标时长】${targetSeconds}s 【节奏】${pace} 【${unitName}预算】${minChars}–${maxChars} 【口播语言】${language}`;
+
+  const stampDraft = (parsed: any, source: "llm", extra: Record<string, unknown> = {}) => {
+    const fullNarration = String(parsed?.fullNarration || "").trim();
+    const normalizedBeats = normalizeDraftBeats(parsed?.beats).map((beat, index) => ({
+      ...beat,
+      id: `beat-${index + 1}`,
+      order: index + 1
+    }));
+    const used = countChars(fullNarration, language);
+    const validation = validateDraftResult({
+      fullNarration,
+      beats: normalizedBeats,
+      sections: parsed?.sections,
+      maxChars,
+      targetSeconds,
+      scriptLanguage: language,
+      source
+    });
+    const warnings = [
+      ...(Array.isArray(parsed?.warnings) ? parsed.warnings : []),
+      ...validation.warnings,
+      ...(used > maxChars ? [`超预算 ${used - maxChars} ${unitName}`] : [])
+    ].filter(Boolean);
+    return pinDraftTitle({
+      ...parsed,
+      fullNarration,
+      beats: normalizedBeats,
+      source,
+      warnings,
+      longForm,
+      budgetStatus: used > maxChars * 1.05 ? "over_budget" : used < minChars ? "under_budget" : "ok",
+      overByChars: used > maxChars * 1.05 ? used - Math.round(maxChars * 1.05) : 0,
+      fillRatio: validation.fill,
+      ...extra
+    });
+  };
+
+  const shortPrompt = `你是短视频口播导演。按${unitName}数预算写一整段连续口播，并拆成节拍。秒数不要你估，只写${language === "en" ? "词" : "字"}。
 硬约束：
 ${budgetRule}
 - 第一拍 function 必须是 hook
@@ -1386,70 +1640,179 @@ ${budgetRule}
 - 若体裁是故事或情绪：visualIntent 必须反复画同一个可指认的人（发型+服装锁定），优先待在同一空间；收束拍回收钩子的构图或物件。不要每拍换主角。
 - 若体裁是科普/教程/带货/反常识：允许按句图解，但色板和道具材质保持一致。
 - 不要改口播去迁就风格
-- beats 4 到 8 个，优先按体裁包节拍：${beatPlan || "hook → setup → turn → proof → cta"}
+- beats ${longForm ? "按章节展开，总数随时长增加，不要压成 4–8 个" : "4 到 8 个"}，优先按体裁包节拍：${beatPlan || "hook → setup → turn → proof → cta"}
 - energy 只能是 fast / medium / slow / hold
 - function 只能是 hook / setup / turn / proof / reveal / cta${haveTitleRule}${notesRule}
 
 ${styleContract}
 
-【题目】${title}
-【钩子】${topicCard?.hook || ""}
-【洞察】${topicCard?.insight || ""}
-【结构】${topicCard?.structure || genrePack?.structure || ""}
-【体裁包】${genrePack?.id || topicCard?.genre || ""} ${genrePack?.draftHint || ""}
-【入口】${intent || ""}
-【备注】${intentNotes || ""}
-【调研】对标:${researchNotes?.competitor || ""}；问题:${researchNotes?.audienceQuestion || ""}；事实:${researchNotes?.fact || ""}；画面:${researchNotes?.visualRef || ""}
-【目标时长】${targetSeconds}s 【节奏】${pace} 【${language === "en" ? "词数" : "字数"}上限】${maxChars} 【口播语言】${language}
+${contextBlock}
 
 只输出 JSON：{"title":string,"fullNarration":string,"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
 
   try {
     const system = STYLE_DIRECTOR_SYSTEM;
-    if (isUsableLlmApi(llmApi)) {
-      const llmResult = await callOpenAiCompatibleChat({
-        endpoint: String(llmApi.endpoint),
-        apiKey: String(llmApi.apiKey),
-        model: String(llmApi.model || "deepseek-v4-flash"),
-        provider: llmApi.provider,
-        system,
-        user: prompt,
-        temperature: 0.7,
-        json: true
+    const deadline = Date.now() + longFormTotalTimeoutMsForSeconds(targetSeconds);
+    const ask = async (user: string, maxTokens = llmMaxTokensForSeconds(targetSeconds)): Promise<any | null> => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(null), remaining);
+        runScriptLlmJsonDetailed({
+          llmApi,
+          system,
+          user,
+          temperature: 0.7,
+          timeoutMs: Math.min(llmTimeoutMsForSeconds(targetSeconds), remaining),
+          maxTokens
+        }).then((result) => {
+          clearTimeout(timer);
+          if (!result.data && result.reason) latestLlmFailureReason = result.reason;
+          resolve(result.data);
+        }).catch(() => {
+          clearTimeout(timer);
+          resolve(null);
+        });
       });
-      if (llmResult.ok && llmResult.text) {
-        const parsed = cleanAndParseJSON<any>(llmResult.text);
-        if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
-          // Never silently slice generated copy: it can break a sentence, CTA, and beat alignment.
-          if (countChars(parsed.fullNarration, language) > maxChars) {
-            parsed.budgetStatus = "over_budget";
-            parsed.overByChars = countChars(parsed.fullNarration, language) - maxChars;
+    };
+
+    if (longForm) {
+      const plans = planScriptSections({
+        targetSeconds,
+        maxChars,
+        genre: genrePack?.id || topicCard?.genre
+      });
+      const outlinePrompt = `你是长视频口播导演。先写全片大纲和章节，不要一次写完全文。
+硬约束：
+- 必须按下面的章节方案输出，不得合并或删章
+- 每章 outline 用 1–2 句说明这一段要讲清什么
+- title 遵守题目锁定规则
+${haveTitleRule}${notesRule}
+
+${styleContract}
+${contextBlock}
+
+【章节方案】
+${plans.map((plan) => `${plan.order}. ${plan.id} ${plan.title} ${plan.role} ${plan.targetSeconds}s ${plan.minUnits}–${plan.maxUnits}${unitName}`).join("\n")}
+
+只输出 JSON：{"title":string,"sections":[{"id","title","outline"}]}`;
+      const outline = await ask(outlinePrompt, 4000);
+      const sections: ScriptSection[] = plans.map((plan) => {
+        const hit = Array.isArray(outline?.sections)
+          ? outline.sections.find((item: any) => String(item?.id) === plan.id)
+          : null;
+        const section = emptySectionFromPlan(plan);
+        return {
+          ...section,
+          title: String(hit?.title || plan.title),
+          outline: String(hit?.outline || "")
+        };
+      });
+
+      for (let i = 0; i < sections.length; i++) {
+        const section = sections[i];
+        const sectionPrompt = `按这一章的时长预算写口播，不要写其他章。
+硬约束：
+${language === "en"
+    ? `- Section narration word count must be between ${section.minUnits} and ${section.maxUnits}.`
+    : `- 本章口播汉字数必须在 ${section.minUnits}–${section.maxUnits} 之间。`}
+- 只写这一章，不要重复标题，不要预告下一章
+- beats 1 到 4 个，function 必须属于本章角色
+- visualIntent 写看得见的画面
+${haveTitleRule}${notesRule}
+
+${styleContract}
+${contextBlock}
+
+【本章】${section.order}/${sections.length} ${section.title} ${section.role} ${section.targetSeconds}s
+【本章大纲】${section.outline || "按角色写清这一段"}
+【上一章结尾】${i > 0 ? sections[i - 1].narration.slice(-80) : "（开篇）"}
+
+只输出 JSON：{"narration":string,"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
+        let piece = await ask(sectionPrompt, LLM_LONGFORM_MAX_TOKENS);
+        let candidate: ScriptSection | null = null;
+        let candidateWarnings: string[] = [];
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const narration = String(piece?.narration || "").trim();
+          if (narration) {
+            const beats = Array.isArray(piece?.beats) && piece.beats.length > 0
+              ? piece.beats.map((beat: any, index: number) => ({
+                id: `${section.id}-beat-${index + 1}`,
+                order: index + 1,
+                function: beat.function || section.beats[0]?.function || "setup",
+                intent: beat.intent || "",
+                narration: String(beat.narration || "").trim() || (index === 0 ? narration : ""),
+                targetSeconds: Number(beat.targetSeconds) || section.targetSeconds,
+                energy: beat.energy || "medium",
+                visualIntent: beat.visualIntent || "",
+                needsHold: Boolean(beat.needsHold),
+                sectionId: section.id
+              }))
+              : [{ ...section.beats[0], narration, sectionId: section.id }];
+            candidate = { ...section, narration, beats };
+            const sectionCheck = validateScriptSections([candidate], language);
+            if (sectionCheck.ok) break;
+            candidateWarnings = sectionCheck.warnings;
+          } else {
+            candidate = null;
+            candidateWarnings = [`第 ${section.order} 章「${section.title}」没有口播`];
           }
-          return res.json(pinDraftTitle(parsed));
+          piece = await ask(`${sectionPrompt}\n上次输出未通过校验：${candidateWarnings.join('；')}。请重写本章，并让 beats.narration 按顺序完整拼接成 narration。`, LLM_LONGFORM_MAX_TOKENS);
         }
+        if (!candidate) {
+          return rejectFallback(candidateWarnings.length > 0 ? candidateWarnings : [`第 ${section.order} 章「${section.title}」生成失败`]);
+        }
+        const finalSectionCheck = validateScriptSections([candidate], language);
+        if (!finalSectionCheck.ok) return rejectFallback(finalSectionCheck.warnings);
+        section.narration = candidate.narration;
+        section.beats = candidate.beats;
       }
+
+      const fullNarration = joinSectionNarrations(sections, language);
+      const beats = flattenSectionBeats(sections);
+      const stamped = stampDraft({
+        title: outline?.title || title,
+        fullNarration,
+        beats,
+        sections
+      }, "llm");
+      const validation = validateDraftResult({
+        fullNarration,
+        beats,
+        sections,
+        maxChars,
+        targetSeconds,
+        scriptLanguage: language,
+        source: "llm"
+      });
+      const sectionValidation = validateScriptSections(sections, language);
+      if (!sectionValidation.ok) return rejectFallback(sectionValidation.warnings);
+      if (!validation.ok) return rejectFallback(validation.warnings);
+      return res.json(stamped);
     }
 
-    const ai = getGeminiClient();
-    if (ai) {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: prompt,
-        config: { systemInstruction: system, temperature: 0.7, responseMimeType: "application/json" }
-      });
-      const parsed = cleanAndParseJSON<any>(response.text);
+    let parsed = await ask(shortPrompt);
+    let lastWarnings = ["模型没有返回可用口播和节拍"];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       if (parsed?.fullNarration && Array.isArray(parsed.beats) && parsed.beats.length >= 2) {
-        if (countChars(parsed.fullNarration, language) > maxChars) {
-          parsed.budgetStatus = "over_budget";
-          parsed.overByChars = countChars(parsed.fullNarration, language) - maxChars;
-        }
-        return res.json(pinDraftTitle(parsed));
+        const stamped = stampDraft(parsed, "llm");
+        const validation = validateDraftResult({
+          fullNarration: stamped.fullNarration,
+          beats: stamped.beats,
+          maxChars,
+          targetSeconds,
+          scriptLanguage: language,
+          source: "llm"
+        });
+        if (validation.ok) return res.json(stamped);
+        lastWarnings = validation.warnings;
       }
+      parsed = await ask(`${shortPrompt}\n上次输出未通过校验：${lastWarnings.join('；')}。请严格修正，并确保全文与 beats.narration 按顺序逐字覆盖。`);
     }
-    return res.json(fallback());
+    return rejectFallback(lastWarnings);
   } catch (error: any) {
-    console.warn("[Script Draft] fallback:", error?.message || error);
-    return res.json(fallback());
+    console.warn("[Script Draft] failed:", error?.message || error);
+    return rejectFallback([String(error?.message || error)]);
   }
 });
 
@@ -1663,7 +2026,10 @@ function 只能是 hook/setup/turn/proof/reveal/cta。energy 只能是 fast/medi
       temperature: 0.3
     });
     if (Array.isArray(parsed?.spans) && parsed.spans.length > 0) {
-      return res.json({ spans: parsed.spans });
+      const texts = parsed.spans.map((span: any) => String(span?.text || ""));
+      if (splitCoversSource(texts, text)) {
+        return res.json({ spans: parsed.spans, source: "llm" });
+      }
     }
   } catch (error: any) {
     console.warn("[Split Spans] LLM failed:", error?.message || error);
@@ -1730,124 +2096,39 @@ ${slotLines}
 });
 
 app.post("/api/script/visual-bible", async (req, res) => {
-  const { narration, genre, title, stylePack, llmApi, previousBible, intentNotes, candidates } = req.body || {};
+  const { narration, genre, title, stylePack, llmApi, previousBible, intentNotes, candidates, forceReanalyse, requestId, language, scriptLanguage } = req.body || {};
   const text = String(narration || "").trim();
   if (!text) {
     return res.status(400).json({ error: "narration is required" });
   }
-  const mode = visualBibleModeForGenre(genre as ScriptGenre);
-  const styleContract = incomingStyleContract(stylePack);
-  const prev = normalizeVisualBible(previousBible, mode);
-  const notes = String(intentNotes || "").trim();
-  const resolvedCandidates = Array.isArray(candidates) && candidates.length
-    ? candidates
-    : extractCastCandidates({ narration: text, title: String(title || ""), intentNotes: notes });
-  // 感知层：只有规则挖掘“模棱两可”时才做一次轻量整篇剧本解析，LLM 只提事实不做决策。
-  const hints = extractNarrativeCharacterHints(text);
-  const needsAnalysis = needsScriptAnalysis({
-    mode,
-    hasNarrativeSignal: hasNarrativeSignal(text, resolvedCandidates, notes),
-    hasPersonReference: hints.hasPerson,
-    candidates: resolvedCandidates
-  });
-  let analysis: ReturnType<typeof parseScriptAnalysis> = null;
-  if (needsAnalysis && isUsableLlmApi(llmApi)) {
-    try {
-      const rawAnalysis = await runScriptLlmJson({
-        llmApi,
-        system: SCRIPT_ANALYSIS_SYSTEM,
-        user: SCRIPT_ANALYSIS_USER({
-          narration: text,
-          genre: genre as string,
-          title: String(title || ""),
-          intentNotes: notes
-        }),
-        temperature: 0
-      });
-      analysis = parseScriptAnalysis(rawAnalysis);
-    } catch (err) {
-      console.warn("[Script Analysis] failed:", (err as Error)?.message || err);
-      analysis = null;
-    }
-  }
-  const entityContract = analysis
-    ? formatAnalysisContract(analysis, genre as string)
-    : narrativeEntityContract(text, { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates });
-  const genreRule = mode === "expository"
-    ? `- 本片为说明/教程型（${genre || "科普/教程/带货"}）：默认不建角色卡，把食材、厨具、产品当被加工对象（kind=object），禁止拟人化、禁止给物体表情动作。
-- 只有当口播有明显人物/对话/叙事证据时才允许建 person/creature 角色卡，否则 characters 必须输出 []。
-- characters=[] 时仍要写 paletteLock 与 continuityRule：锁定同一被加工对象的实物外观，状态随步骤递进（生→熟→成品），禁止每镜换另一块。`
-    : "";
-  const prompt = `根据整段口播编译「画面圣经 VisualBible」。有原文证据才能建角色；没有证据必须 characters=[]。有角色不等于每镜都上人。
-  硬规则：
-- mode 仍用 ${mode}（只影响机位先验，不决定能不能有角色）
-- 角色 0 到 3 个。只能从候选认领；人物/拟人动物用 kind=person / creature。
-- 开场并列出现的人名（如「A和B」）必须优先建为共同主角（role=lead，最多 2 个 person）；会说话的动物/物件建为配角（role=support），不得只因为出镜多就把动物升成唯一主角。
-- person/creature 的 look 必须写出：体型、头/吻形状、眼睛颜色、主色+腹色或肤色、一个独特识别点。禁止只写物种名或「拟人化的 X」。
-- signature 必填：跨镜头可认出的斑纹、配饰或固定道具。wardrobe 必须是全片固定的一套服装。
-- object（被加工对象/道具）不作为角色卡；它的外观与状态一致性写进 paletteLock / continuityRule。
-- 每张卡必须有 candidateId、sourceEvidence（原文短句）。不得发明讲解员/女孩/用户。
-- 场景 0 到 2 个。有角色时至少 1 个场景。
-- paletteLock 必填。
-- refs=[]，locked=false。不要改口播。
-${genreRule}
-
-${styleContract}
-
-${entityContract}
-
-【体裁】${genre || ""}
-【题目】${title || ""}
-【要讲清什么】${notes || "（空）"}
-【口播】
-${text}
-
-只输出 JSON：{"mode":"${mode}","logline":"","paletteLock":"","characters":[{"id":"char-lead","name":"","role":"lead","kind":"person","candidateId":"","ageBand":"","look":"","wardrobe":"","signature":"","sourceEvidence":[],"confidence":0,"locked":false,"refs":[]}],"locations":[{"id":"loc-1","name":"","look":"","timeOfDay":"","locked":false,"refs":[]}],"motif":null,"continuityRule":"有角色的镜子同一主体推进；insert 默认无人；对照才换主体"}`;
-
   try {
-    const parsed = await runScriptLlmJson({
-      llmApi,
-      system: "你只输出合法 JSON。画面圣经是可钉的约束，不是散文。refs 必须是空数组。",
-      user: prompt,
-      temperature: 0.35
-    });
-    const normalized = normalizeVisualBible(parsed, mode);
-    let incoming = normalized && (normalized.characters.length > 0 || normalized.mode === "expository" || normalized.paletteLock)
-      ? { ...normalized, sourceHash: bibleSourceHash(text, genre, mode), generatedAt: Date.now() }
-      : fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates });
-    if (incoming.characters.length === 0 && resolvedCandidates.length > 0
-      && hasNarrativeSignal(text, resolvedCandidates, notes)) {
-      const filled = fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates });
-      incoming = {
-        ...incoming,
-        characters: filled.characters,
-        locations: incoming.locations.length ? incoming.locations : filled.locations,
-        continuityRule: filled.continuityRule
-      };
-    }
-    const merged = groundVisualBible(mergeVisualBible(prev, incoming), text, {
+    const result = await compileVisualBible({
+      narration: text,
+      genre,
       title: String(title || ""),
-      intentNotes: notes,
-      candidates: resolvedCandidates
+      intentNotes: String(intentNotes || "").trim(),
+      previousBible,
+      candidates: Array.isArray(candidates) ? candidates : undefined,
+      forceReanalyse: Boolean(forceReanalyse),
+      requestId,
+      language: language || scriptLanguage,
+      model: String(llmApi?.model || 'gemini-3.7-flash'),
+      stylePack
+    }, {
+      analyze: isUsableLlmApi(llmApi)
+        ? async ({ system, user }) => runScriptLlmJson({ llmApi, system, user, temperature: 0 })
+        : undefined,
+      compileCards: async ({ system, user }) => runScriptLlmJson({ llmApi, system, user, temperature: 0.35 })
     });
-    const withAnalysis = analysis
-      ? applyAnalysisToBible(merged, analysis, genre as ScriptGenre, {
-          narration: text,
-          title: String(title || ""),
-          intentNotes: notes
-        })
-      : merged;
-    return res.json({ bible: withAnalysis, analysisApplied: Boolean(analysis) });
-  } catch (error: any) {
-    console.warn("[Visual Bible] fallback:", error?.message || error);
     return res.json({
-      bible: groundVisualBible(
-        mergeVisualBible(prev, fallbackVisualBible({ narration: text, genre, title, intentNotes: notes, candidates: resolvedCandidates })),
-        text,
-        { title: String(title || ""), intentNotes: notes, candidates: resolvedCandidates }
-      ),
-      fallback: true
+      bible: result.bible,
+      analysisApplied: result.analysisApplied,
+      fallback: result.fallback,
+      diagnostics: result.diagnostics
     });
+  } catch (error: any) {
+    console.warn("[Visual Bible] compileVisualBible failed:", error?.message || error);
+    return res.status(500).json({ error: error?.message || "visual bible failed" });
   }
 });
 
@@ -1951,9 +2232,7 @@ app.post("/api/script/translate-secondary", async (req, res) => {
   if (list.length === 0) {
     return res.status(400).json({ error: "units are required" });
   }
-  if (list.length > 60) {
-    return res.status(400).json({ error: "一次最多翻译 60 条" });
-  }
+  const batches = chunkItems(list, TRANSLATE_BATCH_SIZE);
 
   const looksTranslated = (t: string) => (
     targetLang === "en"
@@ -2009,27 +2288,28 @@ ${items.map((u, i) => `${i + 1}. id=${u.id}\n${sourceLabel}：${u.text}`).join("
 
   try {
     const byId = new Map<string, string>();
-    let result = await askOnce(list, false);
-    const missingIds = () => list.filter((u) => !result.has(u.id)).length;
-    if (missingIds() > 0) {
-      const stricter = await askOnce(list, true);
-      for (const [id, translated] of stricter) result.set(id, translated);
-    }
-
     let extraCalls = 0;
-    for (const u of list) {
-      let translated = result.get(u.id);
-      const bad = (t?: string) => !t || !looksTranslated(t) || !plausibleRatio(u.text, t) || tooLong(t);
-      if (translated && !bad(translated)) {
-        byId.set(u.id, translated);
-        continue;
+    for (const batch of batches) {
+      let result = await askOnce(batch, false);
+      const missing = () => batch.filter((u) => !result.has(u.id));
+      if (missing().length > 0) {
+        const stricter = await askOnce(batch, true);
+        for (const [id, translated] of stricter) result.set(id, translated);
       }
-      while (bad(translated) && extraCalls < 16) {
-        extraCalls++;
-        const one = await askOnce([u], true);
-        translated = one.get(u.id);
+      for (const u of batch) {
+        let translated = result.get(u.id);
+        const bad = (t?: string) => !t || !looksTranslated(t) || !plausibleRatio(u.text, t) || tooLong(t);
+        if (translated && !bad(translated)) {
+          byId.set(u.id, translated);
+          continue;
+        }
+        while (bad(translated) && extraCalls < 16) {
+          extraCalls++;
+          const one = await askOnce([u], true);
+          translated = one.get(u.id);
+        }
+        if (translated && looksTranslated(translated)) byId.set(u.id, translated);
       }
-      if (translated && looksTranslated(translated)) byId.set(u.id, translated);
     }
 
     return res.json({
@@ -2049,49 +2329,26 @@ ${items.map((u, i) => `${i + 1}. id=${u.id}\n${sourceLabel}：${u.text}`).join("
 
 // 2.2 Split free-form long text into structured storyboard shots
 app.post("/api/script/split-text", async (req, res) => {
-  const { rawText, visualStyle = "cinematic", targetShots, llmApi } = req.body || {};
+  const { rawText, visualStyle = "cinematic", targetShots, llmApi, scriptLanguage } = req.body || {};
   if (!rawText || typeof rawText !== "string" || !rawText.trim()) {
     return res.status(400).json({ error: "rawText is required" });
   }
 
   const cleanText = rawText.trim();
+  const language = normalizeScriptLanguage(scriptLanguage || inferScriptLanguage(cleanText));
   const ai = getGeminiClient();
 
-  // Rule-based fallback splitter
   const splitFallback = () => {
-    // Split by punctuation and line breaks
-    const rawSentences = cleanText
-      .split(/([。！？\n\r!?]+)/)
-      .map(s => s.trim())
-      .filter(Boolean);
-
-    const mergedChunks: string[] = [];
-    let currentChunk = '';
-
-    for (let i = 0; i < rawSentences.length; i++) {
-      const part = rawSentences[i];
-      if (/^[。！？\n\r!?]+$/.test(part)) {
-        currentChunk += (part.includes('\n') ? ' ' : part);
-      } else {
-        if (currentChunk.length >= 16) {
-          mergedChunks.push(currentChunk.trim());
-          currentChunk = part;
-        } else {
-          currentChunk = currentChunk ? `${currentChunk} ${part}` : part;
-        }
-      }
-    }
-    if (currentChunk.trim()) {
-      mergedChunks.push(currentChunk.trim());
-    }
-
-    const safeChunks = mergedChunks.length > 0 ? mergedChunks.slice(0, 8) : [cleanText];
+    const split = splitPastedNarration(cleanText, language);
+    const desired = Math.max(2, Math.min(240, Number(targetShots) || split.chunks.length || 4));
+    const safeChunks = fitTextChunksToCount(split.chunks.length > 0 ? split.chunks : [cleanText], desired, language);
     const cameraMotions = ['zoom-in', 'pan-left', 'zoom-out', 'pan-right', 'tilt-up', 'cinematic-orbit'];
     const transitions = ['crossfade', 'slide-left', 'crossfade', 'fade-black', 'zoom-in'];
 
     const shots = safeChunks.map((chunk, idx) => {
-      const charCount = chunk.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').length;
-      const duration = Math.max(2.5, Math.min(7.0, Math.round((charCount / 4.2) * 10) / 10 || 3.5));
+      const units = countBudgetUnits(chunk, language);
+      const unitsPerSecond = language === 'en' ? 2.5 : 4.2;
+      const duration = Math.max(2.5, Math.min(10.0, Math.round((units / unitsPerSecond) * 10) / 10 || 3.5));
       return {
         order: idx + 1,
         duration,
@@ -2111,15 +2368,18 @@ app.post("/api/script/split-text", async (req, res) => {
   };
 
   try {
-    const prompt = `你是一位短视频金牌导演与剪辑师。用户提供了一段现成的完整口播/短视频文案。
-请将该文案智能拆解为 ${targetShots ? targetShots + '个' : '3~6个'} 适合短视频节奏（抖音/小红书/快手/B站）的分镜头剧本。
+    const autoCount = Math.max(2, Math.min(240, Number(targetShots) || splitCompleteSentences(cleanText, language, { keepShort: true }).length || 4));
+    const unitName = language === 'en' ? 'words' : '字';
+    const prompt = `你是一位长视频/短视频金牌导演与剪辑师。用户提供了一段现成的完整口播文案。
+请将该文案智能拆解为 ${autoCount} 个分镜头剧本。必须完整覆盖原文，禁止丢掉后文，禁止只保留前几句。
+口播语言：${language === 'en' ? 'English' : '中文'}。
 
 【用户文案】：
 ${cleanText}
 
 【拆解要求】：
-1. 完整保留用户的原意与文案，将长文案合理拆分为各个分镜的 narration（每句 15~35 字左右，口语流畅）。
-2. 根据解说字数精确计算每个分镜的 duration（秒数，通常每秒读4~5个字，单镜头时长在 2.5~7.0 秒之间）。
+1. 完整保留用户的原意与文案，将长文案合理拆分为各个分镜的 narration（每镜约 8~24 ${unitName}，口语流畅）。
+2. 根据解说${unitName}数精确计算每个分镜的 duration（秒数，${language === 'en' ? '每秒约 2–3 词' : '每秒约 4–5 字'}，单镜头时长在 2.5~10.0 秒之间）。
 3. 为每个镜头生成高水准的英文 AI 生图 Prompt（visualPrompt，风格符合 ${visualStyle}），以及中文画面描述。
 4. 提供 secondaryText（精简英文双语字幕）、cameraMotion（运镜）和 transition（转场）。
 以合法的 JSON 格式返回，结构为 {"title": string, "shots": [...]}。`;
@@ -2133,7 +2393,9 @@ ${cleanText}
         system: "你是短视频导演，只输出合法 JSON。",
         user: prompt,
         temperature: 0.7,
-        json: true
+        json: true,
+        timeoutMs: llmTimeoutMsForSeconds(Math.max(30, autoCount * 4)),
+        maxTokens: autoCount > 48 ? LLM_LONGFORM_MAX_TOKENS : LLM_JSON_MAX_TOKENS
       });
       if (llmResult.ok && llmResult.text) {
         const validated = validateGeneratedShots(
@@ -2142,7 +2404,9 @@ ${cleanText}
           visualStyle,
           0
         );
-        if (validated) return res.json(validated);
+        if (validated && splitCoversSource(validated.shots.map((shot: any) => String(shot.narration || "")), cleanText)) {
+          return res.json(validated);
+        }
       } else {
         console.warn("[Split Text] Custom LLM failed:", llmResult.error);
       }
@@ -2153,15 +2417,16 @@ ${cleanText}
     }
 
     let responseText: string | undefined;
-    const modelsToTry = ["gemini-3.7-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
+    const modelsToTry = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.1-pro-preview"];
 
     for (const modelName of modelsToTry) {
       try {
-        const response = await ai.models.generateContent({
+        const response = await promiseWithTimeout(ai.models.generateContent({
           model: modelName,
           contents: prompt,
-          config: {
+            config: {
             responseMimeType: "application/json",
+            maxOutputTokens: autoCount > 48 ? LLM_LONGFORM_MAX_TOKENS : LLM_JSON_MAX_TOKENS,
             responseSchema: {
               type: Type.OBJECT,
               properties: {
@@ -2187,7 +2452,7 @@ ${cleanText}
               required: ["shots"]
             }
           }
-        });
+        }), llmTimeoutMsForSeconds(Math.max(30, autoCount * 4)));
         responseText = response.text;
         if (responseText) break;
       } catch (err: any) {
@@ -2201,7 +2466,9 @@ ${cleanText}
       visualStyle,
       0
     );
-    if (parsed) return res.json(parsed);
+    if (parsed && splitCoversSource(parsed.shots.map((shot: any) => String(shot.narration || "")), cleanText)) {
+      return res.json(parsed);
+    }
     return res.json(splitFallback());
   } catch (error: any) {
     console.warn("[Split Text] LLM error, returning rule-based split:", error?.message);
@@ -3455,13 +3722,16 @@ async function executeCustomImageRequest(options: {
 // 2.3 Test custom LLM provider (DeepSeek / OpenAI-compatible)
 app.post("/api/llm/test", async (req, res) => {
   const startTime = Date.now();
-  const { endpoint, apiKey, model = "deepseek-v4-flash", provider = "deepseek" } = req.body || {};
+  const { endpoint, apiKey, model = "", provider = "deepseek" } = req.body || {};
 
   if (!endpoint || typeof endpoint !== "string" || !endpoint.trim()) {
     return res.status(400).json({ ok: false, error: "请输入 API 接口地址" });
   }
   if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
     return res.status(400).json({ ok: false, error: "请输入 API 密钥" });
+  }
+  if (String(provider || "").toLowerCase() !== "deepseek" && !String(model || "").trim()) {
+    return res.status(400).json({ ok: false, error: "请填写或选择模型" });
   }
 
   try {
@@ -3471,7 +3741,7 @@ app.post("/api/llm/test", async (req, res) => {
       model: String(model || "deepseek-v4-flash"),
       provider,
       system: "You are a concise API connectivity checker. Reply with JSON only.",
-      user: 'Reply with JSON: {"ok":true,"message":"DeepSeek ready"}',
+      user: 'Reply with JSON: {"ok":true,"message":"LLM ready"}',
       temperature: 0,
       json: true,
       timeoutMs: 20000
@@ -3500,6 +3770,38 @@ app.post("/api/llm/test", async (req, res) => {
       error: err?.message || "LLM 测试请求失败"
     });
   }
+});
+
+app.post("/api/llm/fetch-models", async (req, res) => {
+  const { endpoint, apiKey } = req.body || {};
+  if (!endpoint || typeof endpoint !== "string" || !endpoint.trim()) {
+    return res.status(400).json({ ok: false, error: "请输入 API 接口地址" });
+  }
+  if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+    return res.status(400).json({ ok: false, error: "请输入 API 密钥" });
+  }
+
+  const result = await fetchOpenAiCompatibleModelList(endpoint, apiKey);
+  if (result.ok === false) {
+    const failure = result as Extract<typeof result, { ok: false }>;
+    return res.status(failure.status || 500).json({
+      ok: false,
+      error: `无法从端点获取模型列表: ${failure.error}`,
+      diagnosis: failure.status === 401
+        ? "API Key 无效或未授权访问 /v1/models 接口。"
+        : "该服务商可能未开放 /v1/models 接口，或端点地址不正确。您仍可以直接手动填入聊天模型 id。"
+    });
+  }
+
+  const { chatModels, skipped } = classifyLlmChatModels(result.models);
+  return res.json({
+    ok: true,
+    models: result.models,
+    chatModels,
+    skippedCount: skipped.length,
+    totalCount: result.models.length,
+    modelUrlUsed: result.modelUrlUsed
+  });
 });
 
 // 3.1 Test Custom Image Provider API endpoint
@@ -3577,102 +3879,34 @@ app.post("/api/visual/fetch-models", async (req, res) => {
     return res.status(400).json({ ok: false, error: '请输入 API 密钥 (API Key / Token)' });
   }
 
-  let rawEndpoint = String(endpoint).trim().replace(/^["']|["']$/g, '');
-  if (!rawEndpoint.startsWith('http://') && !rawEndpoint.startsWith('https://')) {
-    rawEndpoint = 'https://' + rawEndpoint;
-  }
-  rawEndpoint = rawEndpoint.replace(/\/+$/, '');
-
-  // Extract base URL
-  let baseUrl = rawEndpoint;
-  if (baseUrl.includes('/images/generations')) {
-    baseUrl = baseUrl.replace(/\/images\/generations.*$/, '');
-  } else if (baseUrl.includes('/chat/completions')) {
-    baseUrl = baseUrl.replace(/\/chat\/completions.*$/, '');
-  }
-  if (baseUrl.endsWith('/v1')) {
-    baseUrl = baseUrl.slice(0, -3);
+  const result = await fetchOpenAiCompatibleModelList(endpoint, apiKey);
+  if (result.ok === false) {
+    const failure = result as Extract<typeof result, { ok: false }>;
+    return res.status(failure.status || 500).json({
+      ok: false,
+      error: `无法从端点获取模型列表: ${failure.error}`,
+      diagnosis: failure.status === 401
+        ? 'API Key 无效或未授权访问 /v1/models 接口。'
+        : '该服务商可能未开放 /v1/models 接口，或端点地址不正确。您仍可以直接手动填入模型名称进行生图。'
+    });
   }
 
-  let cleanApiKey = String(apiKey).trim().replace(/^["']|["']$/g, '');
-  if (cleanApiKey.toLowerCase().startsWith('bearer ')) {
-    cleanApiKey = cleanApiKey.slice(7).trim();
-  }
-
-  const candidateUrls = [
-    `${baseUrl}/v1/models`,
-    `${baseUrl}/models`,
-    `${rawEndpoint}/models`
+  const imageKeywords = [
+    'flux', 'dall', 'sd', 'stable-diffusion', 'midjourney', 'mj',
+    'image', 'recraft', 'ideogram', 'cogview', 'kolors', 'canvas',
+    'kling', 'runway', 'sora', 'luma', 'doubao-image', 'qwen-vl', 'seed', 'animagine'
   ];
+  const imageModels = result.models.filter((id) => {
+    const lower = id.toLowerCase();
+    return imageKeywords.some((keyword) => lower.includes(keyword));
+  });
 
-  let lastError: string = '';
-  let lastStatus = 500;
-
-  for (const modelUrl of candidateUrls) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
-
-      const response = await fetch(modelUrl, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${cleanApiKey}`,
-          'Accept': 'application/json'
-        },
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = await response.json();
-        let rawList: any[] = [];
-        if (Array.isArray(data?.data)) {
-          rawList = data.data;
-        } else if (Array.isArray(data?.models)) {
-          rawList = data.models;
-        } else if (Array.isArray(data)) {
-          rawList = data;
-        }
-
-        const allModelIds: string[] = rawList
-          .map((item: any) => (typeof item === 'string' ? item : item?.id || item?.name))
-          .filter((id: any): id is string => Boolean(id && typeof id === 'string'));
-
-        // Identify image-capable models
-        const imageKeywords = [
-          'flux', 'dall', 'sd', 'stable-diffusion', 'midjourney', 'mj',
-          'image', 'recraft', 'ideogram', 'cogview', 'kolors', 'canvas',
-          'kling', 'runway', 'sora', 'luma', 'doubao-image', 'qwen-vl', 'seed', 'animagine'
-        ];
-
-        const imageModels = allModelIds.filter(id => {
-          const lower = id.toLowerCase();
-          return imageKeywords.some(kw => lower.includes(kw));
-        });
-
-        return res.json({
-          ok: true,
-          models: allModelIds,
-          imageModels: imageModels,
-          totalCount: allModelIds.length,
-          modelUrlUsed: modelUrl
-        });
-      } else {
-        lastStatus = response.status;
-        const errBody = await response.text();
-        lastError = `[HTTP ${response.status}] ${errBody || '获取模型列表失败'}`;
-      }
-    } catch (e: any) {
-      lastError = e?.message || '请求超时或网络异常';
-    }
-  }
-
-  return res.status(lastStatus).json({
-    ok: false,
-    error: `无法从端点获取模型列表: ${lastError}`,
-    diagnosis: lastStatus === 401 
-      ? 'API Key 无效或未授权访问 /v1/models 接口。' 
-      : '该服务商可能未开放 /v1/models 接口，或端点地址不正确。您仍可以直接手动填入模型名称进行生图。'
+  return res.json({
+    ok: true,
+    models: result.models,
+    imageModels,
+    totalCount: result.models.length,
+    modelUrlUsed: result.modelUrlUsed
   });
 });
 

@@ -21,7 +21,9 @@ export const CHARACTER_CARD_VARIANTS: { id: CharacterCardVariant; label: string;
 
 /** 只有可上镜叙事的人/拟人动物才提供自动参考图；object（实物/道具）走 paletteLock 或手动实物图。 */
 export function shouldOfferAutoCard(character: VisualCharacter | null | undefined): boolean {
-  return character?.kind === 'person' || character?.kind === 'creature';
+  if (!character) return false;
+  if (character.status === 'pending' || character.appearanceUnknown) return false;
+  return character.kind === 'person' || character.kind === 'creature';
 }
 
 function clean(value: unknown): string {

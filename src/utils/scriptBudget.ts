@@ -20,6 +20,25 @@ import {
   normalizeScriptLanguage,
   paceUnitsPerSecond
 } from './scriptLanguage';
+import {
+  FILL_RATIO_MIN,
+  MAX_VIDEO_SECONDS,
+  clampVideoSeconds,
+  conceptMaxForDuration as conceptMaxForSeconds,
+  maxForecastShotsForDuration,
+  maxUniqueScenesForDuration,
+  visualSlotEstimate
+} from './scriptDuration';
+import { beatsFromSectionPlans, planScriptSections, shouldUseSections } from './scriptSections';
+
+export { TARGET_SECONDS_PRESETS } from './scriptDuration';
+export {
+  MIN_VIDEO_SECONDS,
+  MAX_VIDEO_SECONDS,
+  LONG_FORM_SECONDS,
+  isLongForm,
+  clampVideoSeconds
+} from './scriptDuration';
 
 export interface PacePreset {
   id: ScriptPace;
@@ -98,14 +117,8 @@ export const STAGE_META: { id: import('../types').ScriptStage; label: string; hi
   { id: 'rhythm', label: '节奏', hint: '镜数预测' }
 ];
 
-export const TARGET_SECONDS_PRESETS = [15, 21, 30, 45, 60, 90];
-
 export function conceptMaxForDuration(seconds: number): number {
-  if (seconds <= 18) return 1;
-  if (seconds <= 35) return 2;
-  if (seconds <= 50) return 2;
-  if (seconds <= 75) return 3;
-  return 4;
+  return conceptMaxForSeconds(seconds);
 }
 
 export function recommendDuration(
@@ -163,7 +176,7 @@ export function buildDurationBudget(partial: {
   // TTS rate is a multiplier: faster speech carries more budget units per second.
   const speechRate = Math.max(0.8, Math.min(1.5, Number(partial.speechRate) || 1));
   const effectiveCps = paceUnitsPerSecond(pace, language, speechRate);
-  const targetSeconds = Math.max(8, Math.min(180, Number(partial.targetSeconds) || plat.defaultSeconds));
+  const targetSeconds = clampVideoSeconds(Number(partial.targetSeconds) || plat.defaultSeconds, plat.defaultSeconds).seconds;
   const holdSeconds = round1(targetSeconds * preset.holdRatio);
   const speechSeconds = round1(Math.max(0.5, targetSeconds - holdSeconds));
   const maxChars = Math.max(8, Math.round(speechSeconds * effectiveCps));
@@ -201,7 +214,7 @@ export function budgetFromWordCount(
   const language = normalizeScriptLanguage(scriptLanguage);
   const effectiveCps = paceUnitsPerSecond(pace, language, speechRate);
   const speechSeconds = Math.max(4, chars / effectiveCps);
-  const targetSeconds = Math.max(8, Math.min(180, speechSeconds / (1 - preset.holdRatio)));
+  const targetSeconds = clampVideoSeconds(speechSeconds / (1 - preset.holdRatio)).seconds;
   return buildDurationBudget({
     targetSeconds: round1(targetSeconds),
     platform,
@@ -214,9 +227,16 @@ export function budgetFromWordCount(
 }
 
 export function estimatedShotCount(budget: DurationBudget): { axis: number; min: number; max: number } {
-  const preset = PACE_PRESETS[budget.pace];
-  const axis = budget.lockedShotCount || Math.max(2, Math.round(budget.targetSeconds / preset.asl));
-  return { axis, min: Math.max(2, axis - 1), max: Math.min(24, axis + 1) };
+  const cap = maxForecastShotsForDuration(budget.targetSeconds);
+  if (budget.lockedShotCount && budget.lockedShotCount >= 2) {
+    const n = Math.min(cap, Math.round(budget.lockedShotCount));
+    return { axis: n, min: n, max: n };
+  }
+  const estimate = visualSlotEstimate(budget.targetSeconds, budget.pace);
+  const min = Math.min(cap, Math.max(2, estimate.min));
+  const max = Math.max(min, Math.min(cap, estimate.max));
+  const axis = Math.min(max, Math.max(min, estimate.axis));
+  return { axis, min, max };
 }
 
 function energyAtProgress(progress: number, pace: ScriptPace): ShotEnergy {
@@ -282,14 +302,17 @@ export function lockedShotImplication(budget: DurationBudget): {
 } | null {
   const n = budget.lockedShotCount;
   if (!n || n < 2) return null;
-  const asl = impliedAsl(budget.targetSeconds, n);
+  const cap = maxForecastShotsForDuration(budget.targetSeconds);
+  const effectiveCount = Math.min(Math.round(n), cap);
+  const asl = impliedAsl(budget.targetSeconds, effectiveCount);
   const nearestPace = nearestPaceForAsl(asl);
   const pulled = nearestPace !== budget.pace;
   const current = PACE_PRESETS[budget.pace];
   const nearest = PACE_PRESETS[nearestPace];
+  const capNote = effectiveCount < Math.round(n) ? `（资源保护最多 ${cap} 镜）` : '';
   const message = pulled
-    ? `锁 ${n} 镜 / ${budget.targetSeconds}s → 平均 ${asl.toFixed(1)}s 一刀，更接近「${nearest.label}」（ASL ${nearest.asl}s），当前是「${current.label}」（${current.asl}s）。`
-    : `锁 ${n} 镜 / ${budget.targetSeconds}s → 平均 ${asl.toFixed(1)}s 一刀，和「${current.label}」档一致。`;
+    ? `锁 ${n} 镜${capNote} / ${budget.targetSeconds}s → 平均 ${asl.toFixed(1)}s 一刀，更接近「${nearest.label}」（ASL ${nearest.asl}s），当前是「${current.label}」（${current.asl}s）。`
+    : `锁 ${n} 镜${capNote} / ${budget.targetSeconds}s → 平均 ${asl.toFixed(1)}s 一刀，和「${current.label}」档一致。`;
   return { impliedAsl: asl, nearestPace, pulled, message };
 }
 
@@ -349,14 +372,14 @@ export function splitByVisualBeats(text: string, maxCharsPerShot: number): strin
   if (!cleaned) return [];
 
   const parts = cleaned
-    .split(/([。！？!?；;\n]+)/)
+    .split(/([。！？.!?；;\n]+)/)
     .reduce<string[]>((acc, part, index, arr) => {
       if (!part.trim()) return acc;
-      if (/^[。！？!?；;\n]+$/.test(part)) {
+      if (/^[。！？.!?；;\n]+$/.test(part)) {
         if (acc.length > 0) acc[acc.length - 1] += part.trim();
         return acc;
       }
-      const punct = arr[index + 1] && /^[。！？!?；;\n]+$/.test(arr[index + 1]) ? '' : '';
+      const punct = arr[index + 1] && /^[。！？.!?；;\n]+$/.test(arr[index + 1]) ? '' : '';
       acc.push(part.trim() + punct);
       return acc;
     }, [])
@@ -413,7 +436,123 @@ export function predictShots(input: {
   const spans = input.spans && input.spans.length > 0
     ? input.spans
     : buildSpeechSpans(input.narration, input.beats, language);
-  return shotsFromSpeechSpans(spans, input.budget.charsPerSecond, language);
+  let shots = shotsFromSpeechSpans(spans, input.budget.charsPerSecond, language);
+  const locked = input.budget.lockedShotCount;
+  if (locked && locked >= 2) {
+    shots = fitVisualShotCount(shots, Math.min(Math.round(locked), maxForecastShotsForDuration(input.budget.targetSeconds)), language);
+  } else {
+    const maxShots = maxForecastShotsForDuration(input.budget.targetSeconds);
+    if (shots.length > maxShots) shots = fitVisualShotCount(shots, maxShots, language);
+  }
+  shots = assignSceneIds(shots, input.budget);
+  shots = distributeBudgetHolds(shots, input.budget);
+  const used = input.budget.usedChars || countNarrationChars(input.narration);
+  const fillTarget = input.budget.durationMode === 'target-driven' && used >= input.budget.maxChars * FILL_RATIO_MIN;
+  return fitShotsToSpeech(shots, input.budget, fillTarget);
+}
+
+function fitVisualShotCount(shots: ForecastShot[], desired: number, language: ScriptLanguage): ForecastShot[] {
+  if (desired < 2 || shots.length === 0) return shots;
+  let next = shots.map((shot) => ({ ...shot }));
+  while (next.length > desired && next.length > 2) {
+    let minIndex = 0;
+    let minScore = Infinity;
+    for (let i = 0; i < next.length - 1; i++) {
+      const score = next[i].speechDuration + next[i + 1].speechDuration + (next[i + 1].voRole === 'continue' ? -0.4 : 0);
+      if (score < minScore) {
+        minScore = score;
+        minIndex = i;
+      }
+    }
+    const a = next[minIndex];
+    const b = next[minIndex + 1];
+    const glue = language === 'en' ? ' ' : '';
+    next.splice(minIndex, 2, {
+      ...a,
+      speechDuration: round2(a.speechDuration + b.speechDuration),
+      holdDuration: round2((a.holdDuration || 0) + (b.holdDuration || 0)),
+      narration: [a.narration, b.narration].filter(Boolean).join(glue) || a.narration,
+      sliceText: [a.sliceText, b.sliceText].filter(Boolean).join(''),
+      visualCount: 1,
+      voRole: 'start',
+      splitReason: `合并到锁镜数 ${desired}`
+    });
+  }
+  let guard = 0;
+  while (next.length < desired && guard < desired * 2) {
+    guard += 1;
+    let longest = 0;
+    for (let i = 1; i < next.length; i++) {
+      if (countNarrationChars(next[i].sliceText || next[i].narration) > countNarrationChars(next[longest].sliceText || next[longest].narration)) {
+        longest = i;
+      }
+    }
+    const text = (next[longest].sliceText || next[longest].narration || '').trim();
+    if (countNarrationChars(text) < 12) break;
+    const pieces = splitByVisualBeats(text, Math.max(8, Math.floor(countNarrationChars(text) / 2)));
+    let valid = pieces.filter(Boolean);
+    if (valid.length < 2) {
+      const mid = Math.ceil(text.length / 2);
+      const cutAt = Math.max(text.lastIndexOf('，', mid), text.lastIndexOf(',', mid), text.lastIndexOf(' ', mid));
+      const at = cutAt > 4 ? cutAt + 1 : mid;
+      valid = [text.slice(0, at).trim(), text.slice(at).trim()].filter(Boolean);
+    }
+    if (valid.length < 2) break;
+    const speechTotal = next[longest].speechDuration;
+    const units = valid.map((piece) => Math.max(1, countNarrationChars(piece)));
+    const unitSum = units.reduce((sum, value) => sum + value, 0) || 1;
+    const inserts = valid.map((piece, index) => ({
+      ...next[longest],
+      id: `${next[longest].id}-x${index}`,
+      narration: index === 0 ? next[longest].narration : '',
+      sliceText: piece,
+      speechDuration: round2(speechTotal * (units[index] / unitSum)),
+      holdDuration: index === valid.length - 1 ? next[longest].holdDuration : 0,
+      voRole: (index === 0 ? 'start' : 'continue') as ForecastShot['voRole'],
+      visualIndex: index,
+      visualCount: valid.length,
+      splitReason: `拆到锁镜数 ${desired}`
+    }));
+    next.splice(longest, 1, ...inserts);
+  }
+  return recomputeShotStarts(next.map((shot, index) => ({ ...shot, order: index + 1, id: `shot-${index + 1}` })));
+}
+
+function distributeBudgetHolds(shots: ForecastShot[], budget: DurationBudget): ForecastShot[] {
+  if (shots.length === 0) return shots;
+  const holdBudget = Math.max(0, budget.holdSeconds);
+  const pinnedHold = shots.reduce((sum, shot) => sum + (shot.holdPinned ? shot.holdDuration : 0), 0);
+  const remaining = Math.max(0, holdBudget - pinnedHold);
+  const weights = shots.map((shot) => {
+    if (shot.holdPinned) return 0;
+    if (shot.function === 'cta' || shot.energy === 'hold') return 3;
+    if (shot.function === 'reveal' || shot.function === 'hook') return 2;
+    return 1;
+  });
+  const weightSum = weights.reduce((sum, value) => sum + value, 0) || 1;
+  return shots.map((shot, index) => (
+    shot.holdPinned
+      ? shot
+      : { ...shot, holdDuration: round2(remaining * (weights[index] / weightSum)) }
+  ));
+}
+
+export function assignSceneIds(shots: ForecastShot[], budget?: DurationBudget): ForecastShot[] {
+  if (shots.length === 0) return shots;
+  const targetScenes = maxUniqueScenesForDuration(budget?.targetSeconds || shots.length * 3);
+  const stride = Math.max(2, Math.ceil(shots.length / targetScenes));
+  let sceneIndex = 1;
+  return shots.map((shot, index) => {
+    const prev = shots[index - 1];
+    const wantsNewScene = index === 0
+      || shot.function === 'hook'
+      || shot.continuity === 'contrast'
+      || shot.continuity === 'new-info'
+      || (shot.function === 'cta' && prev?.function !== 'cta')
+      || (index > 0 && index % stride === 0 && shot.function !== prev?.function);
+    if (wantsNewScene && index > 0 && sceneIndex < targetScenes) sceneIndex += 1;
+    return { ...shot, sceneId: `scene-${sceneIndex}` };
+  });
 }
 
 function mergeChunksToCount<T extends { text: string }>(chunks: T[], desired: number): T[] {
@@ -483,7 +622,7 @@ function fitShotsToSpeech(
   const targetHold = Math.max(0, budget.targetSeconds - speechSum);
   const holdScale = holdSum > 0.05 ? targetHold / holdSum : 1;
   const fitted = shots.map((shot) => {
-    const cap = shot.energy === 'hold' || shot.function === 'cta' ? 3 : 2;
+    const cap = shot.energy === 'hold' || shot.function === 'cta' ? 8 : 4;
     return {
       ...shot,
       speechDuration: round2(shot.speechDuration),
@@ -491,10 +630,17 @@ function fitShotsToSpeech(
     };
   });
   const afterHold = fitted.reduce((sum, shot) => sum + shot.speechDuration + shot.holdDuration, 0);
-  const leftover = round2(budget.targetSeconds - afterHold);
+  let leftover = round2(budget.targetSeconds - afterHold);
   if (leftover > 0.15 && fitted.length > 0) {
-    const last = fitted[fitted.length - 1];
-    last.holdDuration = round2(Math.min(3, last.holdDuration + leftover));
+    const holders = fitted
+      .map((shot, index) => ({ shot, index, weight: shot.function === 'cta' || shot.energy === 'hold' ? 3 : 1 }))
+      .filter((item) => !item.shot.holdPinned);
+    const weightSum = holders.reduce((sum, item) => sum + item.weight, 0) || 1;
+    holders.forEach((item) => {
+      const extra = leftover * (item.weight / weightSum);
+      fitted[item.index].holdDuration = round2(fitted[item.index].holdDuration + extra);
+    });
+    leftover = 0;
   }
   return recomputeShotStarts(fitted.map((shot, index) => ({ ...shot, order: index + 1, id: `shot-${index + 1}` })));
 }
@@ -522,12 +668,37 @@ export function validateForecast(input: {
         ? `这段口播预计多 ${extraSeconds} 秒，约需 ${round1(used / budget.charsPerSecond)} 秒口播；可延长视频、压缩文案，或拆成系列。`
         : `超了 ${used - budget.maxChars} ${unit}，大约多 ${extraSeconds} 秒。要卡住 ${budget.targetSeconds} 秒请删一句论据或钩子复述。`
     });
+  } else if (used > 0 && used < budget.maxChars * FILL_RATIO_MIN && budget.durationMode === 'target-driven') {
+    notes.push({
+      id: 'chars-under',
+      level: used < budget.maxChars * 0.7 ? 'warn' : 'info',
+      target: 'chars',
+      message: `口播约 ${Math.round((used / Math.max(1, budget.maxChars)) * 100)}% 预算，目标是填到 90%–105%，不要只写「不超过」。`
+    });
   } else if (used > 0 && used < budget.maxChars * 0.55) {
     notes.push({
       id: 'chars-under',
       level: 'info',
       target: 'chars',
       message: `${unit}偏少，画面会停较久。可以补一个例子，或把节奏改慢。`
+    });
+  }
+
+  const plat = PLATFORM_OPTIONS.find((item) => item.id === budget.platform);
+  if (plat && budget.targetSeconds > plat.max) {
+    notes.push({
+      id: 'beyond-recommend',
+      level: 'info',
+      target: 'duration',
+      message: `当前 ${budget.targetSeconds}s 超过${plat.label}推荐的 ${plat.max}s，已按长视频链路处理。`
+    });
+  }
+  if (budget.targetSeconds >= MAX_VIDEO_SECONDS) {
+    notes.push({
+      id: 'duration-cap',
+      level: 'info',
+      target: 'duration',
+      message: `时长已顶到上限 ${MAX_VIDEO_SECONDS}s。`
     });
   }
 
@@ -604,6 +775,15 @@ export function validateForecast(input: {
   }
 
   const totals = shotsTotals(shots);
+  const maxForecastShots = maxForecastShotsForDuration(budget.targetSeconds);
+  if (shots.length >= maxForecastShots && budget.targetSeconds >= 300) {
+    notes.push({
+      id: 'shot-cap',
+      level: 'warn',
+      target: 'shot',
+      message: `长视频已按资源保护限制为最多 ${maxForecastShots} 个视觉槽位；章节会复用画面，不会为停留无限生图。`
+    });
+  }
   if (shots.length > 0 && totals.total > budget.targetSeconds + 0.4) {
     notes.push({
       id: 'hold-over-target',
@@ -657,7 +837,16 @@ export function validateForecast(input: {
 }
 
 export function beatsFromNarration(narration: string, budget: DurationBudget): ScriptBeat[] {
-  const pieces = splitCompleteSentences(narration);
+  const language = normalizeScriptLanguage(budget.scriptLanguage);
+  const pieces = splitCompleteSentences(narration, language, { keepShort: true });
+  if (shouldUseSections(budget.targetSeconds, pieces.length)) {
+    const plans = planScriptSections({
+      targetSeconds: budget.targetSeconds,
+      maxChars: budget.maxChars
+    });
+    const grouped = beatsFromSectionPlans(narration, plans, language);
+    if (grouped.length >= 2) return grouped;
+  }
   const count = Math.max(1, pieces.length || 1);
   const source = pieces.length > 0 ? pieces : Array.from({ length: count }, () => '');
   return source.slice(0, count).map((text, index) => {
@@ -677,16 +866,18 @@ export function beatsFromNarration(narration: string, budget: DurationBudget): S
   });
 }
 
-export function narrationFromBeats(beats: ScriptBeat[]): string {
+export function narrationFromBeats(beats: ScriptBeat[], scriptLanguage?: ScriptLanguage): string {
+  const glue = normalizeScriptLanguage(scriptLanguage) === 'en' ? ' ' : '';
   return beats
     .map((beat) => (beat.narration || '').trim())
     .filter(Boolean)
-    .join('');
+    .join(glue);
 }
 
-export function applyNarrationToBeats(beats: ScriptBeat[], narration: string): ScriptBeat[] {
+export function applyNarrationToBeats(beats: ScriptBeat[], narration: string, scriptLanguage?: ScriptLanguage): ScriptBeat[] {
   if (beats.length === 0) return beats;
-  const pieces = splitCompleteSentences(narration);
+  const language = normalizeScriptLanguage(scriptLanguage);
+  const pieces = splitCompleteSentences(narration, language, { keepShort: true });
   if (pieces.length === 0) {
     return beats.map((beat, index) => ({ ...beat, narration: index === 0 ? narration : '' }));
   }
@@ -703,7 +894,7 @@ export function applyNarrationToBeats(beats: ScriptBeat[], narration: string): S
       Math.floor((chars.slice(0, pieceIndex).reduce((sum, value) => sum + value, 0) / total) * beats.length)
     );
     const index = Math.max(cursor, target);
-    assigned[index] = assigned[index] ? `${assigned[index]}${piece}` : piece;
+    assigned[index] = assigned[index] ? `${assigned[index]}${language === 'en' ? ' ' : ''}${piece}` : piece;
     cursor = index;
   });
   return beats.map((beat, index) => ({ ...beat, narration: assigned[index] || beat.narration }));

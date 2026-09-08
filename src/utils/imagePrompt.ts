@@ -13,7 +13,6 @@ import {
   bibleHasNarrativeCast,
   characterHasRef,
   isQuotedDialogueLine,
-  leadCharacter,
   resolveShotCharacter,
   shotCharacterLockEnglish,
   speakerCharacterFromLine,
@@ -33,6 +32,8 @@ export type ImagePromptClip = Pick<
   | 'visualBeat'
   | 'promptPinned'
   | 'characterIds'
+  | 'occupancyPlan'
+  | 'subjectIds'
   | 'locationId'
   | 'continuity'
   | 'cameraMotion'
@@ -211,8 +212,7 @@ function constraintsFor(
   pack: StylePack,
   clip: ImagePromptClip
 ): string[] {
-  const hasCharacterRef = Boolean(characterHasRef(resolveShotCharacter(bible, clip, clipShotNarration(clip) || clip.narration || ''))
-    || (bibleHasNarrativeCast(bible) && characterHasRef(leadCharacter(bible))));
+  const hasCharacterRef = Boolean(characterHasRef(resolveShotCharacter(bible, clip, clipShotNarration(clip) || clip.narration || '')));
   const hasStyleRef = Boolean(pack.reference?.imageId || pack.reference?.thumbDataUrl || pack.reference?.notes);
   const lines = [
     'No readable text, subtitles, logos, watermarks, signage, or letters',
@@ -265,7 +265,7 @@ export function compileImagePrompt(input: {
   promptProfile?: CustomImageApiConfig['promptProfile'];
 }): { prompt: string; profile: ImagePromptProfile; beat: VisualBeat } {
   const profile = resolveImagePromptProfile(input.model, input.promptProfile);
-  const bibleHashMatches = !input.bible || input.clip.visualBibleHash === input.bible.sourceHash;
+  const bibleHashMatches = !input.bible || input.clip.visualBibleHash === (input.bible.bibleRevision || input.bible.sourceHash);
   if (input.clip.promptPinned && bibleHashMatches && (input.clip.visualPrompt || '').trim().length > 8) {
     return { prompt: input.clip.visualPrompt!.trim(), profile, beat: resolveVisualBeat(input.clip) };
   }
