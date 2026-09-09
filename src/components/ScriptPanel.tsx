@@ -28,6 +28,7 @@ import {
   CustomLlmApiConfig,
   CustomTtsApiConfig,
   ResearchNotes,
+  ScriptForm,
   ScriptGenre,
   ScriptIntent,
   ScriptLanguage,
@@ -49,7 +50,9 @@ import {
   PACE_PRESETS,
   PLATFORM_OPTIONS,
   STAGE_META,
+  stageNavMeta,
   TARGET_SECONDS_PRESETS,
+  lengthBudgetOf,
   applyNarrationToBeats,
   beatIntentLabel,
   buildDurationBudget,
@@ -65,18 +68,21 @@ import {
 } from '../utils/scriptBudget';
 import {
   FILL_RATIO_MIN,
-  LONG_FORM_SECONDS,
   MAX_VIDEO_SECONDS,
   MIN_VIDEO_SECONDS,
   SPAN_BATCH_SIZE,
   COVERAGE_BATCH_SIZE,
   chunkItems,
   clampVideoSeconds,
-  isLongForm,
-  maxForecastShotsForDuration
+  maxForecastShotsForDuration,
+  outlineConfirmationRequired,
+  resolveScriptForm,
+  scriptFormForSeconds,
+  scriptFormLabel
 } from '../utils/scriptDuration';
 import { splitCompleteSentences } from '../utils/speechSpans';
 import { splitCoversSource } from '../utils/scriptSplit';
+import { flattenSectionBeats, joinSectionNarrations } from '../utils/scriptSections';
 import { validateDraftResult } from '../utils/scriptDraft';
 import { translateClipsSecondary } from '../utils/secondaryText';
 import {
@@ -117,6 +123,7 @@ import {
 } from '../utils/scriptWorkspace';
 import { bgmById } from '../utils/presets';
 import { showStatusToast } from '../utils/statusToast';
+import { RevisionBanner, ScriptOutlineStage } from './ScriptOutlineStage';
 import {
   bibleSummary,
   bibleSubjects,
@@ -472,9 +479,12 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     }
     setBusy('draft');
     setError(null);
-    setStatus(isLongForm(source.durationBudget.targetSeconds)
-      ? `长视频按章节写稿（目标 ${source.durationBudget.targetSeconds}s）...`
-      : `按${unitLabel}数预算写节拍和口播...`);
+    const form = resolveScriptForm(source.durationBudget.targetSeconds, source.scriptFormOverride);
+    setStatus(form === 'short'
+      ? `按${unitLabel}数预算写节拍和口播...`
+      : outlineConfirmationRequired(form) && source.outline?.status !== 'confirmed'
+        ? `正在生成全片提纲（目标 ${source.durationBudget.targetSeconds}s）...`
+        : `按${scriptFormLabel(form)}写稿（目标 ${source.durationBudget.targetSeconds}s）...`);
     try {
       const res = await fetch('/api/script/draft', {
         method: 'POST',
@@ -490,12 +500,41 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           genrePack: genrePackById(source.genrePackId || card?.genre || null),
           llmApi: customLlmApi,
           stylePack,
-          scriptLanguage
+          scriptLanguage,
+          brief: source.brief,
+          outline: source.outline,
+          sections: source.sections,
+          scriptFormOverride: source.scriptFormOverride,
+          confirmOutlineBeforeDraft: source.confirmOutlineBeforeDraft
         })
       });
       const data = await res.json().catch(() => ({}));
       if (!operationIsCurrent(operation)) { discardBibleOperation(); return; }
+      if (res.status === 409 && (data?.code === 'outline_required' || data?.code === 'outline_preview') && data?.outline) {
+        commit({
+          ...source,
+          outline: data.outline,
+          brief: data.brief || source.brief,
+          scriptForm: form,
+          stage: 'beats'
+        });
+        setStatus(data.code === 'outline_preview'
+          ? '已生成轻提纲。可编辑后点「按提纲写稿」。'
+          : '已生成全片提纲。确认后再逐章写稿。');
+        return;
+      }
       if (!res.ok || data?.source === 'fallback') {
+        if (Array.isArray(data?.sections) && data.sections.length) {
+          const lang = normalizeScriptLanguage(source.scriptLanguage);
+          commit(rebuildForecast({
+            ...source,
+            sections: data.sections,
+            beats: flattenSectionBeats(data.sections),
+            fullNarration: joinSectionNarrations(data.sections, lang),
+            outline: data.outline || source.outline,
+            stage: 'beats'
+          }));
+        }
         const parts = [
           data?.error,
           data?.detail && data.detail !== data?.error ? `原因：${data.detail}` : '',
@@ -669,7 +708,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
       maxChars: source.durationBudget.maxChars,
       targetSeconds: source.durationBudget.targetSeconds,
       scriptLanguage: normalizeScriptLanguage(source.scriptLanguage),
-      source: data?.source === 'fallback' ? 'fallback' : 'llm'
+      source: data?.source === 'fallback' ? 'fallback' : 'llm',
+      durationMode: source.durationBudget.durationMode
     });
     if (!validation.ok || validation.source === 'fallback') {
       setError(data?.error || validation.warnings[0] || '写稿未通过校验，未套用短稿。');
@@ -696,6 +736,9 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         sectionId: beat.sectionId
       })),
       sections: Array.isArray(data?.sections) ? data.sections : undefined,
+      outline: data?.outline || source.outline,
+      brief: data?.brief || source.brief,
+      scriptForm: data?.scriptForm || source.scriptForm,
       fullNarration,
       speechSpans: [],
       draftedTitle: topic,
@@ -1088,7 +1131,12 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     if (workspace.intent === 'have-script' && (workspace.fullNarration || workspace.intentNotes).trim()) {
       return '诊断并拆分';
     }
-    if (workspace.selectedTopicId) return '按预算写稿';
+    if (workspace.selectedTopicId) {
+      const form = resolveScriptForm(workspace.durationBudget.targetSeconds, workspace.scriptFormOverride);
+      if (form === 'medium' && (!workspace.outline || !workspace.outline.sections?.length)) return '生成轻提纲';
+      if (outlineConfirmationRequired(form, workspace.confirmOutlineBeforeDraft) && workspace.outline?.status !== 'confirmed') return '生成全片提纲';
+      return '按预算写稿';
+    }
     if (workspace.intent === 'have-title' && titleValid) return '就按这句写';
     if (workspace.intent === 'reference' && workspace.referenceUrl.trim()) return '反拆对标';
     return '给我选题';
@@ -1162,7 +1210,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
 
       <div className="flex flex-1 min-h-0">
         <nav className="w-52 lg:w-56 flex-shrink-0 border-r border-[#23232c] bg-[#14141a] p-3 space-y-1 overflow-y-auto custom-scrollbar">
-          {STAGE_META.map((item) => {
+          {stageNavMeta(resolveScriptForm(workspace.durationBudget.targetSeconds, workspace.scriptFormOverride)).map((item) => {
             const active = workspace.stage === item.id;
             const done = stageCompleted(workspace, item.id);
             return (
@@ -1253,9 +1301,14 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
               }}
               onDraft={handleDraft}
               onGenrePack={handleGenrePack}
+              onWorkspacePatch={(patch) => {
+                const next = { ...workspace, ...patch };
+                onChange(workspace.fullNarration.trim() ? rebuildForecast(next) : refreshWorkspaceDerived(next));
+              }}
             />
           )}
           {workspace.stage === 'beats' && (
+            resolveScriptForm(workspace.durationBudget.targetSeconds, workspace.scriptFormOverride) === 'short' ? (
             <BeatsStage
               workspace={workspace}
               onChange={(beats) => {
@@ -1264,10 +1317,25 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
               }}
               onFillHook={handleFillHook}
             />
+            ) : (
+            <ScriptOutlineStage
+              workspace={workspace}
+              busy={busy === 'draft'}
+              customLlmApi={customLlmApi}
+              stylePack={stylePack}
+              onChange={(next) => commit(next)}
+              onStatus={(message, error) => {
+                setStatus(message);
+                setError(error || null);
+              }}
+            />
+            )
           )}
           {workspace.stage === 'copy' && (
             <CopyStage
               workspace={workspace}
+              customLlmApi={customLlmApi}
+              onWorkspaceChange={(next) => commit(next)}
               onChange={(fullNarration) => {
                 const beats = applyNarrationToBeats(workspace.beats, fullNarration, workspace.scriptLanguage);
                 onChange(rebuildForecast({ ...workspace, fullNarration, beats }));
@@ -1898,7 +1966,8 @@ function DurationStage({
   busy,
   onBudget,
   onDraft,
-  onGenrePack
+  onGenrePack,
+  onWorkspacePatch
 }: {
   workspace: ScriptWorkspace;
   selected: TopicCard | null;
@@ -1906,6 +1975,7 @@ function DurationStage({
   onBudget: (budget: ScriptWorkspace['durationBudget']) => void;
   onDraft: () => void;
   onGenrePack: (genre: ScriptGenre) => void;
+  onWorkspacePatch?: (patch: Partial<ScriptWorkspace>) => void;
 }) {
   const budget = workspace.durationBudget;
   const rec = selected
@@ -1919,7 +1989,8 @@ function DurationStage({
   const unit = budgetUnitLabel(lang);
   const canDraft = hasUsableDraftTopic(workspace);
   const plat = PLATFORM_OPTIONS.find((item) => item.id === budget.platform);
-  const longForm = isLongForm(budget.targetSeconds);
+  const form = resolveScriptForm(budget.targetSeconds, workspace.scriptFormOverride);
+  const length = lengthBudgetOf(budget);
   const lockMax = Math.min(Math.max(24, estimate.max), maxForecastShotsForDuration(budget.targetSeconds));
   const draftHint = workspace.intent === 'have-title' && !isLockedTitleValid(workspace.lockedTitle, lang) && !selected
     ? '先回意图页写标题'
@@ -1969,11 +2040,21 @@ function DurationStage({
             {seconds}s
           </Chip>
         ))}
-        {longForm && (
-          <span className="text-[10px] px-2 py-1 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/30">
-            长视频 · {budget.targetSeconds}s
-          </span>
-        )}
+        <span className="text-[10px] px-2 py-1 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/30">
+          {scriptFormLabel(form)} · {budget.targetSeconds}s
+        </span>
+        {(['auto', 'short', 'medium', 'long', 'extended'] as const).map((item) => (
+          <Chip
+            key={item}
+            active={(workspace.scriptFormOverride || 'auto') === item}
+            onClick={() => onWorkspacePatch?.({
+              scriptFormOverride: item === 'auto' ? null : item,
+              scriptForm: item === 'auto' ? scriptFormForSeconds(budget.targetSeconds) : item
+            })}
+          >
+            {item === 'auto' ? '自动分层' : scriptFormLabel(item)}
+          </Chip>
+        ))}
         <label className="text-[11px] text-zinc-500 flex items-center gap-1.5">
           自定义
           <input
@@ -2025,15 +2106,14 @@ function DurationStage({
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <BudgetRing label={`口播${unit}数`} used={budget.usedChars} max={budget.maxChars} unit={unit} />
-        <BudgetRing label="停留配额" used={Number((workspace.forecastShots.reduce((sum, shot) => sum + shot.holdDuration, 0)).toFixed(1))} max={budget.holdSeconds} unit="s" />
+        <BudgetRing label={`目标口播${unit}数`} used={budget.usedChars} max={length.targetUnits} unit={unit} />
+        <BudgetRing label="停留配额" used={Number((workspace.forecastShots.reduce((sum, shot) => sum + shot.holdDuration, 0)).toFixed(1))} max={length.visualHoldTargetSeconds} unit="s" />
         <BudgetRing label="概念" used={budget.conceptUsed || (selected ? selected.conceptCount : 0)} max={budget.conceptMax} unit="个" />
       </div>
 
       <div className="text-[12px] text-zinc-400 flex flex-wrap items-center gap-2 leading-relaxed">
         <Clock className="w-3.5 h-3.5 text-amber-400" />
-        口播 {formatSeconds(budget.speechSeconds)} · 停留 {formatSeconds(budget.holdSeconds)} · {budget.lockedShotCount ? `锁 ${budget.lockedShotCount} 镜` : `${estimate.min}–${estimate.max} 镜`}
-        {longForm && <span className="text-amber-300/80">· ≥{LONG_FORM_SECONDS}s 按章节生成</span>}
+        目标 {length.targetUnits}{unit}（允许 {length.minUnits}–{length.maxUnits}）· 预计口播 {formatSeconds(length.speechTargetSeconds)} · 预计停留 {formatSeconds(length.visualHoldTargetSeconds)} · {budget.lockedShotCount ? `锁 ${budget.lockedShotCount} 镜` : `${estimate.min}–${estimate.max} 镜`}
         {budget.actualSpeechSeconds != null && (
           <span className="text-emerald-300">· 实测口播 {formatSeconds(budget.actualSpeechSeconds)}</span>
         )}
@@ -2044,8 +2124,18 @@ function DurationStage({
 
       <div className="space-y-1.5">
         <PrimaryButton id="btn-draft-from-budget" busy={busy} onClick={onDraft} disabled={!canDraft}>
-          按预算写稿
+          {outlineConfirmationRequired(form) && workspace.outline?.status !== 'confirmed' ? '生成全片提纲' : '按预算写稿'}
         </PrimaryButton>
+        {form === 'medium' && (
+          <label className="flex items-center gap-2 text-[12px] text-zinc-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={Boolean(workspace.confirmOutlineBeforeDraft)}
+              onChange={(e) => onWorkspacePatch?.({ confirmOutlineBeforeDraft: e.target.checked })}
+            />
+            写稿前先确认提纲
+          </label>
+        )}
         {draftHint && <p className="text-[11px] text-zinc-500">{draftHint}</p>}
       </div>
     </div>
@@ -2137,6 +2227,8 @@ function BeatsStage({
 function CopyStage({
   workspace,
   onChange,
+  onWorkspaceChange,
+  customLlmApi,
   onDraft,
   onDiagnose,
   onAdoptDuration,
@@ -2147,6 +2239,8 @@ function CopyStage({
 }: {
   workspace: ScriptWorkspace;
   onChange: (value: string) => void;
+  onWorkspaceChange?: (next: ScriptWorkspace) => void;
+  customLlmApi?: CustomLlmApiConfig;
   onDraft: () => void;
   onDiagnose: () => void;
   onAdoptDuration: () => void;
@@ -2163,8 +2257,9 @@ function CopyStage({
   return (
     <div className="space-y-4 max-w-4xl">
       <SectionIntro title="整段口播" desc={workspace.durationBudget.durationMode === 'content-driven'
-        ? '已有文案优先保留。这里显示预计口播时长与目标的差异，可延长、压缩或拆成系列。'
-        : `一条连续旁白。按目标时长控制${unit}数，切镜按画面动机，不按每句等长。`} />
+        ? '已有文案优先保留。可延长到预计时长、压缩到目标，或扩写到目标，不会因为没填满预算而丢稿。'
+        : `一条连续旁白。目标 ${lengthBudgetOf(budget).targetUnits}${unit}，允许 ${lengthBudgetOf(budget).minUnits}–${lengthBudgetOf(budget).maxUnits}。`} />
+      {onWorkspaceChange && <RevisionBanner workspace={workspace} onChange={onWorkspaceChange} customLlmApi={customLlmApi} />}
       {workspace.intent === 'have-title' && lockedTitle && (
         <div className="flex items-center gap-2 rounded-xl border border-[#2b2b36] bg-[#18181f] px-3 py-2">
           <Lock className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
@@ -2184,8 +2279,35 @@ function CopyStage({
         </span>
         {workspace.intent === 'have-script' ? (
           <div className="flex items-center gap-3">
-            {over && workspace.durationBudget.durationMode === 'content-driven' && (
-              <button type="button" onClick={onAdoptDuration} className="text-amber-300 text-[12px] cursor-pointer">延长到预计时长</button>
+            {workspace.durationBudget.durationMode === 'content-driven' && (
+              <>
+                <button type="button" onClick={onAdoptDuration} className="text-amber-300 text-[12px] cursor-pointer">采用预计时长</button>
+                {onWorkspaceChange && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={async () => {
+                      const measured = budget.usedChars / Math.max(0.8, budget.charsPerSecond) + budget.holdSeconds;
+                      const res = await fetch('/api/script/revision-plan', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          measuredSeconds: measured,
+                          targetSeconds: budget.targetSeconds,
+                          outline: workspace.outline,
+                          sections: workspace.sections,
+                          budget
+                        })
+                      });
+                      const data = await res.json().catch(() => ({}));
+                      if (data?.revisionPlan) onWorkspaceChange({ ...workspace, revisionPlan: data.revisionPlan });
+                    }}
+                    className="text-amber-300 text-[12px] cursor-pointer disabled:opacity-50"
+                  >
+                    {over ? '压缩到目标' : '扩写到目标'}
+                  </button>
+                )}
+              </>
             )}
             <button type="button" onClick={onDiagnose} className="text-amber-400 text-[12px] cursor-pointer">重新诊断</button>
           </div>

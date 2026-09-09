@@ -5,7 +5,8 @@ import {
   budgetFromWordCount,
   estimatedShotCount,
   narrationFromBeats,
-  predictShots
+  predictShots,
+  redistributeHolds
 } from './scriptBudget';
 import {
   MAX_VIDEO_SECONDS,
@@ -19,17 +20,52 @@ import {
   fillStatus,
   isLongForm,
   maxForecastShotsForDuration,
-  maxUniqueScenesForDuration
+  maxUniqueScenesForDuration,
+  outlineConfirmationRequired,
+  resolveScriptForm,
+  scriptFormForSeconds
 } from './scriptDuration';
 import { buildSpeechSpans, splitCompleteSentences } from './speechSpans';
 import { fitTextChunksToCount, splitCoversSource, splitPastedNarration } from './scriptSplit';
 import { planScriptSections } from './scriptSections';
-import { validateDraftResult } from './scriptDraft';
+import { coerceLlmDraftPayload, describeDraftPayloadGap, normalizeDraftBeats, validateDraftResult } from './scriptDraft';
+import {
+  addOutlineSection,
+  buildRevisionPlan,
+  draftNeedsOutlinePreview,
+  draftRequiresOutline,
+  mergeSectionIntoWorkspaceSections,
+  moveOutlineSection,
+  outlineFromPlans,
+  removeOutlineSection,
+  stampOutlineBudgets,
+  updateOutlineSection,
+  validateOutline
+} from './scriptOutline';
+import { createDefaultScriptWorkspace, normalizeScriptWorkspace, resumeLongformWorkspace } from './scriptWorkspace';
 import type { ScriptBeat } from '../types';
 
 function chineseSentences(count: number): string {
   return Array.from({ length: count }, (_, index) => `这是第${index + 1}句用来测试长视频拆句和节拍映射的口播。`).join('');
 }
+
+test('ScriptForm 在 60/61/180/181/600/601 秒分层正确', () => {
+  assert.equal(scriptFormForSeconds(60), 'short');
+  assert.equal(scriptFormForSeconds(61), 'medium');
+  assert.equal(scriptFormForSeconds(180), 'medium');
+  assert.equal(scriptFormForSeconds(181), 'long');
+  assert.equal(scriptFormForSeconds(600), 'long');
+  assert.equal(scriptFormForSeconds(601), 'extended');
+  assert.equal(outlineConfirmationRequired('long'), true);
+  assert.equal(outlineConfirmationRequired('medium'), false);
+  assert.equal(draftRequiresOutline('long', { status: 'draft', version: 1, oneSentenceThesis: '', sections: [] }), true);
+  assert.equal(draftRequiresOutline('long', { status: 'confirmed', version: 1, oneSentenceThesis: '', sections: [] }), false);
+  assert.equal(resolveScriptForm(30, 'long'), 'long');
+  assert.equal(resolveScriptForm(240, null), 'long');
+  assert.equal(draftNeedsOutlinePreview('medium', undefined), true);
+  assert.equal(draftNeedsOutlinePreview('medium', { status: 'draft', version: 1, oneSentenceThesis: '', sections: [{ id: 'section-1' } as any] }), false);
+  assert.equal(draftRequiresOutline('medium', { status: 'draft', version: 1, oneSentenceThesis: '', sections: [] }, true), true);
+});
 
 test('时长 120/180/181/300 秒不会被静默截回 180', () => {
   for (const seconds of [120, 180, 181, 240, 300]) {
@@ -241,6 +277,89 @@ test('目标镜头数拆分保持全文覆盖并受资源上限保护', () => {
   assert.ok(new Set(shots.map((shot) => shot.sceneId)).size <= maxUniqueScenesForDuration(1800));
 });
 
+test('预算字段迁移出 targetUnits/minUnits/maxUnits', () => {
+  const zh = buildDurationBudget({ platform: 'douyin', pace: 'medium', targetSeconds: 30, scriptLanguage: 'zh' });
+  assert.equal(zh.targetUnits, zh.maxChars);
+  assert.ok((zh.minUnits || 0) <= (zh.targetUnits || 0));
+  assert.ok((zh.maxUnits || 0) >= (zh.targetUnits || 0));
+  const en = buildDurationBudget({ platform: 'youtube', pace: 'medium', targetSeconds: 30, scriptLanguage: 'en' });
+  assert.ok((en.targetUnits || 0) < (zh.targetUnits || 0));
+  const old = normalizeScriptWorkspace({
+    ...createDefaultScriptWorkspace(),
+    durationBudget: { ...zh, maxChars: 120 }
+  });
+  assert.equal(old.scriptForm, 'short');
+  assert.equal(old.durationBudget.targetUnits, old.durationBudget.maxChars);
+});
+
+test('章节预算总和与全片目标误差不超过 1', () => {
+  for (const seconds of [90, 180, 181, 300, 600]) {
+    const budget = buildDurationBudget({ platform: 'douyin', pace: 'medium', targetSeconds: seconds });
+    const plans = planScriptSections({ targetSeconds: seconds, maxChars: budget.maxChars, genre: '科普' });
+    const sum = plans.reduce((total, plan) => total + plan.targetUnits, 0);
+    assert.ok(Math.abs(sum - budget.maxChars) <= 1, `${seconds}s 合计 ${sum} vs ${budget.maxChars}`);
+    assert.ok(plans[0].role === 'hook');
+    assert.ok(plans[plans.length - 1].role === 'cta');
+    assert.ok(plans[0].targetSeconds <= 12, `${seconds}s 钩子过长 ${plans[0].targetSeconds}`);
+  }
+});
+
+test('outline 缺章、未知 evidence、预算失衡必须失败', () => {
+  const budget = buildDurationBudget({ targetSeconds: 240, pace: 'medium' });
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: budget.maxChars, genre: '科普' });
+  const outline = outlineFromPlans(plans, { status: 'draft' });
+  const missing = { ...outline, sections: outline.sections.slice(1) };
+  assert.equal(validateOutline(missing, undefined, budget).ok, false);
+  const dup = { ...outline, sections: [...outline.sections, outline.sections[0]] };
+  assert.equal(validateOutline(dup, undefined, budget).ok, false);
+  const badEvidence = {
+    ...outline,
+    sections: outline.sections.map((section, index) => index === 0 ? { ...section, evidenceIds: ['missing-1'] } : section)
+  };
+  assert.equal(validateOutline(badEvidence, { audience: '', coreQuestion: '', coreConclusion: '', evidence: [], forbiddenClaims: [], requiredTerms: [] }, budget).ok, false);
+  const stamped = stampOutlineBudgets(outline, plans, plans.map((plan) => ({ id: plan.id, title: plan.title })));
+  const ok = validateOutline(stamped, { audience: '', coreQuestion: '', coreConclusion: '', evidence: [], forbiddenClaims: [], requiredTerms: [] }, budget);
+  assert.equal(ok.ok, true, ok.warnings.join(';'));
+});
+
+test('locked 章节不会进入 revision plan', () => {
+  const budget = buildDurationBudget({ targetSeconds: 240, pace: 'medium' });
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: budget.maxChars, genre: '科普' });
+  const outline = outlineFromPlans(plans);
+  outline.sections = outline.sections.map((section) => (
+    section.role === 'body' || section.role === 'proof'
+      ? { ...section, status: section.order === 3 ? 'locked' : 'ready' }
+      : section
+  ));
+  const plan = buildRevisionPlan({
+    measuredSeconds: 260,
+    targetSeconds: 240,
+    outline
+  });
+  assert.ok(!plan.sectionActions.some((action) => action.sectionId === 'section-3'));
+  assert.ok(!plan.sectionActions.some((action) => {
+    const section = outline.sections.find((item) => item.id === action.sectionId);
+    return section?.role === 'hook' || section?.role === 'cta';
+  }));
+  assert.ok(plan.sectionActions.length > 0);
+});
+
+test('content-driven 低于目标预算不会被当成生成失败', () => {
+  const result = validateDraftResult({
+    fullNarration: '已有文案先保留。第二句把机制讲完。',
+    beats: [
+      { id: 'a', order: 1, function: 'hook', narration: '已有文案先保留。' },
+      { id: 'b', order: 2, function: 'cta', narration: '第二句把机制讲完。' }
+    ],
+    maxChars: 658,
+    targetSeconds: 180,
+    scriptLanguage: 'zh',
+    source: 'llm',
+    durationMode: 'content-driven'
+  } as any);
+  assert.equal(result.ok, true);
+});
+
 test('目标驱动稿件超出 105% 也不能通过校验', () => {
   const result = validateDraftResult({
     fullNarration: '字'.repeat(720),
@@ -254,6 +373,27 @@ test('目标驱动稿件超出 105% 也不能通过校验', () => {
     source: 'llm'
   } as any);
   assert.equal(result.ok, false);
+});
+
+test('60秒短视频超预算7%只警告不整稿丢弃', () => {
+  const maxChars = 200;
+  const used = Math.round(maxChars * 1.07);
+  const narration = '字'.repeat(used);
+  const mid = Math.floor(used / 2);
+  const result = validateDraftResult({
+    fullNarration: narration,
+    beats: [
+      { id: 'a', order: 1, function: 'hook', narration: narration.slice(0, mid) },
+      { id: 'b', order: 2, function: 'cta', narration: narration.slice(mid) }
+    ],
+    maxChars,
+    targetSeconds: 60,
+    scriptLanguage: 'zh',
+    source: 'llm',
+    durationMode: 'target-driven'
+  } as any);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some((item) => /超出预算/.test(item)));
 });
 
 test('英文 beat 合并时保留词间空格', () => {
@@ -281,4 +421,142 @@ test('预测镜会带停留，口播加停留才能靠近目标时长', () => {
   assert.ok(speech + hold > speech, '总长应大于纯口播');
   const scenes = new Set(shots.map((shot) => shot.sceneId).filter(Boolean));
   assert.ok(scenes.size > 0);
+});
+
+test('提纲可上移增删并重算预算，锁定章编辑不改状态', () => {
+  const budget = buildDurationBudget({ targetSeconds: 240, pace: 'medium' });
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: budget.maxChars, genre: '科普' });
+  let outline = outlineFromPlans(plans);
+  const before = outline.sections[0].id;
+  outline = moveOutlineSection(outline, outline.sections[1].id, -1, budget);
+  assert.equal(outline.sections[0].order, 1);
+  const added = addOutlineSection(outline, outline.sections[0].id, budget);
+  assert.ok(added.sections.length === outline.sections.length + 1);
+  const sum = added.sections.reduce((total, section) => total + section.targetUnits, 0);
+  assert.ok(Math.abs(sum - budget.maxChars) <= 1);
+  const locked = { ...outline, sections: outline.sections.map((section, index) => index === 0 ? { ...section, status: 'locked' as const } : section) };
+  const edited = updateOutlineSection(locked, locked.sections[0].id, { title: '新标题' });
+  assert.equal(edited.sections[0].status, 'locked');
+  const removed = removeOutlineSection(added, added.sections[1].id, budget);
+  assert.ok(removed.sections.length === added.sections.length - 1);
+  void before;
+});
+
+test('停留二次分配不给无口播镜头补时长，needsHold 权重更高', () => {
+  const budget = buildDurationBudget({ targetSeconds: 30, pace: 'medium' });
+  const shots = redistributeHolds([
+    { id: 'shot-1', order: 1, start: 0, speechDuration: 3, holdDuration: 0, energy: 'fast', function: 'hook', visualIntent: '', narration: '钩子', splitReason: '', beatId: 'a' },
+    { id: 'shot-2', order: 2, start: 3, speechDuration: 0, holdDuration: 8, energy: 'hold', function: 'setup', visualIntent: '', narration: '', splitReason: 'empty' },
+    { id: 'shot-3', order: 3, start: 3, speechDuration: 4, holdDuration: 0, energy: 'medium', function: 'cta', visualIntent: '', narration: '收束', splitReason: '', beatId: 'b' }
+  ] as any, budget, [
+    { id: 'a', order: 1, function: 'hook', intent: '', narration: '钩子', targetSeconds: 3, energy: 'fast', visualIntent: '', needsHold: false },
+    { id: 'b', order: 2, function: 'cta', intent: '', narration: '收束', targetSeconds: 4, energy: 'hold', visualIntent: '', needsHold: true }
+  ]);
+  assert.equal(shots[1].holdDuration, 0);
+  assert.ok(shots[2].holdDuration > shots[0].holdDuration);
+});
+
+test('锁定章节不会被后续 merge 覆盖，失败隔离成立', () => {
+  const locked = {
+    id: 'section-1',
+    order: 1,
+    role: 'hook' as const,
+    title: '钩子',
+    targetSeconds: 8,
+    minUnits: 12,
+    maxUnits: 40,
+    narration: '已锁定正文。',
+    beats: [],
+    status: 'locked' as const
+  };
+  const incoming = { ...locked, narration: '不该写进去。', status: 'ready' as const };
+  const merged = mergeSectionIntoWorkspaceSections([locked], incoming);
+  assert.equal(merged[0].narration, '已锁定正文。');
+  assert.equal(merged[0].status, 'locked');
+});
+
+test('刷新后恢复到未完成章节而不是意图页', () => {
+  const budget = buildDurationBudget({ targetSeconds: 240, pace: 'medium' });
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: budget.maxChars, genre: '科普' });
+  const outline = outlineFromPlans(plans);
+  outline.status = 'confirmed';
+  outline.sections[0] = { ...outline.sections[0], status: 'ready' };
+  const workspace = resumeLongformWorkspace({
+    ...createDefaultScriptWorkspace(),
+    durationBudget: budget,
+    scriptForm: 'long',
+    stage: 'copy',
+    outline,
+    sections: [{
+      id: 'section-1',
+      order: 1,
+      role: 'hook',
+      title: '开场钩子',
+      targetSeconds: 8,
+      minUnits: 12,
+      maxUnits: 40,
+      narration: '已写完的钩子口播在这里。'.repeat(2),
+      beats: [],
+      status: 'ready'
+    }]
+  });
+  assert.equal(workspace.stage, 'beats');
+  assert.equal(workspace.activeSectionId, 'section-2');
+});
+
+test('短稿兼容自定义 LLM 的别名字段和缺 beats', () => {
+  const narration = '你以为这事很简单，其实关键在中间那一下。看清这一点，后面就好办。';
+  const snake = coerceLlmDraftPayload({
+    title: '别名稿',
+    full_narration: narration,
+    scenes: [
+      { text: '你以为这事很简单，其实关键在中间那一下。' },
+      { line: '看清这一点，后面就好办。' }
+    ]
+  });
+  assert.ok(snake);
+  assert.equal(snake?.fullNarration, narration);
+  assert.ok((snake?.beats.length || 0) >= 2);
+
+  const nested = coerceLlmDraftPayload({
+    data: {
+      title: '嵌套稿',
+      narration,
+      clips: [
+        { content: '你以为这事很简单，其实关键在中间那一下。' },
+        { 口播: '看清这一点，后面就好办。' }
+      ]
+    }
+  });
+  assert.ok(nested);
+  assert.equal(nested?.title, '嵌套稿');
+  assert.ok((nested?.beats.length || 0) >= 2);
+
+  const onlyCopy = coerceLlmDraftPayload({ script: narration });
+  assert.ok(onlyCopy);
+  assert.equal(onlyCopy?.fullNarration, narration);
+  assert.ok((onlyCopy?.beats.length || 0) >= 2);
+  assert.equal(
+    splitCoversSource(onlyCopy!.beats.map((beat) => beat.narration), onlyCopy!.fullNarration),
+    true
+  );
+
+  const onlyBeats = coerceLlmDraftPayload({
+    beats: [
+      { narration: '你以为这事很简单，其实关键在中间那一下。' },
+      { narration: '看清这一点，后面就好办。' }
+    ]
+  });
+  assert.ok(onlyBeats);
+  assert.ok(onlyBeats!.fullNarration.includes('你以为这事很简单'));
+  assert.equal(onlyBeats!.beats.length, 2);
+
+  const aliasedBeats = normalizeDraftBeats([{ text: '钩子口播。' }, { content: '收束口播。' }]);
+  assert.equal(aliasedBeats.length, 2);
+  assert.equal(aliasedBeats[0].function, 'hook');
+
+  const gap = describeDraftPayloadGap({ title: '空壳', summary: '没有稿' });
+  assert.match(gap, /没有口播和节拍字段/);
+  assert.match(gap, /title/);
+  assert.equal(coerceLlmDraftPayload({ title: '空壳' }), null);
 });

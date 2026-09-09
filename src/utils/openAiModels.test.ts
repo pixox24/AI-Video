@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import {
   classifyLlmChatModels,
+  extractOpenAiChatText,
   fetchOpenAiCompatibleModelList,
   isLikelyChatModel,
   parseOpenAiModelsPayload,
+  resolveBailianLlmEndpoint,
   resolveOpenAiModelsUrls,
   sanitizeOpenAiApiKey,
   sanitizeOpenAiEndpoint
@@ -56,11 +58,67 @@ test('classifyLlmChatModels falls back to the full list when nothing looks like 
   assert.deepEqual(skipped, []);
 });
 
+test('extractOpenAiChatText 兼容字符串、分段和 reasoning_content', () => {
+  assert.equal(extractOpenAiChatText({
+    choices: [{ message: { content: '{"ok":true}' } }]
+  }), '{"ok":true}');
+  assert.equal(extractOpenAiChatText({
+    choices: [{ message: { content: [{ type: 'text', text: '{"a":1}' }] } }]
+  }), '{"a":1}');
+  assert.equal(extractOpenAiChatText({
+    choices: [{ message: { content: '', reasoning_content: '{"ok":true,"from":"reasoning"}' } }]
+  }), '{"ok":true,"from":"reasoning"}');
+});
+
 test('LLM 自定义兼容接口已开放且可拉取模型', () => {
   const custom = LLM_PROVIDER_PRESETS.find((item) => item.id === 'custom');
   assert.equal(custom?.available, true);
   assert.equal(custom?.badge, '自建');
   assert.ok((custom?.docHint || '').includes('拉取模型'));
+});
+
+test('LLM 百炼已接入且可拉取模型', () => {
+  const bailian = LLM_PROVIDER_PRESETS.find((item) => item.id === 'bailian');
+  assert.equal(bailian?.available, true);
+  assert.equal(bailian?.defaultEndpoint, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
+  assert.equal(bailian?.defaultModel, 'qwen-plus');
+  assert.ok((bailian?.docHint || '').includes('拉取模型'));
+  assert.ok(bailian?.popularModels.some((item) => item.id === 'qwen-plus'));
+});
+
+test('resolveBailianLlmEndpoint 归一到 compatible-mode/v1', () => {
+  assert.equal(resolveBailianLlmEndpoint(''), 'https://dashscope.aliyuncs.com/compatible-mode/v1');
+  assert.equal(
+    resolveBailianLlmEndpoint('https://dashscope.aliyuncs.com'),
+    'https://dashscope.aliyuncs.com/compatible-mode/v1'
+  );
+  assert.equal(
+    resolveBailianLlmEndpoint('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'),
+    'https://dashscope.aliyuncs.com/compatible-mode/v1'
+  );
+  assert.equal(
+    resolveBailianLlmEndpoint('https://dashscope-intl.aliyuncs.com/api/v1'),
+    'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
+  );
+  assert.equal(
+    resolveBailianLlmEndpoint('https://ws-demo.ap-southeast-1.maas.aliyuncs.com'),
+    'https://ws-demo.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1'
+  );
+});
+
+test('百炼模型列表保留千问聊天、去掉语音和向量', () => {
+  const { chatModels, skipped } = classifyLlmChatModels([
+    'qwen-plus',
+    'qwen-max',
+    'qwen3.7-plus',
+    'text-embedding-v3',
+    'qwen-image-plus',
+    'cosyvoice-v3',
+    'wanx-v1'
+  ]);
+  assert.deepEqual(chatModels, ['qwen-plus', 'qwen-max', 'qwen3.7-plus']);
+  assert.ok(skipped.includes('cosyvoice-v3'));
+  assert.ok(skipped.includes('text-embedding-v3'));
 });
 
 test('fetchOpenAiCompatibleModelList 读取 /v1/models 并带上 Bearer', async () => {

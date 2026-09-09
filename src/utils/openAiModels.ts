@@ -6,6 +6,65 @@ export function sanitizeOpenAiEndpoint(raw: string): string {
   return val.replace(/\/+$/, '');
 }
 
+const BAILIAN_BEIJING = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const BAILIAN_INTL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+const BAILIAN_US = 'https://dashscope-us.aliyuncs.com/compatible-mode/v1';
+
+/** Normalize 百炼 / DashScope chat base to OpenAI-compatible /compatible-mode/v1. */
+export function resolveBailianLlmEndpoint(raw: string): string {
+  const val = sanitizeOpenAiEndpoint(raw);
+  if (!val) return BAILIAN_BEIJING;
+  const withoutChat = val.replace(/\/chat\/completions$/i, '').replace(/\/+$/, '');
+  if (/\/compatible-mode\/v1$/i.test(withoutChat)) return withoutChat;
+  if (/\/compatible-mode$/i.test(withoutChat)) return `${withoutChat}/v1`;
+  if (/dashscope-intl/i.test(val)) return BAILIAN_INTL;
+  if (/dashscope-us/i.test(val)) return BAILIAN_US;
+  if (/dashscope/i.test(val)) return BAILIAN_BEIJING;
+  try {
+    const url = new URL(val);
+    if (/\.maas\.aliyuncs\.com$/i.test(url.hostname)) {
+      return `${url.protocol}//${url.hostname}/compatible-mode/v1`;
+    }
+  } catch {
+    // ignore
+  }
+  return withoutChat;
+}
+
+export function extractOpenAiChatText(data: unknown): string {
+  const payload = data as any;
+  const message = payload?.choices?.[0]?.message;
+  const content = message?.content;
+  if (typeof content === 'string' && content.trim()) return content.trim();
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((part) => (
+        typeof part === 'string'
+          ? part
+          : String(part?.text || part?.content || part?.value || '')
+      ))
+      .join('');
+    if (joined.trim()) return joined.trim();
+  }
+  if (content && typeof content === 'object') {
+    if (typeof (content as any).text === 'string' && (content as any).text.trim()) {
+      return String((content as any).text).trim();
+    }
+    try {
+      const encoded = JSON.stringify(content);
+      if (encoded && encoded !== '{}' && encoded !== 'null') return encoded;
+    } catch {
+      // ignore
+    }
+  }
+  const reasoning = message?.reasoning_content || message?.reasoning;
+  if (typeof reasoning === 'string' && reasoning.trim() && /[{[]/.test(reasoning)) {
+    return reasoning.trim();
+  }
+  const fallback = payload?.choices?.[0]?.text || payload?.output_text || '';
+  return typeof fallback === 'string' ? fallback.trim() : '';
+}
+
 export function sanitizeOpenAiApiKey(raw: string): string {
   let val = String(raw || '').trim().replace(/^["']|["']$/g, '');
   if (val.toLowerCase().startsWith('bearer ')) val = val.slice(7).trim();
@@ -60,7 +119,8 @@ const NON_CHAT_KEYWORDS = [
   'transcribe', 'realtime', 'moderation',
   'dall-e', 'dalle', 'flux', 'stable-diffusion', 'midjourney',
   'kolors', 'recraft', 'ideogram', 'cogview', 'imagen',
-  'kling', 'runway', 'sora', 'luma', 'veo', 'wanx',
+  'kling', 'runway', 'sora', 'luma', 'veo', 'wanx', 'wan2',
+  'cosyvoice', 'paraformer', 'sambert', 'fun-asr',
   'image', 'video'
 ];
 

@@ -1,8 +1,8 @@
 import { DraftSource, ScriptBeat, ScriptLanguage, ScriptSection } from '../types';
 import { countBudgetUnits, normalizeScriptLanguage } from './scriptLanguage';
-import { FILL_RATIO_MAX, FILL_RATIO_MIN, fillRatio, isLongForm } from './scriptDuration';
+import { FILL_RATIO_MAX, FILL_RATIO_MIN, fillRatio, isLongForm, scriptFormForSeconds } from './scriptDuration';
 import { flattenSectionBeats, joinSectionNarrations } from './scriptSections';
-import { splitCoversSource } from './scriptSplit';
+import { splitCoversSource, splitPastedNarration } from './scriptSplit';
 
 export interface DraftValidation {
   ok: boolean;
@@ -26,20 +26,152 @@ const SECTION_BEAT_FNS: Record<ScriptSection['role'], Set<string>> = {
   cta: new Set(['cta', 'reveal'])
 };
 
+const NARRATION_KEYS = [
+  'fullNarration', 'full_narration', 'narration', 'script', 'voiceover', 'voiceOver',
+  'voice_over', 'copy', 'text', 'content', '口播', '全文'
+];
+const BEAT_LIST_KEYS = ['beats', 'scenes', 'shots', 'clips', 'segments', '节拍', '分镜'];
+const BEAT_NARRATION_KEYS = ['narration', 'text', 'content', 'line', 'voiceover', 'script', '口播'];
+const UNWRAP_KEYS = ['data', 'result', 'draft', 'payload', 'output', 'script'];
+
+function firstNonEmptyString(source: any, keys: string[]): string {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function firstArray(source: any, keys: string[]): unknown[] {
+  if (!source || typeof source !== 'object') return [];
+  for (const key of keys) {
+    if (Array.isArray(source[key])) return source[key];
+  }
+  return [];
+}
+
+function beatNarration(beat: any): string {
+  if (typeof beat === 'string') return beat.trim();
+  return firstNonEmptyString(beat, BEAT_NARRATION_KEYS);
+}
+
+function unwrapDraftPayload(raw: unknown): any {
+  if (Array.isArray(raw)) return { beats: raw };
+  if (!raw || typeof raw !== 'object') return raw;
+  const obj = raw as Record<string, unknown>;
+  if (firstNonEmptyString(obj, NARRATION_KEYS) || firstArray(obj, BEAT_LIST_KEYS).length > 0) return obj;
+  for (const key of UNWRAP_KEYS) {
+    const nested = obj[key];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) return nested;
+    if (Array.isArray(nested)) return { beats: nested };
+  }
+  return obj;
+}
+
+function joinBeatNarration(parts: string[]): string {
+  const glue = parts.some((part) => /[\u4e00-\u9fff]/.test(part)) ? '' : ' ';
+  return parts.map((part) => part.trim()).filter(Boolean).join(glue);
+}
+
+function splitNarrationInHalf(text: string): string[] {
+  const value = text;
+  if (value.trim().length < 4) return value.trim() ? [value] : [];
+  const mid = Math.floor(value.length / 2);
+  const punct = new Set(['。', '！', '？', '，', '.', '!', '?', ',', ' ', '、']);
+  let cut = -1;
+  for (let i = mid; i >= Math.floor(value.length * 0.3); i -= 1) {
+    if (punct.has(value[i])) {
+      cut = i + 1;
+      break;
+    }
+  }
+  if (cut < 2 || cut >= value.length) cut = mid;
+  return [value.slice(0, cut), value.slice(cut)].filter((part) => part.trim());
+}
+
+function beatsFromChunks(chunks: string[]): ScriptBeat[] {
+  return chunks.map((text, index) => ({
+    id: `beat-${index + 1}`,
+    order: index + 1,
+    function: (index === 0 ? 'hook' : index === chunks.length - 1 ? 'cta' : 'setup') as ScriptBeat['function'],
+    intent: '',
+    narration: text,
+    targetSeconds: 0,
+    energy: 'medium' as const,
+    visualIntent: '',
+    needsHold: index === chunks.length - 1
+  })).filter((beat) => beat.narration);
+}
+
+function beatsFromFullNarration(narration: string): ScriptBeat[] {
+  const split = splitPastedNarration(narration);
+  if (split.chunks.length >= 2 && splitCoversSource(split.chunks, narration)) {
+    return beatsFromChunks(split.chunks);
+  }
+  return beatsFromChunks(splitNarrationInHalf(narration));
+}
+
 export function normalizeDraftBeats(raw: unknown): ScriptBeat[] {
   if (!Array.isArray(raw)) return [];
-  return raw.map((beat: any, index: number) => ({
-    id: String(beat?.id || `beat-${index + 1}`),
-    order: Number(beat?.order) || index + 1,
-    function: BEAT_FNS.has(beat?.function) ? beat.function : (index === 0 ? 'hook' : 'setup'),
-    intent: String(beat?.intent || ''),
-    narration: String(beat?.narration || '').trim(),
-    targetSeconds: Number(beat?.targetSeconds) || 0,
-    energy: beat?.energy || 'medium',
-    visualIntent: String(beat?.visualIntent || ''),
-    needsHold: Boolean(beat?.needsHold),
-    sectionId: beat?.sectionId ? String(beat.sectionId) : undefined
-  })).filter((beat) => beat.narration);
+  return raw.map((beat: any, index: number) => {
+    const functionName = typeof beat === 'string' ? '' : String(beat?.function || beat?.role || beat?.type || '');
+    return {
+      id: String((typeof beat === 'object' && beat?.id) || `beat-${index + 1}`),
+      order: Number(typeof beat === 'object' ? beat?.order : 0) || index + 1,
+      function: (BEAT_FNS.has(functionName) ? functionName : (index === 0 ? 'hook' : 'setup')) as ScriptBeat['function'],
+      intent: String((typeof beat === 'object' && (beat?.intent || beat?.purpose)) || ''),
+      narration: beatNarration(beat),
+      targetSeconds: Number(typeof beat === 'object' ? beat?.targetSeconds : 0) || 0,
+      energy: (typeof beat === 'object' && beat?.energy) || 'medium',
+      visualIntent: String((typeof beat === 'object' && (beat?.visualIntent || beat?.visual || beat?.shot)) || ''),
+      needsHold: Boolean(typeof beat === 'object' && beat?.needsHold),
+      sectionId: typeof beat === 'object' && beat?.sectionId ? String(beat.sectionId) : undefined
+    };
+  }).filter((beat) => beat.narration);
+}
+
+export function coerceLlmDraftPayload(raw: unknown): { title?: string; fullNarration: string; beats: ScriptBeat[] } | null {
+  if (raw == null) return null;
+  const root = unwrapDraftPayload(raw);
+  if (!root || typeof root !== 'object') return null;
+  let beats = normalizeDraftBeats(firstArray(root, BEAT_LIST_KEYS));
+  let fullNarration = firstNonEmptyString(root, NARRATION_KEYS);
+  if (!fullNarration && beats.length >= 2) fullNarration = joinBeatNarration(beats.map((beat) => beat.narration));
+  if (fullNarration && beats.length < 2) beats = beatsFromFullNarration(fullNarration);
+  if (!fullNarration || beats.length < 2) return null;
+  if (!splitCoversSource(beats.map((beat) => beat.narration), fullNarration)) {
+    const synthesized = beatsFromFullNarration(fullNarration);
+    if (synthesized.length >= 2 && splitCoversSource(synthesized.map((beat) => beat.narration), fullNarration)) {
+      beats = synthesized;
+    } else {
+      fullNarration = joinBeatNarration(beats.map((beat) => beat.narration));
+    }
+  }
+  if (!fullNarration || beats.length < 2) return null;
+  const title = typeof (root as any).title === 'string' && (root as any).title.trim()
+    ? String((root as any).title).trim()
+    : undefined;
+  return { title, fullNarration, beats };
+}
+
+export function describeDraftPayloadGap(raw: unknown): string {
+  if (raw == null) return '模型没有返回可用口播和节拍';
+  if (typeof raw !== 'object') return `模型返回了 ${typeof raw}，不是带口播和节拍的 JSON`;
+  if (Array.isArray(raw)) {
+    const beats = normalizeDraftBeats(raw);
+    return beats.length < 2
+      ? `模型只返回了数组，有效节拍 ${beats.length} 个，至少需要 2 个带口播的节拍`
+      : '模型返回了节拍数组，但没有全文口播';
+  }
+  const keys = Object.keys(raw as object).slice(0, 12).join('、') || '空对象';
+  const root = unwrapDraftPayload(raw);
+  const narration = firstNonEmptyString(root, NARRATION_KEYS);
+  const beats = normalizeDraftBeats(firstArray(root, BEAT_LIST_KEYS));
+  if (!narration && beats.length === 0) return `模型返回了 JSON，但没有口播和节拍字段。实际键：${keys}`;
+  if (!narration) return `模型返回了 ${beats.length} 个节拍，但缺少全文口播（fullNarration）。实际键：${keys}`;
+  if (beats.length < 2) return `模型返回了口播，但有效节拍不足 2 个（当前 ${beats.length}）。实际键：${keys}`;
+  return `模型返回了口播和节拍，但无法套成可校验短稿。实际键：${keys}`;
 }
 
 export interface SectionValidation {
@@ -93,6 +225,7 @@ export function validateDraftResult(input: {
   targetSeconds: number;
   scriptLanguage?: ScriptLanguage;
   source?: DraftSource;
+  durationMode?: 'target-driven' | 'content-driven';
 }): DraftValidation {
   const language = normalizeScriptLanguage(input.scriptLanguage);
   const fromSections = input.sections && input.sections.length > 0
@@ -122,7 +255,11 @@ export function validateDraftResult(input: {
   if (longForm && !hasSections && beats.length > 0 && beats.length <= 8 && input.targetSeconds >= 120) {
     warnings.push('长视频仍只有短视频节拍数量，请按章节展开');
   }
-  const strictFill = input.source !== 'fallback' && input.targetSeconds >= 45;
+  // Short one-shot (≤60s) keeps the draft and warns; 7% over is a length hint, not a failed write.
+  // Medium/long still reject outside 90%–105% because those are target-driven chapter contracts.
+  const strictFill = input.source !== 'fallback'
+    && input.durationMode !== 'content-driven'
+    && scriptFormForSeconds(input.targetSeconds) !== 'short';
   const fillOutOfContract = strictFill && (fill < FILL_RATIO_MIN || fill > FILL_RATIO_MAX);
   const reject = !narration
     || beats.length < 2

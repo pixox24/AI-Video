@@ -59,6 +59,9 @@ export interface NarrationUtteranceMark {
   audioEnd: number;
   clipIds: string[];
   source: NarrationAlignSource;
+  /** Per-utterance TTS asset so later resynth can skip unchanged sentences. */
+  audioUrl?: string;
+  words?: NarrationWordMark[];
 }
 
 export interface NarrationAlignment {
@@ -189,7 +192,7 @@ export interface ImageRetryConfig {
 
 export interface CustomLlmApiConfig {
   enabled: boolean;
-  provider: 'builtin' | 'gemini' | 'deepseek' | 'openai' | 'custom';
+  provider: 'builtin' | 'gemini' | 'deepseek' | 'bailian' | 'openai' | 'custom';
   endpoint: string;
   apiKey: string;
   model: string;
@@ -343,6 +346,16 @@ export interface ProjectSettings {
 }
 
 export type ScriptStage = 'intent' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
+export type ScriptForm = 'short' | 'medium' | 'long' | 'extended';
+export type OutlineStatus = 'none' | 'draft' | 'confirmed' | 'stale';
+export type SectionStatus = 'planned' | 'drafting' | 'ready' | 'locked' | 'needs-revision' | 'failed';
+export type RevisionReason =
+  | 'under-duration'
+  | 'over-duration'
+  | 'missing-evidence'
+  | 'repetition'
+  | 'transition'
+  | 'manual';
 export type ScriptIntent = 'have-title' | 'blank' | 'direction' | 'product' | 'reference' | 'have-script';
 export type ScriptLanguage = 'zh' | 'en';
 export type ScriptGenre = '科普' | '反常识' | '故事' | '教程' | '带货' | '情绪' | '热点解读' | '口播金句';
@@ -680,7 +693,14 @@ export interface DurationBudget {
   scriptLanguage?: ScriptLanguage;
   speechSeconds: number;
   holdSeconds: number;
+  /** Alias of targetUnits; kept so saved projects and older UI keep working. */
   maxChars: number; // budget units: zh=chars, en=words
+  /** Target spoken units (zh chars / en words). Equals maxChars after migration. */
+  targetUnits?: number;
+  minUnits?: number;
+  maxUnits?: number;
+  speechTargetSeconds?: number;
+  visualHoldTargetSeconds?: number;
   usedChars: number;
   /** Measured after TTS; planning values remain estimates until this is present. */
   actualSpeechSeconds?: number;
@@ -717,6 +737,67 @@ export interface ScriptSection {
   maxUnits: number;
   narration: string;
   beats: ScriptBeat[];
+  status?: SectionStatus;
+  usedEvidenceIds?: string[];
+  audienceQuestion?: string;
+  promise?: string;
+}
+
+export interface ScriptEvidenceItem {
+  id: string;
+  claim: string;
+  source?: string;
+  confidence: 'user' | 'researched' | 'unverified';
+}
+
+export interface ScriptBrief {
+  audience: string;
+  coreQuestion: string;
+  coreConclusion: string;
+  evidence: ScriptEvidenceItem[];
+  forbiddenClaims: string[];
+  requiredTerms: string[];
+  callToAction?: string;
+}
+
+export interface ScriptOutlineSection {
+  id: string;
+  order: number;
+  title: string;
+  role: ScriptSectionRole;
+  audienceQuestion: string;
+  promise: string;
+  evidenceIds: string[];
+  bridgeFromPrevious: string;
+  bridgeToNext: string;
+  targetSeconds: number;
+  targetUnits: number;
+  minUnits: number;
+  maxUnits: number;
+  status: SectionStatus;
+}
+
+export interface ScriptOutline {
+  status: OutlineStatus;
+  version: number;
+  oneSentenceThesis: string;
+  sections: ScriptOutlineSection[];
+  confirmedAt?: number;
+}
+
+export interface ScriptRevisionAction {
+  sectionId: string;
+  action: 'expand' | 'compress' | 'replace-transition';
+  targetDeltaUnits: number;
+  instruction: string;
+}
+
+export interface ScriptRevisionPlan {
+  reason: RevisionReason;
+  measuredSeconds: number;
+  targetSeconds: number;
+  deltaSeconds: number;
+  sectionActions: ScriptRevisionAction[];
 }
 
 export interface SpeechVisual {
@@ -800,6 +881,15 @@ export interface ScriptWorkspace {
   selectedTopicId: string | null;
   researchNotes: ResearchNotes;
   durationBudget: DurationBudget;
+  scriptForm?: ScriptForm;
+  /** When set, overrides duration-derived ScriptForm. */
+  scriptFormOverride?: ScriptForm | null;
+  /** Medium videos confirm outline before draft when true. */
+  confirmOutlineBeforeDraft?: boolean;
+  brief?: ScriptBrief;
+  outline?: ScriptOutline;
+  revisionPlan?: ScriptRevisionPlan | null;
+  activeSectionId?: string;
   beats: ScriptBeat[];
   sections?: ScriptSection[];
   fullNarration: string;

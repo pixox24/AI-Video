@@ -1,4 +1,4 @@
-import { ScriptLanguage, ScriptPace, ScriptPlatform } from '../types';
+import { ScriptForm, ScriptLanguage, ScriptPace, ScriptPlatform } from '../types';
 
 export const MIN_VIDEO_SECONDS = 8;
 export const MAX_VIDEO_SECONDS = 1800;
@@ -38,6 +38,43 @@ export function clampVideoSeconds(value: number, fallback = 30): ClampSecondsRes
 
 export function isLongForm(seconds: number): boolean {
   return Number(seconds) >= LONG_FORM_SECONDS;
+}
+
+export function scriptFormForSeconds(seconds: number): ScriptForm {
+  const value = Number(seconds);
+  if (value <= 60) return 'short';
+  if (value <= 180) return 'medium';
+  if (value <= 600) return 'long';
+  return 'extended';
+}
+
+export function resolveScriptForm(seconds: number, override?: ScriptForm | null): ScriptForm {
+  if (override === 'short' || override === 'medium' || override === 'long' || override === 'extended') {
+    return override;
+  }
+  return scriptFormForSeconds(seconds);
+}
+
+export function scriptFormLabel(form: ScriptForm, language?: ScriptLanguage | null): string {
+  if (language === 'en') {
+    if (form === 'short') return 'Short form';
+    if (form === 'medium') return 'Segmented video';
+    if (form === 'long') return 'Chaptered video';
+    return 'Extended video';
+  }
+  if (form === 'short') return '短视频';
+  if (form === 'medium') return '段落视频';
+  if (form === 'long') return '章节视频';
+  return '深度长视频';
+}
+
+export function outlineConfirmationRequired(form: ScriptForm, confirmMedium = false): boolean {
+  if (form === 'long' || form === 'extended') return true;
+  return form === 'medium' && confirmMedium;
+}
+
+export function usesSectionWorkflow(form: ScriptForm): boolean {
+  return form !== 'short';
 }
 
 export function fillRatio(used: number, max: number): number {
@@ -85,8 +122,7 @@ export function platformRangeLabel(min: number, max: number): string {
 }
 
 export function longFormLabel(seconds: number, language?: ScriptLanguage | null): string {
-  if (!isLongForm(seconds)) return language === 'en' ? 'Short form' : '短视频';
-  return language === 'en' ? 'Long form' : '长视频';
+  return scriptFormLabel(scriptFormForSeconds(seconds), language);
 }
 
 export function suggestedSplitShotPresets(sentenceCount: number): number[] {
@@ -98,21 +134,23 @@ export function suggestedSplitShotPresets(sentenceCount: number): number[] {
 }
 
 export function durationModeForSeconds(seconds: number): 'short' | 'long' {
-  return isLongForm(seconds) ? 'long' : 'short';
+  return usesSectionWorkflow(scriptFormForSeconds(seconds)) ? 'long' : 'short';
 }
 
 export function llmMaxTokensForSeconds(seconds: number): number {
-  return isLongForm(seconds) ? LLM_LONGFORM_MAX_TOKENS : LLM_JSON_MAX_TOKENS;
+  return scriptFormForSeconds(seconds) === 'short' ? LLM_JSON_MAX_TOKENS : LLM_LONGFORM_MAX_TOKENS;
 }
 
 export function llmTimeoutMsForSeconds(seconds: number): number {
-  if (seconds >= 300) return 180000;
-  if (isLongForm(seconds)) return 120000;
+  const form = scriptFormForSeconds(seconds);
+  if (form === 'extended' || seconds >= 300) return 180000;
+  if (form === 'long' || form === 'medium') return 120000;
   return 60000;
 }
 
 export function longFormTotalTimeoutMsForSeconds(seconds: number): number {
-  if (!isLongForm(seconds)) return llmTimeoutMsForSeconds(seconds);
+  const form = scriptFormForSeconds(seconds);
+  if (form === 'short') return llmTimeoutMsForSeconds(seconds);
   return Math.min(900000, Math.max(300000, 120000 + Math.ceil(Math.max(0, seconds) / 60) * 30000));
 }
 

@@ -21,9 +21,11 @@ import {
   paceUnitsPerSecond
 } from './scriptLanguage';
 import {
+  FILL_RATIO_MAX,
   FILL_RATIO_MIN,
   MAX_VIDEO_SECONDS,
   clampVideoSeconds,
+  scriptFormForSeconds,
   conceptMaxForDuration as conceptMaxForSeconds,
   maxForecastShotsForDuration,
   maxUniqueScenesForDuration,
@@ -37,7 +39,12 @@ export {
   MAX_VIDEO_SECONDS,
   LONG_FORM_SECONDS,
   isLongForm,
-  clampVideoSeconds
+  clampVideoSeconds,
+  scriptFormForSeconds,
+  scriptFormLabel,
+  outlineConfirmationRequired,
+  usesSectionWorkflow,
+  resolveScriptForm
 } from './scriptDuration';
 
 export interface PacePreset {
@@ -117,6 +124,14 @@ export const STAGE_META: { id: import('../types').ScriptStage; label: string; hi
   { id: 'rhythm', label: '节奏', hint: '镜数预测' }
 ];
 
+export function stageNavMeta(form: import('../types').ScriptForm) {
+  return STAGE_META.map((item) => (
+    item.id === 'beats' && form !== 'short'
+      ? { ...item, label: '提纲 / 章节', hint: '全片结构' }
+      : item
+  ));
+}
+
 export function conceptMaxForDuration(seconds: number): number {
   return conceptMaxForSeconds(seconds);
 }
@@ -179,7 +194,7 @@ export function buildDurationBudget(partial: {
   const targetSeconds = clampVideoSeconds(Number(partial.targetSeconds) || plat.defaultSeconds, plat.defaultSeconds).seconds;
   const holdSeconds = round1(targetSeconds * preset.holdRatio);
   const speechSeconds = round1(Math.max(0.5, targetSeconds - holdSeconds));
-  const maxChars = Math.max(8, Math.round(speechSeconds * effectiveCps));
+  const targetUnits = Math.max(8, Math.round(speechSeconds * effectiveCps));
   const usedChars = Math.max(0, partial.usedChars || 0);
   const conceptMax = conceptMaxForDuration(targetSeconds);
   const locked = partial.lockedShotCount;
@@ -193,13 +208,32 @@ export function buildDurationBudget(partial: {
     charsPerSecond: effectiveCps,
     speechSeconds,
     holdSeconds,
-    maxChars,
+    speechTargetSeconds: speechSeconds,
+    visualHoldTargetSeconds: holdSeconds,
+    maxChars: targetUnits,
+    targetUnits,
+    minUnits: Math.max(8, Math.ceil(targetUnits * FILL_RATIO_MIN)),
+    maxUnits: Math.max(8, Math.ceil(targetUnits * FILL_RATIO_MAX)),
     usedChars,
     actualSpeechSeconds: Number.isFinite(partial.actualSpeechSeconds) ? Math.max(0, Number(partial.actualSpeechSeconds)) : undefined,
     actualTotalSeconds: Number.isFinite(partial.actualTotalSeconds) ? Math.max(0, Number(partial.actualTotalSeconds)) : undefined,
     conceptMax,
     conceptUsed: Math.max(0, partial.conceptUsed || 0),
     lockedShotCount: typeof locked === 'number' && locked > 0 ? Math.round(locked) : null
+  };
+}
+
+export function lengthBudgetOf(budget: Partial<DurationBudget> | DurationBudget) {
+  const targetUnits = Math.max(8, Number(budget.targetUnits) || Number(budget.maxChars) || 8);
+  const minUnits = Math.max(8, Number(budget.minUnits) || Math.ceil(targetUnits * FILL_RATIO_MIN));
+  const maxUnits = Math.max(minUnits, Number(budget.maxUnits) || Math.ceil(targetUnits * FILL_RATIO_MAX));
+  return {
+    targetUnits,
+    minUnits,
+    maxUnits,
+    speechTargetSeconds: Number(budget.speechTargetSeconds) || Number(budget.speechSeconds) || 0,
+    visualHoldTargetSeconds: Number(budget.visualHoldTargetSeconds) || Number(budget.holdSeconds) || 0,
+    form: scriptFormForSeconds(Number(budget.targetSeconds) || 30)
   };
 }
 
@@ -445,7 +479,7 @@ export function predictShots(input: {
     if (shots.length > maxShots) shots = fitVisualShotCount(shots, maxShots, language);
   }
   shots = assignSceneIds(shots, input.budget);
-  shots = distributeBudgetHolds(shots, input.budget);
+  shots = distributeBudgetHolds(shots, input.budget, input.beats);
   const used = input.budget.usedChars || countNarrationChars(input.narration);
   const fillTarget = input.budget.durationMode === 'target-driven' && used >= input.budget.maxChars * FILL_RATIO_MIN;
   return fitShotsToSpeech(shots, input.budget, fillTarget);
@@ -518,23 +552,40 @@ function fitVisualShotCount(shots: ForecastShot[], desired: number, language: Sc
   return recomputeShotStarts(next.map((shot, index) => ({ ...shot, order: index + 1, id: `shot-${index + 1}` })));
 }
 
-function distributeBudgetHolds(shots: ForecastShot[], budget: DurationBudget): ForecastShot[] {
+function spokenShot(shot: ForecastShot): boolean {
+  return shot.speechDuration > 0.12 || Boolean((shot.sliceText || shot.narration || '').trim());
+}
+
+export function redistributeHolds(shots: ForecastShot[], budget: DurationBudget, beats?: ScriptBeat[]): ForecastShot[] {
   if (shots.length === 0) return shots;
-  const holdBudget = Math.max(0, budget.holdSeconds);
+  const holdBudget = Math.max(0, Number(budget.visualHoldTargetSeconds) || budget.holdSeconds);
   const pinnedHold = shots.reduce((sum, shot) => sum + (shot.holdPinned ? shot.holdDuration : 0), 0);
   const remaining = Math.max(0, holdBudget - pinnedHold);
-  const weights = shots.map((shot) => {
+  const beatHold = new Map((beats || []).map((beat) => [beat.id, beat.needsHold]));
+  const weights = shots.map((shot, index) => {
     if (shot.holdPinned) return 0;
-    if (shot.function === 'cta' || shot.energy === 'hold') return 3;
-    if (shot.function === 'reveal' || shot.function === 'hook') return 2;
-    return 1;
+    if (!spokenShot(shot)) return 0;
+    let weight = 1;
+    const prev = shots[index - 1];
+    if (shot.energy === 'hold' || (shot.beatId && beatHold.get(shot.beatId))) weight += 2.4;
+    if (shot.function === 'cta' || shot.function === 'reveal') weight += 1.6;
+    if (shot.function === 'hook') weight += 0.7;
+    if (prev && prev.sectionId && shot.sectionId && prev.sectionId !== shot.sectionId) weight += 1.3;
+    return weight;
   });
-  const weightSum = weights.reduce((sum, value) => sum + value, 0) || 1;
-  return shots.map((shot, index) => (
-    shot.holdPinned
-      ? shot
-      : { ...shot, holdDuration: round2(remaining * (weights[index] / weightSum)) }
-  ));
+  const weightSum = weights.reduce((sum, value) => sum + value, 0);
+  if (!(weightSum > 0) || remaining <= 0) {
+    return shots.map((shot) => (shot.holdPinned || spokenShot(shot) ? shot : { ...shot, holdDuration: 0 }));
+  }
+  return shots.map((shot, index) => {
+    if (shot.holdPinned) return shot;
+    if (!spokenShot(shot)) return { ...shot, holdDuration: 0 };
+    return { ...shot, holdDuration: round2(remaining * (weights[index] / weightSum)) };
+  });
+}
+
+function distributeBudgetHolds(shots: ForecastShot[], budget: DurationBudget, beats?: ScriptBeat[]): ForecastShot[] {
+  return redistributeHolds(shots, budget, beats);
 }
 
 export function assignSceneIds(shots: ForecastShot[], budget?: DurationBudget): ForecastShot[] {

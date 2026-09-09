@@ -19,9 +19,16 @@ export type UtteranceSegment = {
   words?: NarrationWordMark[];
 };
 
+type BufferedUtterance = {
+  text: string;
+  buffer: AudioBuffer;
+  words?: NarrationWordMark[];
+  audioUrl?: string;
+};
+
 async function assembleFromBuffers(
   sourceClips: StoryboardClip[],
-  items: { text: string; buffer: AudioBuffer; words?: NarrationWordMark[] }[],
+  items: BufferedUtterance[],
   sentenceGap?: number,
   outroHold?: number
 ) {
@@ -72,7 +79,9 @@ async function assembleFromBuffers(
       audioStart: audioOffset,
       audioEnd: audioOffset + buffer.duration,
       clipIds: utterance.clips.map((clip) => clip.id),
-      source: layout.source
+      source: layout.source,
+      audioUrl: item.audioUrl,
+      words: item.words
     });
     audioOffset += buffer.duration;
 
@@ -137,7 +146,7 @@ export async function assembleAlignedNarration(
     if (!buffer || buffer.length < 32) {
       throw new Error(`旁白句没有音频：${utterance.text.slice(0, 18)}`);
     }
-    items.push({ text: utterance.text, buffer, words: segment.words });
+    items.push({ text: utterance.text, buffer, words: segment.words, audioUrl: segment.audioUrl });
   }
 
   return assembleFromBuffers(clips, items, sentenceGap, outroHold);

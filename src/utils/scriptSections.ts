@@ -7,7 +7,7 @@ import {
   ShotEnergy
 } from '../types';
 import { countBudgetUnits, normalizeScriptLanguage } from './scriptLanguage';
-import { isLongForm } from './scriptDuration';
+import { scriptFormForSeconds, usesSectionWorkflow } from './scriptDuration';
 import { splitCompleteSentences } from './speechSpans';
 
 function intentFor(fn: BeatFunction): string {
@@ -28,6 +28,7 @@ export interface ScriptSectionPlan {
   role: ScriptSectionRole;
   title: string;
   targetSeconds: number;
+  targetUnits: number;
   minUnits: number;
   maxUnits: number;
   beatFunctions: BeatFunction[];
@@ -53,27 +54,50 @@ const ROLE_TITLE: Record<ScriptSectionRole, string> = {
   cta: '收束'
 };
 
-function rolesForDuration(seconds: number, genre?: string | null): ScriptSectionRole[] {
+function rolesForDuration(seconds: number, genre?: string | null, formInput?: import('../types').ScriptForm | null): ScriptSectionRole[] {
   const narrative = /故事|情绪|story|narrative|emotion/i.test(String(genre || ''));
-  if (seconds >= 600) {
+  const form = formInput || scriptFormForSeconds(seconds);
+  if (form === 'extended' || seconds >= 601) {
     return narrative
       ? ['hook', 'setup', 'body', 'turn', 'body', 'proof', 'body', 'turn', 'reveal', 'cta']
       : ['hook', 'setup', 'body', 'body', 'body', 'turn', 'proof', 'body', 'reveal', 'cta'];
   }
-  if (seconds >= 300) {
-    return narrative
-      ? ['hook', 'setup', 'body', 'turn', 'body', 'proof', 'reveal', 'cta']
-      : ['hook', 'setup', 'body', 'body', 'turn', 'proof', 'reveal', 'cta'];
-  }
-  if (seconds >= 180) {
+  if (form === 'long' || seconds >= 181) {
+    if (seconds >= 300) {
+      return narrative
+        ? ['hook', 'setup', 'body', 'turn', 'body', 'proof', 'reveal', 'cta']
+        : ['hook', 'setup', 'body', 'body', 'turn', 'proof', 'reveal', 'cta'];
+    }
     return narrative
       ? ['hook', 'setup', 'body', 'turn', 'body', 'reveal', 'cta']
       : ['hook', 'setup', 'body', 'body', 'proof', 'reveal', 'cta'];
   }
   if (seconds >= 120) {
-    return ['hook', 'setup', 'body', 'proof', 'reveal', 'cta'];
+    return narrative
+      ? ['hook', 'setup', 'body', 'turn', 'reveal', 'cta']
+      : ['hook', 'setup', 'body', 'proof', 'reveal', 'cta'];
   }
-  return ['hook', 'setup', 'body', 'reveal', 'cta'];
+  if (seconds >= 90) {
+    return narrative
+      ? ['hook', 'setup', 'turn', 'cta']
+      : ['hook', 'setup', 'body', 'proof', 'cta'];
+  }
+  return narrative
+    ? ['hook', 'setup', 'reveal', 'cta']
+    : ['hook', 'setup', 'body', 'cta'];
+}
+
+function chapterUnitWindow(units: number, role: ScriptSectionRole): { minUnits: number; maxUnits: number } {
+  if (role === 'hook' || role === 'cta') {
+    return {
+      minUnits: Math.max(8, Math.ceil(units * 0.5)),
+      maxUnits: Math.max(24, Math.ceil(units * 1.25), Math.round(units) + 12)
+    };
+  }
+  return {
+    minUnits: Math.max(8, Math.ceil(units * 0.9)),
+    maxUnits: Math.max(8, Math.ceil(units * 1.05))
+  };
 }
 
 function beatsForRole(role: ScriptSectionRole): BeatFunction[] {
@@ -100,24 +124,52 @@ export function planScriptSections(input: {
   targetSeconds: number;
   maxChars: number;
   genre?: string | null;
+  form?: import('../types').ScriptForm | null;
 }): ScriptSectionPlan[] {
   const seconds = Math.max(8, Number(input.targetSeconds) || 30);
   const maxChars = Math.max(8, Number(input.maxChars) || 80);
-  const roles = rolesForDuration(seconds, input.genre);
+  const form = input.form || scriptFormForSeconds(seconds);
+  const roles = rolesForDuration(seconds, input.genre, form);
   const weightSum = roles.reduce((sum, role) => sum + ROLE_WEIGHT[role], 0) || 1;
+  const hookMax = form === 'extended' ? 12 : 8;
+  const ctaMax = form === 'extended' ? 14 : 10;
+  const desired = roles.map((role) => Math.max(3, seconds * (ROLE_WEIGHT[role] / weightSum)));
+  let overflow = 0;
+  const capped = desired.map((value, index) => {
+    const role = roles[index];
+    if (role === 'hook' && value > hookMax) {
+      overflow += value - hookMax;
+      return hookMax;
+    }
+    if (role === 'cta' && value > ctaMax) {
+      overflow += value - ctaMax;
+      return ctaMax;
+    }
+    return value;
+  });
+  const expandable = roles
+    .map((role, index) => (role === 'body' || role === 'proof' || role === 'setup' || role === 'turn' ? index : -1))
+    .filter((index) => index >= 0);
+  if (overflow > 0 && expandable.length > 0) {
+    const extra = overflow / expandable.length;
+    expandable.forEach((index) => {
+      capped[index] += extra;
+    });
+  }
   let usedSeconds = 0;
   let usedUnits = 0;
   return roles.map((role, index) => {
     const last = index === roles.length - 1;
-    const share = ROLE_WEIGHT[role] / weightSum;
     const targetSeconds = last
       ? Math.max(3, Math.round((seconds - usedSeconds) * 10) / 10)
-      : Math.max(3, Math.round(seconds * share * 10) / 10);
+      : Math.max(3, Math.round(capped[index] * 10) / 10);
+    const share = targetSeconds / Math.max(1, seconds);
     const units = last
       ? Math.max(8, maxChars - usedUnits)
       : Math.max(8, Math.round(maxChars * share));
     usedSeconds += targetSeconds;
     usedUnits += units;
+    const window = chapterUnitWindow(units, role);
     const order = index + 1;
     return {
       id: `section-${order}`,
@@ -127,8 +179,9 @@ export function planScriptSections(input: {
         ? ` ${roles.slice(0, index + 1).filter((item) => item === 'body').length}`
         : ''),
       targetSeconds,
-      minUnits: Math.max(8, Math.ceil(units * 0.9)),
-      maxUnits: Math.max(8, Math.ceil(units * 1.05)),
+      targetUnits: units,
+      minUnits: window.minUnits,
+      maxUnits: window.maxUnits,
       beatFunctions: beatsForRole(role)
     };
   });
@@ -254,7 +307,7 @@ export function sectionsFromNarration(input: {
 }
 
 export function shouldUseSections(targetSeconds: number, sentenceCount = 0): boolean {
-  return isLongForm(targetSeconds) || sentenceCount > 12;
+  return usesSectionWorkflow(scriptFormForSeconds(targetSeconds)) || sentenceCount > 12;
 }
 
 export function uniqueSceneCount(shots: Array<{ sceneId?: string }>): number {

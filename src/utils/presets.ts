@@ -137,6 +137,22 @@ export const LLM_PROVIDER_PRESETS: LlmProviderPreset[] = [
     available: true
   },
   {
+    id: 'bailian',
+    name: '阿里云百炼',
+    badge: '已接入',
+    description: 'DashScope OpenAI 兼容接口，可拉取已开通的千问聊天模型',
+    defaultEndpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    defaultModel: 'qwen-plus',
+    popularModels: [
+      { id: 'qwen-plus', label: 'Qwen Plus', hint: '均衡，日常写稿推荐' },
+      { id: 'qwen-turbo', label: 'Qwen Turbo', hint: '更快更省' },
+      { id: 'qwen-max', label: 'Qwen Max', hint: '更高质量，复杂长稿更稳' },
+      { id: 'qwen3.7-plus', label: 'Qwen3.7 Plus', hint: '新一代 Plus，和视觉接口同一代' }
+    ],
+    docHint: '在百炼控制台（北京地域）创建 API Key（sk-...）。默认地址 https://dashscope.aliyuncs.com/compatible-mode/v1；国际站改用 dashscope-intl。点「拉取模型」从已开通的聊天模型里选，不会走内置 Gemini。',
+    available: true
+  },
+  {
     id: 'openai',
     name: 'OpenAI',
     badge: '即将开放',

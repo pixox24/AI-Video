@@ -55,8 +55,9 @@ import {
   validateForecast
 } from './scriptBudget';
 import { buildSpeechSpans, gateSpeechSpans, normalizeSpeechSpans, splitCompleteSentences } from './speechSpans';
-import { isLongForm } from './scriptDuration';
-import { sectionsFromNarration } from './scriptSections';
+import { resolveScriptForm, scriptFormForSeconds, usesSectionWorkflow } from './scriptDuration';
+import { sectionsFromNarration, shouldUseSections } from './scriptSections';
+import { markOutlineStale, normalizeScriptBrief, outlineFromExistingSections } from './scriptOutline';
 
 export const EMPTY_RESEARCH: ResearchNotes = {
   competitor: '',
@@ -83,6 +84,13 @@ export function createDefaultScriptWorkspace(): ScriptWorkspace {
     selectedTopicId: null,
     researchNotes: { ...EMPTY_RESEARCH },
     durationBudget,
+    scriptForm: scriptFormForSeconds(durationBudget.targetSeconds),
+    scriptFormOverride: null,
+    confirmOutlineBeforeDraft: false,
+    brief: undefined,
+    outline: undefined,
+    revisionPlan: null,
+    activeSectionId: undefined,
     beats: [],
     fullNarration: '',
     speechSpans: [],
@@ -96,9 +104,29 @@ export function createDefaultScriptWorkspace(): ScriptWorkspace {
   };
 }
 
+export function resumeLongformWorkspace(workspace: ScriptWorkspace): ScriptWorkspace {
+  const form = resolveScriptForm(workspace.durationBudget.targetSeconds, workspace.scriptFormOverride);
+  if (!usesSectionWorkflow(form) || !workspace.outline?.sections?.length) return workspace;
+  const unfinished = workspace.outline.sections.filter((section) => section.status !== 'ready' && section.status !== 'locked');
+  if (unfinished.length === 0) return workspace;
+  const hasBody = (workspace.sections || []).some((section) => String(section.narration || '').trim());
+  const inProgress = hasBody
+    || workspace.outline.status === 'confirmed'
+    || unfinished.some((section) => section.status === 'failed' || section.status === 'needs-revision' || section.status === 'drafting');
+  if (!inProgress && workspace.outline.status !== 'draft') return workspace;
+  if (!inProgress && workspace.stage !== 'beats' && workspace.stage !== 'copy') return workspace;
+  return {
+    ...workspace,
+    stage: 'beats',
+    activeSectionId: workspace.activeSectionId && unfinished.some((item) => item.id === workspace.activeSectionId)
+      ? workspace.activeSectionId
+      : unfinished[0].id
+  };
+}
+
 export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
   if (project.scriptWorkspace) {
-    return refreshWorkspaceDerived(normalizeScriptWorkspace(project.scriptWorkspace));
+    return resumeLongformWorkspace(refreshWorkspaceDerived(normalizeScriptWorkspace(project.scriptWorkspace)));
   }
 
   const narration = joinClipNarrations(project.clips || []);
@@ -175,6 +203,15 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     scriptLanguage,
     researchNotes: { ...EMPTY_RESEARCH, ...(raw.researchNotes || {}) },
     durationBudget,
+    scriptForm: resolveScriptForm(durationBudget.targetSeconds, raw.scriptFormOverride),
+    scriptFormOverride: raw.scriptFormOverride || null,
+    confirmOutlineBeforeDraft: Boolean(raw.confirmOutlineBeforeDraft),
+    brief: raw.brief ? normalizeScriptBrief(raw.brief) : undefined,
+    outline: raw.outline && Array.isArray(raw.outline.sections) && raw.outline.sections.length > 0
+      ? raw.outline
+      : outlineFromExistingSections(raw.sections, durationBudget, raw.genrePackId),
+    revisionPlan: raw.revisionPlan || null,
+    activeSectionId: raw.activeSectionId,
     topicCards: Array.isArray(raw.topicCards) ? raw.topicCards : [],
     beats: Array.isArray(raw.beats) ? raw.beats : [],
     sections: Array.isArray(raw.sections) ? raw.sections : undefined,
@@ -227,8 +264,13 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
     conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed,
     scriptLanguage
   });
+  const scriptForm = resolveScriptForm(durationBudget.targetSeconds, workspace.scriptFormOverride);
+  let outline = workspace.outline;
+  if (outline && workspace.scriptForm && workspace.scriptForm !== scriptForm && outline.status === 'confirmed') {
+    outline = markOutlineStale(outline);
+  }
   const directorNotes = [
-    ...titleDirectorNotes({ ...workspace, scriptLanguage, durationBudget }),
+    ...titleDirectorNotes({ ...workspace, scriptLanguage, durationBudget, scriptForm, outline }),
     ...validateForecast({
       budget: durationBudget,
       shots: workspace.forecastShots,
@@ -242,7 +284,7 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
       message
     }))
   ];
-  return { ...workspace, durationBudget, directorNotes };
+  return { ...workspace, durationBudget, directorNotes, scriptForm, outline };
 }
 
 /** Intent-stage paste lives in intentNotes; the copy editor is fullNarration. */
@@ -267,7 +309,7 @@ export function diagnoseExistingScript(workspace: ScriptWorkspace): ScriptWorksp
     scriptLanguage
   );
   const beats = beatsFromNarration(narration, durationBudget);
-  const sections = isLongForm(durationBudget.targetSeconds) || splitCompleteSentences(narration, scriptLanguage).length > 12
+  const sections = shouldUseSections(durationBudget.targetSeconds, splitCompleteSentences(narration, scriptLanguage).length)
     ? sectionsFromNarration({
       narration,
       targetSeconds: durationBudget.targetSeconds,
@@ -438,7 +480,7 @@ export function applyGenrePack(workspace: ScriptWorkspace, genre: ScriptGenre): 
   const durationBudget = buildDurationBudget({
     ...workspace.durationBudget,
     pace: pack.pace,
-    targetSeconds: isLongForm(workspace.durationBudget.targetSeconds)
+    targetSeconds: usesSectionWorkflow(scriptFormForSeconds(workspace.durationBudget.targetSeconds))
       ? workspace.durationBudget.targetSeconds
       : pack.durationHint,
     usedChars: workspace.durationBudget.usedChars,
@@ -1019,6 +1061,7 @@ export function stageCompleted(workspace: ScriptWorkspace, stage: ScriptWorkspac
     case 'duration':
       return workspace.durationBudget.targetSeconds > 0;
     case 'beats':
+      if (workspace.outline?.sections?.length) return workspace.outline.status === 'confirmed' || workspace.beats.length >= 2;
       return workspace.beats.length >= 2;
     case 'copy':
       return countBudgetUnits(workspace.fullNarration, workspace.scriptLanguage) >= 8;

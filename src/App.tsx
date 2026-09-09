@@ -37,6 +37,8 @@ import {
   utterancesFromClips
 } from './utils/narrationTrack';
 import { assembleAlignedNarration, reassembleNarrationWithHolds } from './utils/narrationAlignClient';
+import { decodeAudioUrl } from './utils/audioConcat';
+import { materializeReusedSegment, planUtteranceTts, ttsReuseSummary } from './utils/ttsReuse';
 import {
   clampSentenceGap,
   narrationFileIncludesHolds,
@@ -345,11 +347,29 @@ export default function App() {
       const utterances = utterancesFromClips(repaired);
       const ttsApi = resolveTtsApi(project.settings.customTtsApi);
       const concurrency = bailianTtsConcurrency(ttsApi);
-      showStatusToast(`正在配音 1/${utterances.length}`, { tone: 'progress', id: 'narration', durationMs: 0 });
+      const jobs = planUtteranceTts(
+        utterances.map((item) => item.text),
+        project.audio.narrationTrack,
+        project.audio.voiceCharacter,
+        project.audio.speechRate
+      );
+      const reuse = ttsReuseSummary(jobs);
+      const fullBuffer = jobs.some((job) => job.slice) && project.audio.narrationTrack?.audioUrl
+        ? await decodeAudioUrl(project.audio.narrationTrack.audioUrl)
+        : null;
+      showStatusToast(
+        reuse.reuse > 0
+          ? `复用 ${reuse.reuse} 句，新合成 ${reuse.fresh} 句`
+          : `正在配音 1/${utterances.length}`,
+        { tone: 'progress', id: 'narration', durationMs: 0 }
+      );
 
       const pool = await runConcurrencyPool(
-        utterances,
-        async (utterance) => {
+        jobs,
+        async (job) => {
+          const reused = job.reuse ? await materializeReusedSegment(job, fullBuffer) : null;
+          if (reused?.audioUrl) return reused;
+          const utterance = utterances[job.index];
           const res = await fetch('/api/audio/tts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -374,6 +394,7 @@ export default function App() {
           concurrency,
           getId: (item, index) => `${index}-${item.text.slice(0, 8)}`,
           onItemStart: (task) => {
+            if (task.item.reuse) return;
             showStatusToast(
               `正在配音 ${task.index + 1}/${utterances.length}：${task.item.text.slice(0, 18)}`,
               { tone: 'progress', id: 'narration', durationMs: 0 }
@@ -1723,6 +1744,16 @@ export default function App() {
           onOpenMusic={() => setActiveTab('music')}
           onSentenceGapChange={handleSentenceGapChange}
           clips={project.clips}
+          measuredSeconds={project.scriptWorkspace?.durationBudget.actualTotalSeconds}
+          targetSeconds={project.scriptWorkspace?.durationBudget.targetSeconds}
+          onOpenScriptCopy={() => {
+            setActiveTab('script');
+            if (project.scriptWorkspace) {
+              updateProject({
+                scriptWorkspace: { ...project.scriptWorkspace, stage: 'copy' }
+              });
+            }
+          }}
         />
       )}
 
