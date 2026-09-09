@@ -800,6 +800,22 @@ export interface ScriptRevisionPlan {
   sectionActions: ScriptRevisionAction[];
 }
 
+/** LLM call cost log (JSONL). Keys are never stored. */
+export interface GenerationRun {
+  id: string;
+  projectId?: string;
+  stage: string;
+  model: string;
+  endpointHost?: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  durationMs: number;
+  status: 'success' | 'failed' | 'mocked';
+  promptHash: string;
+  createdAt: string;
+}
+
 export interface SpeechVisual {
   id: string;
   startRatio: number;

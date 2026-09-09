@@ -1,0 +1,52 @@
+{
+  "cards": [
+    {
+      "id": "topic-1",
+      "title": "模拟选题一",
+      "hook": "大多数人把顺序搞反了。",
+      "insight": "先拆误解再给机制。",
+      "genre": "反常识",
+      "whyNow": "评论区反复问为什么。",
+      "durationHint": 30,
+      "paceHint": "medium",
+      "conceptCount": 1,
+      "risk": "只骂误解会变成抬杠。",
+      "completionFit": "3 秒抛出反差。",
+      "hookType": "misconception",
+      "structure": "myth_busting",
+      "whyThisWorks": "对应调研里的常见误解。"
+    },
+    {
+      "id": "topic-2",
+      "title": "模拟选题二",
+      "hook": "从现在起只做三步。",
+      "insight": "收成可执行步骤。",
+      "genre": "教程",
+      "whyNow": "同类停在概念层。",
+      "durationHint": 30,
+      "paceHint": "fast",
+      "conceptCount": 1,
+      "risk": "步骤太多装不下。",
+      "completionFit": "每步一镜。",
+      "hookType": "outcome",
+      "structure": "tutorial",
+      "whyThisWorks": "步骤向讲解仍是缺口。"
+    },
+    {
+      "id": "topic-3",
+      "title": "模拟选题三",
+      "hook": "真正决定结果的是中间 3 秒。",
+      "insight": "用一个瞬间当容器。",
+      "genre": "故事",
+      "whyNow": "对标片多在讲结论。",
+      "durationHint": 45,
+      "paceHint": "slow",
+      "conceptCount": 1,
+      "risk": "场面太虚。",
+      "completionFit": "金句后敢停。",
+      "hookType": "mystery",
+      "structure": "story",
+      "whyThisWorks": "场面能被镜头看见。"
+    }
+  ]
+}
