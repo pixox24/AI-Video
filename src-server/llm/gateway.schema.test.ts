@@ -16,7 +16,7 @@ test('schema retry feeds errors back, stops after two retries, and permits retry
   // Exercise the provider adapter using an in-memory transport. No network or real model.
   globalThis.fetch = async (_url, init) => {
     prompts.push(String(init?.body));
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(prompts.length === validOnAttempt ? { promise: '结果' } : { promise: '' }) } }] }), { status: 200 });
+    return new Response(JSON.stringify({ usage: { prompt_tokens: 101, completion_tokens: 17, cost: 0.00042 }, choices: [{ message: { content: JSON.stringify(prompts.length === validOnAttempt ? { promise: '结果' } : { promise: '' }) } }] }), { status: 200 });
   };
   process.env.LLM_MOCK = 'false';
   process.env.GENERATION_RUNS_PATH = path.join(dir, 'runs.jsonl');
@@ -25,12 +25,17 @@ test('schema retry feeds errors back, stops after two retries, and permits retry
     clearIdempotencyCache();
     const result = await generateStructured(opts);
     assert.deepEqual(result.data, { promise: '结果' });
+    assert.equal(result.run.inputTokens, 101);
+    assert.equal(result.run.outputTokens, 17);
+    assert.equal(result.run.costUsd, 0.00042);
     assert.equal(prompts.length, 3);
     assert.match(prompts[0], /JSON Schema/);
     assert.match(prompts[1], /Correct these errors/);
     const runs = fs.readFileSync(process.env.GENERATION_RUNS_PATH, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { status: string; promptHash: string });
     assert.deepEqual(runs.map(run => run.status), ['failed', 'failed', 'success']);
     assert.notEqual(runs[0].promptHash, runs[1].promptHash);
+    const billing = fs.readFileSync(process.env.GENERATION_RUNS_PATH, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(billing.every(row => row.inputTokens === 101 && row.outputTokens === 17 && row.costUsd === 0.00042));
     clearIdempotencyCache(); prompts.length = 0; validOnAttempt = 99;
     assert.equal((await generateStructured(opts)).data, null);
     assert.equal(prompts.length, 3);

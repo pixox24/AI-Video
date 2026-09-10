@@ -1,3 +1,4 @@
+import { readUsage, type RunUsage } from "./usage";
 import { LLM_JSON_MAX_TOKENS } from "../../src/utils/scriptDuration";
 import { z } from 'zod';
 import type { GenerationRun } from "../../src/types";
@@ -35,7 +36,7 @@ async function callModelJson(opts: {
   timeoutMs?: number;
   maxTokens?: number;
   json?: boolean;
-}): Promise<{ data: unknown; text?: string; reason?: string; model: string; host?: string }> {
+}): Promise<{ data: unknown; text?: string; reason?: string; model: string; host?: string; usage?: RunUsage }> {
   const failures: string[] = [];
   const client = asClientLlmApi(opts.clientLlmApi);
   const customConfigured = isUsableLlmApi(opts.clientLlmApi);
@@ -55,10 +56,11 @@ async function callModelJson(opts: {
       maxTokens: opts.maxTokens || LLM_JSON_MAX_TOKENS
     });
     const host = endpointHost(client.endpoint);
+    const usage = readUsage(llmResult.usage, String(client.endpoint), model);
     if (llmResult.ok && llmResult.text) {
-      if (!json) return { data: llmResult.text, text: llmResult.text, model, host };
+      if (!json) return { data: llmResult.text, text: llmResult.text, model, host, usage };
       const data = cleanAndParseJSON(llmResult.text);
-      if (data) return { data, text: llmResult.text, model, host };
+      if (data) return { data, text: llmResult.text, model, host, usage };
       failures.push("自定义 LLM 返回的内容不是有效 JSON");
     } else {
       const reason = compactLlmFailureReason(llmResult.error);
@@ -69,7 +71,7 @@ async function callModelJson(opts: {
       data: null,
       reason: failures.join("；") || "自定义 LLM 没有返回可用 JSON",
       model,
-      host
+      host, usage
     };
   }
   const ai = getGeminiClient();
@@ -86,10 +88,11 @@ async function callModelJson(opts: {
         }
       }), opts.timeoutMs || 60000);
       const text = response.text;
-      if (!json) return { data: text, text, model: BUILTIN_GEMINI_MODEL };
+      const usage = readUsage(response.usageMetadata, "https://generativelanguage.googleapis.com", BUILTIN_GEMINI_MODEL);
+      if (!json) return { data: text, text, model: BUILTIN_GEMINI_MODEL, usage };
       const data = cleanAndParseJSON(text);
-      if (data) return { data, text, model: BUILTIN_GEMINI_MODEL };
-      failures.push("内置 Gemini 返回的内容不是有效 JSON");
+      if (data) return { data, text, model: BUILTIN_GEMINI_MODEL, usage };
+      return { data: null, reason: "内置 Gemini 返回的内容不是有效 JSON", model: BUILTIN_GEMINI_MODEL, usage };
     } catch (err: unknown) {
       const reason = compactLlmFailureReason(errorMessage(err));
       console.warn("[Script LLM] gemini failed:", reason);
@@ -161,7 +164,7 @@ export async function generateStructured<T = unknown>(
     called.reason = `Schema validation failed: ${parsed.error.message}`;
     if (attempt >= 2) break;
     finishRun({ id: createRunId(), projectId: opts.projectId, stage: opts.stage, model: called.model,
-      endpointHost: called.host, inputTokens: 0, outputTokens: 0, costUsd: 0,
+      endpointHost: called.host, ...(called.usage ?? readUsage(null, "", called.model)),
       durationMs: Date.now() - started, status: 'failed', promptHash: promptHash(system, user) });
     user = `${opts.user}\nPrevious output failed validation. Correct these errors: ${parsed.error.message}`;
   }
@@ -172,9 +175,7 @@ export async function generateStructured<T = unknown>(
     stage: opts.stage,
     model: called.model,
     endpointHost: called.host,
-    inputTokens: 0,
-    outputTokens: 0,
-    costUsd: 0,
+    ...(called.usage ?? readUsage(null, "", called.model)),
     durationMs: Date.now() - started,
     status: ok ? "success" : "failed",
     promptHash: promptHash(system, user)
@@ -276,9 +277,7 @@ export async function generateGeminiJson(opts: GeminiSchemaJsonInput): Promise<G
       projectId: opts.projectId,
       stage: opts.stage,
       model: models[0],
-      inputTokens: 0,
-      outputTokens: 0,
-      costUsd: 0,
+      ...readUsage(null, "", models[0]),
       durationMs: Date.now() - started,
       status: "failed",
       promptHash: promptHash(opts.system, opts.user)
@@ -302,21 +301,13 @@ export async function generateGeminiJson(opts: GeminiSchemaJsonInput): Promise<G
       }), opts.timeoutMs || 60000);
       const text = response.text;
       const data = cleanAndParseJSON(text);
-      if (data) {
-        const run = finishRun({
-          id: createRunId(),
-          projectId: opts.projectId,
-          stage: opts.stage,
-          model: modelName,
-          inputTokens: 0,
-          outputTokens: 0,
-          costUsd: 0,
-          durationMs: Date.now() - started,
-          status: "success",
-          promptHash: promptHash(opts.system, opts.user)
-        });
-        return { data, run, text };
-      }
+      const run = finishRun({
+        id: createRunId(), projectId: opts.projectId, stage: opts.stage, model: modelName,
+        ...readUsage(response.usageMetadata, "https://generativelanguage.googleapis.com", modelName),
+        durationMs: Date.now() - started, status: data ? "success" : "failed",
+        promptHash: promptHash(opts.system, opts.user)
+      });
+      if (data) return { data, run, text };
       failures.push(`${modelName}: 内置 Gemini 返回的内容不是有效 JSON`);
     } catch (err: unknown) {
       lastError = compactLlmFailureReason(errorMessage(err));
@@ -330,9 +321,7 @@ export async function generateGeminiJson(opts: GeminiSchemaJsonInput): Promise<G
     projectId: opts.projectId,
     stage: opts.stage,
     model: models[0],
-    inputTokens: 0,
-    outputTokens: 0,
-    costUsd: 0,
+    ...readUsage(null, "", models[0]),
     durationMs: Date.now() - started,
     status: "failed",
     promptHash: promptHash(opts.system, opts.user)

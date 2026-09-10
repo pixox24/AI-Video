@@ -38,6 +38,7 @@ export type ClientLlmApi = {
 };
 
 export type ChatCallResult = {
+  usage?: unknown;
   ok: boolean;
   text?: string;
   model?: string;

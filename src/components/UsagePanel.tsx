@@ -41,14 +41,14 @@ export function UsagePanel({ projectId }: { projectId: string }) {
     let durationMs = 0;
     for (const run of runs) {
       const item = stages.get(run.stage) || { count: 0, tokens: 0, costUsd: 0, durationMs: 0 };
-      const runTokens = run.inputTokens + run.outputTokens;
+      const runTokens = (run.inputTokens ?? 0) + (run.outputTokens ?? 0);
       item.count += 1;
       item.tokens += runTokens;
-      item.costUsd += run.costUsd;
+      item.costUsd += run.costUsd ?? 0;
       item.durationMs += run.durationMs;
       stages.set(run.stage, item);
       tokens += runTokens;
-      costUsd += run.costUsd;
+      costUsd += run.costUsd ?? 0;
       durationMs += run.durationMs;
     }
     return { stages: [...stages.entries()].sort(([left], [right]) => left.localeCompare(right)), tokens, costUsd, durationMs };
@@ -70,6 +70,7 @@ export function UsagePanel({ projectId }: { projectId: string }) {
           {loading ? '读取中…' : '刷新'}
         </button>
       </div>
+      {runs.some(run => run.costUsd == null || run.inputTokens == null || run.outputTokens == null) ? <p className="text-[10px] text-amber-300">部分调用缺少用量或价格；以下仅汇总已知值。</p> : null}
       {error ? <p role="alert" className="text-[10px] text-rose-300">{error}</p> : null}
       {!error && summary.stages.length === 0 ? <p className="text-[10px] text-zinc-500">尚无当前项目的生成调用。</p> : null}
       {summary.stages.length > 0 ? <>

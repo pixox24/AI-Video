@@ -133,7 +133,7 @@ export async function callOpenAiCompatibleChat(opts: {
 
         const text = extractOpenAiChatText(data);
         if (text) {
-          return { ok: true, text, model, error: undefined, status: undefined };
+          return { ok: true, text, model, error: undefined, status: undefined, usage: toLoose(data).usage };
         }
         lastError = "模型未返回有效文本";
         if (useJson) {

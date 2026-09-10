@@ -812,9 +812,10 @@ export interface GenerationRun {
   stage: string;
   model: string;
   endpointHost?: string;
-  inputTokens: number;
-  outputTokens: number;
-  costUsd: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  costSource?: string;
   durationMs: number;
   status: 'success' | 'failed' | 'mocked';
   promptHash: string;
