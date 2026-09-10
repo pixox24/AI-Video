@@ -28,7 +28,7 @@ README.md、AGENTS.md、ERRATA.md、package.json；src-server/llm 下 gateway.ts
 
 ## 后续复验步骤
 
-1. 注入供应商凭据，以 LLM_MOCK=false 启动；应用不自动加载 .env。核实最低成本可用模型与该接口实际报价，配置价格来源。
+1. 注入供应商凭据，以 LLM_MOCK=false 启动；入口会加载仓库根目录 .env。核实最低成本可用模型与该接口实际报价，配置价格来源。
 2. 在新验收工程中选择小体量主题，生成 brief、大纲并确认，再生成章节。检查质量，定向修复未锁定段。
 3. 用现有 TTS 合成全部新口播，检查实测秒数；现有分镜/导出面板导出 MP4，检查音视频时长及可播放性。
 4. 按项目 ID 导出真实 GenerationRun JSONL；对照供应商 usage 和费用来源，报告逐行展示本次真实记录及总额。

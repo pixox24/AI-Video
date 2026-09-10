@@ -16,7 +16,7 @@ npm run build
 
 ## 真实模式
 
-在设置页配置现有 LLM / TTS 供应商，以 LLM_MOCK=false 启动。真实调用有费用；小体量验收只运行一个项目。自定义 LLM 通过客户端 llmApi 透传；内置 Gemini 读取 GEMINI_API_KEY。环境变量需由启动环境注入，应用不自动加载 .env。
+在设置页配置现有 LLM / TTS 供应商，以 LLM_MOCK=false 启动。真实调用有费用；小体量验收只运行一个项目。自定义 LLM 通过客户端 llmApi 透传；内置 Gemini 读取 GEMINI_API_KEY。入口通过 dotenv 加载仓库根目录 .env，也可由启动环境注入变量。
 
 先填写观众承诺和时长，再生成并确认大纲，然后生成未完成章节。质量检查只修复有问题的未锁定段，每次闭环最多两轮。TTS 后查看估算与实测差异，进入分镜工作台完成素材及导出检查，用现有导出面板生成 MP4。浏览器必须支持 WebCodecs。
 
