@@ -15,6 +15,7 @@ import { registerUsageRoutes } from "./routes/usage";
 import { registerBriefRoutes } from './routes/brief';
 import { validateContentInput } from './routes/content-input';
 import { registerQualityRoutes } from './routes/quality';
+import { registerCalibrationRoutes } from './routes/calibration';
 
 export function createExpressApp(): express.Express {
   ensureAppDirs();
@@ -24,6 +25,7 @@ export function createExpressApp(): express.Express {
   registerHealthRoutes(app);
   registerBriefRoutes(app);
   registerQualityRoutes(app);
+  registerCalibrationRoutes(app);
   app.post(['/api/script/outline', '/api/script/draft'], validateContentInput);
   registerScriptRoutes(app);
   registerStyleRoutes(app);

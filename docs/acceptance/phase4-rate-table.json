@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "buckets": {
+    "[\"edge\",\"magnetic-male\",\"medium\"]": {
+      "samples": [
+        {
+          "id": "42af4a37779010f5d86058ec72c3217bdbeefb57215f382f8d236a45fddd69e3",
+          "scale": 0.5,
+          "estimates": [
+            10,
+            10
+          ]
+        },
+        {
+          "id": "9fa1aa60bb3870fcf0571687bcc9b4df40b28fab64239481ba2f37bd39c7bff3",
+          "scale": 0.5,
+          "estimates": [
+            20,
+            20
+          ]
+        }
+      ],
+      "seen": {
+        "42af4a37779010f5d86058ec72c3217bdbeefb57215f382f8d236a45fddd69e3": [
+          10,
+          10
+        ],
+        "9fa1aa60bb3870fcf0571687bcc9b4df40b28fab64239481ba2f37bd39c7bff3": [
+          20,
+          20
+        ]
+      }
+    }
+  }
+}

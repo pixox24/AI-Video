@@ -1,0 +1,41 @@
+{
+  "speechRate": 1,
+  "voice": "magnetic-male",
+  "provider": "edge",
+  "track": {
+    "alignment": {
+      "utterances": [
+        {
+          "audioStart": 0,
+          "text": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校",
+          "source": "per-utterance",
+          "audioEnd": 20
+        },
+        {
+          "audioStart": 25,
+          "text": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准",
+          "source": "per-utterance",
+          "audioEnd": 45
+        }
+      ],
+      "version": 2,
+      "source": "per-utterance"
+    },
+    "sourceHash": "fixture-v1",
+    "duration": 45,
+    "generatedAt": 1
+  },
+  "pace": "medium",
+  "language": "zh",
+  "projectId": "phase4-fixture",
+  "sections": [
+    {
+      "id": "s1",
+      "narration": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校"
+    },
+    {
+      "id": "s2",
+      "narration": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准"
+    }
+  ]
+}

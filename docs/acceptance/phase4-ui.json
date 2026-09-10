@@ -1,0 +1,131 @@
+{
+  "first": {
+    "request": {
+      "projectId": "phase4-acceptance",
+      "provider": "edge",
+      "voice": "magnetic-male",
+      "pace": "medium",
+      "language": "zh",
+      "speechRate": 1,
+      "sections": [
+        {
+          "id": "s1",
+          "narration": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校"
+        },
+        {
+          "id": "s2",
+          "narration": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准"
+        }
+      ],
+      "track": {
+        "sourceHash": "1026093671",
+        "generatedAt": 1789032878680,
+        "duration": 41.4,
+        "alignment": {
+          "version": 2,
+          "source": "per-utterance",
+          "utterances": [
+            {
+              "text": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校。",
+              "audioStart": 0,
+              "audioEnd": 20,
+              "source": "per-utterance"
+            },
+            {
+              "text": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准。",
+              "audioStart": 20.2,
+              "audioEnd": 40.2,
+              "source": "per-utterance"
+            }
+          ]
+        }
+      }
+    },
+    "result": {
+      "sections": [
+        {
+          "sectionId": "s1",
+          "estimatedSec": 10,
+          "actualSec": 20
+        },
+        {
+          "sectionId": "s2",
+          "estimatedSec": 10,
+          "actualSec": 20.000000000000004
+        }
+      ],
+      "estimatedSec": 20,
+      "actualSec": 40,
+      "rateScale": 1,
+      "sampleCount": 1,
+      "recorded": true
+    },
+    "ui": "估算 20.0s · 实测 40.0s · 校准样本 1\n\n章节 1：估算 10.0s · 实测 20.0s\n\n章节 2：估算 10.0s · 实测 20.0s\n\n实测只统计对齐的口播，不含句间停留。合成前的估算保留用于对比，校准用于下一次估算。"
+  },
+  "second": {
+    "request": {
+      "projectId": "phase4-acceptance",
+      "provider": "edge",
+      "voice": "magnetic-male",
+      "pace": "medium",
+      "language": "zh",
+      "speechRate": 1,
+      "sections": [
+        {
+          "id": "s1",
+          "narration": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校"
+        },
+        {
+          "id": "s2",
+          "narration": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准"
+        }
+      ],
+      "track": {
+        "sourceHash": "1026093671",
+        "generatedAt": 1789032916659,
+        "duration": 41.4,
+        "alignment": {
+          "version": 2,
+          "source": "per-utterance",
+          "utterances": [
+            {
+              "text": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校。",
+              "audioStart": 0,
+              "audioEnd": 20,
+              "source": "per-utterance"
+            },
+            {
+              "text": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准。",
+              "audioStart": 20.2,
+              "audioEnd": 40.2,
+              "source": "per-utterance"
+            }
+          ]
+        }
+      }
+    },
+    "result": {
+      "sections": [
+        {
+          "sectionId": "s1",
+          "estimatedSec": 20,
+          "actualSec": 20
+        },
+        {
+          "sectionId": "s2",
+          "estimatedSec": 20,
+          "actualSec": 20.000000000000004
+        }
+      ],
+      "estimatedSec": 40,
+      "actualSec": 40,
+      "rateScale": 0.5,
+      "sampleCount": 2,
+      "recorded": true
+    },
+    "ttsCalls": 0,
+    "ui": "估算 40.0s · 实测 40.0s · 校准样本 2\n\n章节 1：估算 20.0s · 实测 20.0s\n\n章节 2：估算 20.0s · 实测 20.0s\n\n实测只统计对齐的口播，不含句间停留。合成前的估算保留用于对比，校准用于下一次估算。"
+  },
+  "firstAbsoluteError": 20,
+  "secondAbsoluteError": 0
+}

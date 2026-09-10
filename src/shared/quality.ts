@@ -16,6 +16,7 @@ export const beatSchema = z.object({ id: z.string(), order: z.number(), function
   intent: z.string(), narration: z.string(), targetSeconds: z.number(), energy: z.enum(['fast', 'medium', 'slow', 'hold']),
   visualIntent: z.string(), needsHold: z.boolean(), sectionId: z.string().optional() }).strict();
 export const scriptSectionSchema = z.object({ id: z.string().min(1), order: z.number(), role, title: z.string(), outline: z.string().optional(),
+  actualSec: z.number().positive().optional(),
   targetSeconds: z.number().nonnegative(), minUnits: z.number().nonnegative(), maxUnits: z.number().nonnegative(),
   narration: z.string(), beats: z.array(beatSchema), status: sectionStatusSchema.optional(), usedEvidenceIds: z.array(z.string()).optional(),
   audienceQuestion: z.string().optional(), promise: z.string().optional() }).strict();

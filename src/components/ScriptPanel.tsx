@@ -2133,7 +2133,15 @@ function DurationStage({
         <BudgetRing label={`目标口播${unit}数`} used={budget.usedChars} max={length.targetUnits} unit={unit} />
         <BudgetRing label="停留配额" used={Number((workspace.forecastShots.reduce((sum, shot) => sum + shot.holdDuration, 0)).toFixed(1))} max={length.visualHoldTargetSeconds} unit="s" />
         <BudgetRing label="概念" used={budget.conceptUsed || (selected ? selected.conceptCount : 0)} max={budget.conceptMax} unit="个" />
+        {workspace.durationCalibration && <BudgetRing label="口播：估算 vs 实测" used={workspace.durationCalibration.actualSec ?? 0} max={workspace.durationCalibration.estimatedSec} unit="s" />}
       </div>
+      {workspace.durationCalibration && <div aria-label="语速校准对比" className="rounded-xl border border-zinc-700 p-3 text-sm text-zinc-300 space-y-1">
+        <p>估算 {workspace.durationCalibration.estimatedSec.toFixed(1)}s · 实测 {workspace.durationCalibration.actualSec?.toFixed(1) ?? '待合成 / 对齐'}{workspace.durationCalibration.actualSec == null ? '' : 's'} · 校准样本 {workspace.durationCalibration.sampleCount}</p>
+        {workspace.durationCalibration.sections.map(item => <p key={item.sectionId}>
+          {workspace.sections?.find(s => s.id === item.sectionId)?.title || item.sectionId}：估算 {item.estimatedSec.toFixed(1)}s · 实测 {item.actualSec?.toFixed(1) ?? '待合成 / 对齐'}{item.actualSec == null ? '' : 's'}
+        </p>)}
+        <p className="text-xs text-zinc-500">实测只统计对齐的口播，不含句间停留。合成前的估算保留用于对比，校准用于下一次估算。</p>
+      </div>}
 
       <div className="text-[12px] text-zinc-400 flex flex-wrap items-center gap-2 leading-relaxed">
         <Clock className="w-3.5 h-3.5 text-amber-400" />

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useDurationCalibration } from './components/useDurationCalibration';
 import { applyCharacterRefResponse, captureCharacterRefRequest, CharacterRefRequest } from './utils/visualBibleAsync';
 import { VideoProject, ActiveTab, StoryboardClip, ClipsChange, StyleLibraryEntry, ProjectLibraryItem, OutroConfig } from './types';
 import { clampOutro, resolveOutro } from './utils/outro';
@@ -154,6 +155,7 @@ function hydratePersistedProject(raw: VideoProject): VideoProject {
 
 export default function App() {
   const [project, setProject] = useState<VideoProject>(() => hydratePersistedProject(SAMPLE_PROJECTS[0]));
+  useDurationCalibration(project, setProject);
 
   const [libraryItems, setLibraryItems] = useState<ProjectLibraryItem[]>([]);
 

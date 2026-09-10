@@ -727,6 +727,7 @@ export interface ScriptBeat {
 }
 
 export interface ScriptSection {
+  actualSec?: number;
   id: string;
   order: number;
   role: ScriptSectionRole;
@@ -890,6 +891,7 @@ export interface ResearchNotes {
 }
 
 export interface ScriptWorkspace {
+  durationCalibration?: import('./shared/calibration').CalibrationResult;
   qualityReport?: QualityReport;
   qualityInputKey?: string;
   claims?: Claim[];

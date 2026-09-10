@@ -11,8 +11,12 @@ export function durationSpecForPreset(preset: DurationPreset, pace: ScriptPace =
 export function durationSpecForm(spec: DurationSpec): ScriptForm {
   return spec.preset === 'insight' || (spec.preset === 'deep_dive' && spec.targetSeconds <= 600) ? 'long' : 'extended';
 }
-export function estimateNarrationSeconds(text: string, language: ScriptLanguage, pace: ScriptPace): number {
-  return countBudgetUnits(text, language) / paceUnitsPerSecond(pace, language);
+export function estimateNarrationSeconds(text: string, language: ScriptLanguage, pace: ScriptPace, rateScale = 1, speechRate = 1): number {
+  return countBudgetUnits(text, language) / (paceUnitsPerSecond(pace, language) * rateScale * speechRate);
+}
+/** Sum only observed utterance spans; silence between utterances is not speech. */
+export function measuredSpeechSeconds(spans: { audioStart: number; audioEnd: number }[]): number {
+  return spans.reduce((sum, span) => sum + span.audioEnd - span.audioStart, 0);
 }
 export function assessSectionDuration(sectionId: string, text: string, minUnits: number, maxUnits: number, language: ScriptLanguage, pace: ScriptPace) {
   const estimatedSec = estimateNarrationSeconds(text, language, pace);
