@@ -225,24 +225,21 @@ export function validateSectionAgainstOutline(
   outlineSection: ScriptOutlineSection | undefined,
   brief?: ScriptBrief,
   language?: ScriptLanguage
-): OutlineValidation {
-  const warnings: string[] = [];
-  if (!outlineSection) return { ok: false, warnings: [`找不到章节 ${section.id} 的提纲`] };
-  if (section.id !== outlineSection.id) warnings.push('章节 ID 与提纲不一致');
-  const lang = normalizeScriptLanguage(language);
-  const used = countBudgetUnits(section.narration, lang);
-  if (used < outlineSection.minUnits || used > outlineSection.maxUnits) {
-    warnings.push(`第 ${outlineSection.order} 章「${outlineSection.title}」口播为 ${used} ${lang === 'en' ? '词' : '字'}，应为 ${outlineSection.minUnits}–${outlineSection.maxUnits}`);
+): OutlineValidation & { errors: string[] } {
+  if (!outlineSection) {
+    const errors = [`找不到章节 ${section.id} 的提纲`];
+    return { ok: false, errors, warnings: errors };
   }
-  const coverage = validateScriptSections([section], lang);
-  warnings.push(...coverage.warnings);
+  const coverage = validateScriptSections([{ ...section, minUnits: outlineSection.minUnits, maxUnits: outlineSection.maxUnits }], language);
+  const errors = [...coverage.errors];
+  if (section.id !== outlineSection.id) errors.push('章节 ID 与提纲不一致');
   const allowed = new Set(outlineSection.evidenceIds);
   const briefIds = new Set((brief?.evidence || []).map((item) => item.id));
   (section.usedEvidenceIds || []).forEach((id) => {
-    if (allowed.size > 0 && !allowed.has(id)) warnings.push(`章节使用了提纲未列出的证据 ${id}`);
-    if (briefIds.size > 0 && !briefIds.has(id)) warnings.push(`章节使用了不存在的证据 ${id}`);
+    if (!allowed.has(id)) errors.push(`章节使用了提纲未列出的证据 ${id}`);
+    if (!briefIds.has(id)) errors.push(`章节使用了不存在的证据 ${id}`);
   });
-  return { ok: warnings.length === 0, warnings };
+  return { ok: errors.length === 0, errors, warnings: [...new Set([...errors, ...coverage.warnings])] };
 }
 
 function normalizeSnippet(text: string, language?: ScriptLanguage): string {
@@ -278,7 +275,7 @@ export function validateScriptProgression(
     if (hits > 2) warnings.push('核心结论在正文中重复过多');
   }
   const coverage = validateScriptSections(sections, lang);
-  warnings.push(...coverage.warnings);
+  warnings.push(...coverage.errors);
   const full = joinSectionNarrations(sections, lang);
   const beats = flattenSectionBeats(sections);
   if (beats.length > 0 && full && !splitCoversSource(beats.map((beat) => beat.narration), full)) {

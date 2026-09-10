@@ -11,3 +11,5 @@
 | E005 | SPEC-v2 §10 Phase 0 schema | Phase 0 完成 Zod 校验重试 | Phase 0 保留宽松 coerce；从 Phase 1 的新增/增强阶段开始启用严格 schema；本轮 Brief 校验与 gateway 最多两次校验重试已实现，旧调用未提供 schema 时保持原行为 | Phase 1 / 用户恢复指令 |
 | E006 | 流程备忘 | 全局 strict 可在 Phase 1 顺手开启 | Q10 未批准全局 strict；虽无新增 any/ts-nocheck 且测试全绿，超出批准范围的改动必须先提问再实施 | Phase 2 / 用户追认 |
 | E007 | Phase 6 验收补充 | 真实模式只需跑通链路 | 真实模式跑通时 GenerationRun 的 token/cost 必须为非占位真实值；Phase 6 已接通 usage 与有来源计费，缺失值为 null；真实流程验收仍待供应商配置，E007 尚未关闭 | Phase 2 / 用户追认 |
+
+| E008 | SPEC-v2 §7.2–7.3 / Phase 3 原字数门槛 | 单章必须达到 minUnits–maxUnits，偏差触发高优先级修复 | 用户已确认改为内容优先：单章与全文篇幅偏差仅提示，结构有效的草稿保存；质量检查结合章节承诺和全文口播预算，仅修复具体内容问题。单章与整篇共用重试实现，最多两次重试且校验最后一份回复 | 2026-09-10 / 用户确认四项改造 |

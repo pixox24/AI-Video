@@ -1,6 +1,6 @@
 import { DraftSource, ScriptBeat, ScriptLanguage, ScriptSection } from '../types';
 import { countBudgetUnits, normalizeScriptLanguage } from './scriptLanguage';
-import { FILL_RATIO_MAX, FILL_RATIO_MIN, fillRatio, isLongForm, scriptFormForSeconds } from './scriptDuration';
+import { FILL_RATIO_MIN, fillRatio, isLongForm } from './scriptDuration';
 import { flattenSectionBeats, joinSectionNarrations } from './scriptSections';
 import { splitCoversSource, splitPastedNarration } from './scriptSplit';
 
@@ -175,6 +175,7 @@ export function describeDraftPayloadGap(raw: unknown): string {
 }
 
 export interface SectionValidation {
+  errors: string[];
   ok: boolean;
   warnings: string[];
 }
@@ -183,9 +184,10 @@ export function validateScriptSections(
   sections: ScriptSection[] | undefined,
   scriptLanguage?: ScriptLanguage
 ): SectionValidation {
-  if (!Array.isArray(sections) || sections.length === 0) return { ok: true, warnings: [] };
+  if (!Array.isArray(sections) || sections.length === 0) return { ok: true, warnings: [], errors: [] };
   const language = normalizeScriptLanguage(scriptLanguage);
   const warnings: string[] = [];
+  const errors: string[] = [];
   sections.forEach((section, index) => {
     const label = `第 ${section.order || index + 1} 章「${section.title || section.id || '未命名'}」`;
     const narration = String(section.narration || '').trim();
@@ -195,26 +197,26 @@ export function validateScriptSections(
     const min = Number.isFinite(declaredMin) && declaredMin > 0 ? Math.round(declaredMin) : 0;
     const max = Number.isFinite(declaredMax) && declaredMax > 0 ? Math.max(min, Math.round(declaredMax)) : Number.POSITIVE_INFINITY;
     if (!narration) {
-      warnings.push(`${label}没有口播`);
+      errors.push(`${label}没有口播`);
     } else if (used < min || used > max) {
-      warnings.push(`${label}口播为 ${used} ${language === 'en' ? '词' : '字'}，应为 ${min}–${max}`);
+      warnings.push(`${label}口播为 ${used} ${language === 'en' ? '词' : '字'}，参考预算 ${min}–${max}；草稿保留，全文完成后统一评估。`);
     }
     const beats = Array.isArray(section.beats)
       ? section.beats.filter((beat) => String(beat?.narration || '').trim())
       : [];
     if (beats.length === 0) {
-      warnings.push(`${label}没有有效节拍`);
+      errors.push(`${label}没有有效节拍`);
     } else if (beats.length > 4) {
-      warnings.push(`${label}有 ${beats.length} 个节拍，单章最多 4 个`);
+      errors.push(`${label}有 ${beats.length} 个节拍，单章最多 4 个`);
     } else if (narration && !splitCoversSource(beats.map((beat) => String(beat.narration || '')), narration)) {
-      warnings.push(`${label}的节拍口播没有完整覆盖章节口播`);
+      errors.push(`${label}的节拍口播没有完整覆盖章节口播`);
     }
     const allowed = SECTION_BEAT_FNS[section.role];
     if (allowed && beats.some((beat) => !allowed.has(String(beat.function || '')))) {
-      warnings.push(`${label}包含不符合章节角色的节拍类型`);
+      errors.push(`${label}包含不符合章节角色的节拍类型`);
     }
   });
-  return { ok: warnings.length === 0, warnings };
+  return { ok: errors.length === 0, errors, warnings: [...errors, ...warnings] };
 }
 
 export function validateDraftResult(input: {
@@ -244,7 +246,7 @@ export function validateDraftResult(input: {
   if (!narration) warnings.push('没有口播正文');
   if (beats.length < 2) warnings.push('节拍少于 2 个');
   if (fill > 1.05) warnings.push(`口播超出预算 ${Math.round((fill - 1) * 100)}%`);
-  if (fill > 0 && fill < FILL_RATIO_MIN) warnings.push(`口播只填了预算的 ${Math.round(fill * 100)}%，目标是 90%–105%`);
+  if (fill > 0 && fill < FILL_RATIO_MIN) warnings.push(`口播约为参考预算的 ${Math.round(fill * 100)}%；草稿保留，全文完成后检查内容完整性与目标时长`);
   if (hasSections && input.fullNarration && !splitCoversSource([input.fullNarration], fromSections)) {
     warnings.push('fullNarration 与章节口播不一致');
   }
@@ -255,15 +257,9 @@ export function validateDraftResult(input: {
   if (longForm && !hasSections && beats.length > 0 && beats.length <= 8 && input.targetSeconds >= 120) {
     warnings.push('长视频仍只有短视频节拍数量，请按章节展开');
   }
-  // Short one-shot (≤60s) keeps the draft and warns; 7% over is a length hint, not a failed write.
-  // Medium/long still reject outside 90%–105% because those are target-driven chapter contracts.
-  const strictFill = input.source !== 'fallback'
-    && input.durationMode !== 'content-driven'
-    && scriptFormForSeconds(input.targetSeconds) !== 'short';
-  const fillOutOfContract = strictFill && (fill < FILL_RATIO_MIN || fill > FILL_RATIO_MAX);
+  // ponytail: length stays advisory; quality review decides whether content needs revision.
   const reject = !narration
     || beats.length < 2
-    || fillOutOfContract
     || (input.source !== 'fallback' && sectionValidation.ok === false)
     || (input.source !== 'fallback' && beats.length > 0 && !splitCoversSource(beats.map((beat) => beat.narration), narration))
     || (input.source !== 'fallback' && hasSections && Boolean(input.fullNarration) && !splitCoversSource([input.fullNarration!], fromSections));

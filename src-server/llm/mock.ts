@@ -21,11 +21,11 @@ function readFixtureFile(stage: string): unknown {
 }
 
 function parseUnitRange(user: string): { min: number; max: number; language: "zh" | "en" } | null {
-  const en = user.match(/word count must be between (\d+) and (\d+)/i);
+  const en = user.match(/(?:word count must be between|Reference length:) (\d+)(?: and |[–-])(\d+)/i);
   if (en) {
     return { min: Number(en[1]), max: Number(en[2]), language: "en" };
   }
-  const zh = user.match(/汉字数必须在 (\d+)[–-](\d+)/);
+  const zh = user.match(/(?:汉字数必须在 |参考篇幅：)(\d+)[–-](\d+)/);
   if (zh) {
     return { min: Number(zh[1]), max: Number(zh[2]), language: "zh" };
   }

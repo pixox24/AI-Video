@@ -49,7 +49,11 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
     {report && stale && <p className="text-amber-300">内容已变化，请重新检查后再修复。</p>}
     {message && <p role="status">{message}</p>}
     {report && <>
-      <p>口播预算判定：{report.verdict} · {report.issues.length} 个问题</p>
+      <p>全文口播预算：{report.projectDuration?.complete === false ? '章节尚未写完，暂不作全文判定' : report.verdict} · {report.issues.length} 个内容 / 全文预算问题</p>
+      {report.projectDuration && <p className="text-sm text-zinc-400">当前预计口播 {report.projectDuration.estimatedSec.toFixed(1)} 秒 · 全文参考 {report.projectDuration.minSec.toFixed(1)}–{report.projectDuration.maxSec.toFixed(1)} 秒</p>}
+      {report.durations.filter(d => d.verdict !== 'in_range').map(d => <p key={d.sectionId} className="text-sm text-zinc-400">
+        {workspace.sections?.find(s => s.id === d.sectionId)?.title || d.sectionId}：预计 {d.estimatedSec.toFixed(1)} 秒，章节参考 {d.minSec.toFixed(1)}–{d.maxSec.toFixed(1)} 秒。仅作篇幅提示，不要求凑字或自动重写。
+      </p>)}
       {(['high', 'medium', 'low'] as const).map(severity => <div key={severity} className="space-y-2">
         {report.issues.filter(i => i.severity === severity).map((issue, index) => <div key={`${severity}-${index}`} className="border-l-2 border-amber-500 pl-3 text-sm">
           <p>{severity === 'high' ? '高' : severity === 'medium' ? '中' : '低'} · {issue.kind} · {issue.message}</p>

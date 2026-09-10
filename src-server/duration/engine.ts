@@ -26,6 +26,18 @@ export function assessSectionDuration(sectionId: string, text: string, minUnits:
   const verdict: 'too_short' | 'in_range' | 'too_long' = estimatedSec < minSec ? 'too_short' : estimatedSec > maxSec ? 'too_long' : 'in_range';
   return { sectionId, estimatedSec, minSec, maxSec, verdict };
 }
+export function assessProjectDuration(
+  sections: { id: string; narration: string }[], outline: { sections: Pick<ScriptOutlineSection, 'id' | 'minUnits' | 'maxUnits'>[] },
+  language: ScriptLanguage, pace: ScriptPace, spec?: DurationSpec
+) {
+  const complete = outline.sections.every(plan => sections.some(s => s.id === plan.id && s.narration.trim()));
+  const rate = paceUnitsPerSecond(pace, language);
+  const estimatedSec = sections.reduce((sum, s) => sum + countBudgetUnits(s.narration, language), 0) / rate;
+  const minSec = spec ? spec.minSeconds * spec.narrationRatio : outline.sections.reduce((sum, s) => sum + s.minUnits, 0) / rate;
+  const maxSec = spec ? spec.maxSeconds * spec.narrationRatio : outline.sections.reduce((sum, s) => sum + s.maxUnits, 0) / rate;
+  const verdict: 'too_short' | 'in_range' | 'too_long' = estimatedSec < minSec ? 'too_short' : estimatedSec > maxSec ? 'too_long' : 'in_range';
+  return { estimatedSec, minSec, maxSec, verdict, complete };
+}
 export function budgetOutlineSections(sections: ScriptOutlineSection[], targetSeconds: number, narrationRatio = 0.85): ScriptOutlineSection[] {
   const narration = targetSeconds * narrationRatio; const hold = targetSeconds - narration;
   const weights = sections.map(s => Math.max(1, s.targetSeconds)); const total = weights.reduce((a, b) => a + b, 0);

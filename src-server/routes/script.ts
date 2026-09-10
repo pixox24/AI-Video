@@ -35,7 +35,6 @@ import {
   outlineFromPlans,
   stampOutlineBudgets,
   validateOutline,
-  validateSectionAgainstOutline,
   validateScriptProgression
 } from "../../src/utils/scriptOutline";
 import {
@@ -46,7 +45,7 @@ import {
   sectionDraftUserPrompt,
   sectionReviseUserPrompt
 } from "../../src/utils/scriptPrompts";
-import { draftGate, runSectionedDraft } from "../../src/utils/scriptDraftEngine";
+import { draftGate, draftOneSection, runSectionedDraft } from "../../src/utils/scriptDraftEngine";
 import { fitTextChunksToCount, splitCoversSource, splitPastedNarration } from "../../src/utils/scriptSplit";
 import { coerceLlmDraftPayload, describeDraftPayloadGap, normalizeDraftBeats, validateDraftResult } from "../../src/utils/scriptDraft";
 import { splitCompleteSentences } from "../../src/utils/speechSpans";
@@ -843,72 +842,29 @@ app.post("/api/script/section-draft", async (req, res) => {
       styleContract,
       unitName
     });
-    let parsed = await runScriptLlmJson({
-      llmApi: body.llmApi,
-      stage: "script_section",
-      role: "drafter",
-      system: SECTION_DRAFT_SYSTEM,
-      user,
-      temperature: 0.7,
-      timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
-      maxTokens: LLM_LONGFORM_MAX_TOKENS,
-      projectId: body.projectId
+    const result = await draftOneSection({
+      ask: (prompt, maxTokens, system) => runScriptLlmJson({
+        llmApi: body.llmApi, stage: "script_section", role: "drafter", system, user: prompt,
+        temperature: 0.5, timeoutMs: llmTimeoutMsForSeconds(targetSeconds), maxTokens, projectId: body.projectId
+      }),
+      prompt: user, system: SECTION_DRAFT_SYSTEM,
+      section: {
+        ...emptySectionFromPlan(plans[planned.order - 1] || plans[0]),
+        id: planned.id, order: planned.order, role: planned.role, title: planned.title,
+        minUnits: planned.minUnits, maxUnits: planned.maxUnits, targetSeconds: planned.targetSeconds,
+        promise: planned.promise, audienceQuestion: planned.audienceQuestion
+      },
+      planned, brief, language, maxTokens: LLM_LONGFORM_MAX_TOKENS
     });
-    let warnings: string[] = [];
-    let section = emptySectionFromPlan(plans[planned.order - 1] || plans[0]);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const narration = String(parsed?.narration || "").trim();
-      const beats = Array.isArray(parsed?.beats) ? parsed.beats.map((beat: Loose, index: number) => ({
-        id: `${planned.id}-beat-${index + 1}`,
-        order: index + 1,
-        function: beat.function || section.beats[0]?.function || "setup",
-        intent: beat.intent || "",
-        narration: String(beat.narration || "").trim() || (index === 0 ? narration : ""),
-        targetSeconds: Number(beat.targetSeconds) || planned.targetSeconds,
-        energy: beat.energy || "medium",
-        visualIntent: beat.visualIntent || "",
-        needsHold: Boolean(beat.needsHold),
-        sectionId: planned.id
-      })) : [{ ...section.beats[0], narration, sectionId: planned.id }];
-      section = {
-        ...section,
-        id: planned.id,
-        order: planned.order,
-        role: planned.role,
-        title: planned.title,
-        minUnits: planned.minUnits,
-        maxUnits: planned.maxUnits,
-        targetSeconds: planned.targetSeconds,
-        narration,
-        beats,
-        usedEvidenceIds: Array.isArray(parsed?.usedEvidenceIds) ? parsed.usedEvidenceIds.map(String) : [],
-        status: "ready",
-        promise: planned.promise,
-        audienceQuestion: planned.audienceQuestion
-      };
-      const check = validateSectionAgainstOutline(section, planned, brief, language);
-      if (check.ok && narration) {
-        const nextSections = mergeSectionIntoWorkspaceSections(existing, section);
-        return res.json({ ok: true, section, sections: nextSections, outline, scriptForm: form });
-      }
-      warnings = check.warnings.length ? check.warnings : ["本章没有口播"];
-      parsed = await runScriptLlmJson({
-        llmApi: body.llmApi,
-        stage: "script_section",
-        role: "drafter",
-        system: SECTION_DRAFT_SYSTEM,
-        user: `${user}\n上次输出未通过校验：${warnings.join("；")}。请重写本章。`,
-        temperature: 0.5,
-        timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
-        maxTokens: LLM_LONGFORM_MAX_TOKENS,
-        projectId: body.projectId
-      });
+    if (!result.failed && result.section) {
+      const sections = mergeSectionIntoWorkspaceSections(existing, result.section);
+      return res.json({ ok: true, section: result.section, sections, outline, scriptForm: form, warnings: result.warnings });
     }
     return res.status(503).json({
       ok: false,
       code: "draft_contract_failed",
       error: "本章未通过校验，其他章节未改动。",
-      warnings,
+      warnings: result.warnings,
       failedSectionId: planned.id,
       sections: existing,
       outline

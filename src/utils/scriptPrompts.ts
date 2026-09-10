@@ -15,14 +15,18 @@ export const SECTION_DRAFT_SYSTEM = `你只写指定章节，不能改题、不�
 不要重复已讲内容。用 bridgeFromPrevious 自然承接，但不要重新复述上一章。
 不要预告下一章的完整答案，只留下能推动观看的必要衔接。
 每个 beat 必须给可拍的 visualIntent；不得使用“很有氛围”“电影感”等抽象占位词。
-只输出 JSON。`;
+只输出 JSON。
+
+【篇幅原则】章节字数是参考预算，优先兑现本章承诺。讲清楚即可，禁止为了凑字重复或编造；篇幅偏差交给全文质量评估。`;
 
 export const SECTION_REVISE_SYSTEM = `你是精确编辑，只改指定章节以修正时长偏差。
 保持章节承诺、事实、术语、角色、前后衔接和已有 beat 顺序。
 压缩时优先删除重复修饰、重复举例和可替代过渡；扩写时优先补具体例子、必要解释、因果链或用户可执行步骤。
 输出完整修订后的该章 JSON，而不是 diff、建议或 Markdown。
 
-【Phase 3 追加】仅按本章的质量问题定向修复，禁止全文重写。扩写只允许证据、案例、推导、演示、反例、可执行步骤；不得伪造来源、数据、人物或案例。压缩不得删除结论成立所必需的论证。无来源高风险事实应删去或明确标为待核实，不得捏造引文。`;
+【Phase 3 追加】仅按本章的质量问题定向修复，禁止全文重写。扩写只允许证据、案例、推导、演示、反例、可执行步骤；不得伪造来源、数据、人物或案例。压缩不得删除结论成立所必需的论证。无来源高风险事实应删去或明确标为待核实，不得捏造引文。
+
+【篇幅原则】按具体内容缺口修订，字数区间与增减量仅供参考。事实修正、概念解释和衔接修复不必强行改变篇幅；资料不足时保留有依据的内容，不编造、不凑字。`;
 
 export function outlineUserPrompt(input: {
   title: string;
@@ -76,15 +80,15 @@ export function sectionDraftUserPrompt(input: {
 }): string {
   const lang = normalizeScriptLanguage(input.language);
   const countRule = lang === 'en'
-    ? `Section narration word count must be between ${input.section.minUnits} and ${input.section.maxUnits}.`
-    : `本章口播汉字数必须在 ${input.section.minUnits}–${input.section.maxUnits} 之间。`;
+    ? `Reference length: ${input.section.minUnits}–${input.section.maxUnits} words. Fulfil the chapter promise first; do not pad or remove necessary reasoning to meet a quota.`
+    : `参考篇幅：${input.section.minUnits}–${input.section.maxUnits} 字。优先讲清本章任务，不为凑字重复，也不为压字删去必要论证。`;
   const evidence = input.brief.evidence
     .filter((item) => input.section.evidenceIds.includes(item.id))
     .map((item) => `${item.id}: ${item.claim}`)
     .join('\n') || '（本章无已确认证据，只能写观点/经验，禁止伪造事实。）';
-  return `按这一章的时长预算写口播，不要写其他章。
+  return `只写这一章，优先兑现章节承诺。
+${countRule}
 硬约束：
-- ${countRule}
 - 节拍口播按顺序拼接后必须逐字覆盖本章正文
 - 只写这一章，兑现 promise，不要重复标题，不要预告下一章完整答案
 - beats 1 到 4 个，function 必须属于本章角色 ${input.section.role}
@@ -118,9 +122,9 @@ export function sectionReviseUserPrompt(input: {
 }): string {
   const lang = normalizeScriptLanguage(input.language);
   return `只修订这一章。
+修订方向：${input.action.action === 'compress' ? '删除重复和冗余' : input.action.action === 'expand' ? '补充确有依据的解释、例子或步骤' : '按下述具体质量问题定向修订，不强制增减字数'}。
+${input.action.targetDeltaUnits > 0 ? `参考增减量约 ${input.action.targetDeltaUnits} ${input.unitName}，不作为通过条件。` : ''}
 硬约束：
-- 本次目标是 ${input.action.action === 'compress' ? '压缩' : input.action.action === 'expand' ? '扩写' : '改过渡'}约 ${input.action.targetDeltaUnits} ${input.unitName}
-- 修订后口播仍须在 ${input.section.minUnits}–${input.section.maxUnits} ${input.unitName}
 - 不能改变本章核心结论，也不得修改其他章节
 - beats.narration 按顺序完整拼接成 narration
 ${input.action.instruction}
@@ -129,7 +133,7 @@ ${input.action.instruction}
 【本章标题】${input.section.title}
 【当前正文】${input.section.narration}
 
-${lang === 'en' ? `Section narration word count must be between ${input.section.minUnits} and ${input.section.maxUnits}.` : `本章口播汉字数必须在 ${input.section.minUnits}–${input.section.maxUnits} 之间。`}
+${lang === 'en' ? `Reference length: ${input.section.minUnits}–${input.section.maxUnits} words. Fulfil the chapter promise first; do not pad or remove necessary reasoning to meet a quota.` : `参考篇幅：${input.section.minUnits}–${input.section.maxUnits} 字。优先讲清本章任务，不为凑字重复，也不为压字删去必要论证。`}
 
 只输出 JSON：{"narration":string,"usedEvidenceIds":string[],"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
 }

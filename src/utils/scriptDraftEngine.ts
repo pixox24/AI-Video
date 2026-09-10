@@ -94,28 +94,22 @@ export async function draftOneSection(input: {
   language?: ScriptLanguage;
   maxTokens: number;
 }): Promise<{ section?: ScriptSection; warnings: string[]; failed: boolean }> {
-  let piece = await input.ask(input.prompt, input.maxTokens, input.system);
-  let candidate: ScriptSection | null = null;
+  if (input.section.status === 'locked' || input.planned.status === 'locked') {
+    return { failed: true, warnings: ['锁定章节不会被自动改写。'] };
+  }
   let warnings: string[] = [];
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    candidate = materializeSectionFromLlm(piece, input.section, input.planned);
+  // Initial attempt plus two retries; every paid response is materialized and checked.
+  for (let attempt = 0; attempt <= 2; attempt += 1) {
+    const prompt = attempt === 0 ? input.prompt : `${input.prompt}\n上次输出未通过结构校验：${warnings.join('；')}。请修正本章，并让 beats.narration 按顺序完整拼接成 narration。`;
+    const piece = await input.ask(prompt, input.maxTokens, input.system);
+    const candidate = materializeSectionFromLlm(piece, input.section, input.planned);
     if (candidate) {
       const check = validateSectionAgainstOutline(candidate, input.planned, input.brief, input.language);
-      if (check.ok) return { section: candidate, warnings: [], failed: false };
-      warnings = check.warnings;
+      if (check.ok) return { section: candidate, warnings: check.warnings, failed: false };
+      warnings = check.errors;
     } else {
       warnings = [`第 ${input.section.order} 章「${input.section.title}」没有口播`];
     }
-    piece = await input.ask(
-      `${input.prompt}\n上次输出未通过校验：${warnings.join('；')}。请重写本章，并让 beats.narration 按顺序完整拼接成 narration。`,
-      input.maxTokens,
-      input.system
-    );
-  }
-  if (candidate) {
-    const check = validateSectionAgainstOutline(candidate, input.planned, input.brief, input.language);
-    if (check.ok) return { section: candidate, warnings: [], failed: false };
-    warnings = check.warnings;
   }
   return { warnings, failed: true };
 }
@@ -137,6 +131,7 @@ export async function runSectionedDraft(input: {
   warnings: string[];
 }> {
   const sections = seedSectionsFromOutline(input.plans, input.outline, input.priorSections);
+  const warnings: string[] = [];
   for (let i = 0; i < sections.length; i++) {
     const section = sections[i];
     if (section.status === 'locked' || String(section.narration || '').trim()) continue;
@@ -162,6 +157,7 @@ export async function runSectionedDraft(input: {
       };
     }
     sections[i] = result.section;
+    warnings.push(...result.warnings);
   }
-  return { ok: true, sections, warnings: [] };
+  return { ok: true, sections, warnings };
 }

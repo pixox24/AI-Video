@@ -10,7 +10,7 @@ import {
   ScriptWorkspace,
   StylePack
 } from '../types';
-import { budgetUnitLabel, normalizeScriptLanguage } from '../utils/scriptLanguage';
+import { budgetUnitLabel, countBudgetUnits, normalizeScriptLanguage } from '../utils/scriptLanguage';
 import { lengthBudgetOf } from '../utils/scriptBudget';
 import { flattenSectionBeats, joinSectionNarrations } from '../utils/scriptSections';
 import {
@@ -36,7 +36,7 @@ function SectionIntro({ title, desc }: { title: string; desc: string }) {
 const STATUS_LABEL: Record<string, string> = {
   planned: '待写',
   drafting: '生成中',
-  ready: '已通过',
+  ready: '草稿已保存',
   locked: '已锁定',
   'needs-revision': '需回修',
   failed: '失败'
@@ -136,7 +136,7 @@ export function ScriptOutlineStage({
     onStatus('提纲已确认。可以生成第 1 章。');
   };
 
-  const draftSection = async (sectionId: string, outlineOverride?: ScriptOutline) => {
+  const draftSection = async (sectionId: string, outlineOverride?: ScriptOutline, priorSections = workspace.sections) => {
     const activeOutline = outlineOverride || outline;
     if (!activeOutline) return false;
     if (requireConfirm && activeOutline.status !== 'confirmed') {
@@ -158,7 +158,7 @@ export function ScriptOutlineStage({
           budget: workspace.durationBudget,
           brief,
           outline: activeOutline,
-          sections: workspace.sections,
+          sections: priorSections,
           llmApi: customLlmApi,
           stylePack,
           scriptLanguage: workspace.scriptLanguage,
@@ -177,8 +177,8 @@ export function ScriptOutlineStage({
           ))
         };
         applySections(sections, nextOutline, true);
-        onStatus(`第 ${data.section.order} 章已生成。`);
-        return true;
+        onStatus(`第 ${data.section.order} 章草稿已保存。${Array.isArray(data.warnings) ? data.warnings.join('；') : ''}`);
+        return { sections, outline: nextOutline };
       } else {
         if (Array.isArray(data?.sections) && data.sections.length) {
           applySections(data.sections, data.outline || activeOutline, true);
@@ -197,9 +197,13 @@ export function ScriptOutlineStage({
   const draftAllUnfinished = async () => {
     if (!outline) return;
     const queue = outline.sections.filter((item) => item.status !== 'ready' && item.status !== 'locked');
+    let currentSections = workspace.sections;
+    let currentOutline = outline;
     for (const item of queue) {
-      const ok = await draftSection(item.id);
-      if (!ok) break;
+      const result = await draftSection(item.id, currentOutline, currentSections);
+      if (!result) break;
+      currentSections = result.sections;
+      currentOutline = result.outline;
     }
   };
 
@@ -386,9 +390,12 @@ export function ScriptOutlineStage({
             <p className="text-[13px] text-zinc-300">全片一句话：{outline.oneSentenceThesis}</p>
           )}
           <p className="text-[11px] text-zinc-500">
-            目标 {length.targetUnits}{unit}（允许 {length.minUnits}–{length.maxUnits}）· 提纲 {outline.status}
+            全文参考 {length.targetUnits}{unit}（范围 {length.minUnits}–{length.maxUnits}）· 提纲 {outline.status}
           </p>
-          {outline.sections.map((section) => (
+          {outline.sections.map((section) => {
+            const draft = workspace.sections?.find(item => item.id === section.id);
+            const used = countBudgetUnits(draft?.narration, workspace.scriptLanguage);
+            return (
             <div key={section.id} className={`rounded-xl border p-3 space-y-2 ${
               workspace.activeSectionId === section.id
                 ? 'border-amber-500/50 bg-amber-500/5'
@@ -400,9 +407,12 @@ export function ScriptOutlineStage({
                   onChange={(e) => outline && patchOutline(updateOutlineSection(outline, section.id, { title: e.target.value }))}
                   className="bg-transparent text-[13px] text-zinc-100 flex-1 outline-none"
                 />
-                <span className="text-[11px] text-zinc-500">{section.role} · {section.targetSeconds}s · {section.minUnits}–{section.maxUnits}{unit}</span>
+                <span className="text-[11px] text-zinc-500">{section.role} · {section.targetSeconds}s · 参考 {section.minUnits}–{section.maxUnits}{unit}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">{STATUS_LABEL[section.status] || section.status}</span>
               </div>
+              {draft?.narration && <p className="text-[11px] text-zinc-400" role="status">
+                草稿 {used}{unit}{used < section.minUnits || used > section.maxUnits ? ' · 偏离参考篇幅，草稿已保留；可继续写作，全文完成后统一评估。' : ''}
+              </p>}
               <input
                 value={section.audienceQuestion}
                 onChange={(e) => outline && patchOutline(updateOutlineSection(outline, section.id, { audienceQuestion: e.target.value }))}
@@ -438,7 +448,8 @@ export function ScriptOutlineStage({
                 <button type="button" onClick={() => outline && patchOutline(removeOutlineSection(outline, section.id, workspace.durationBudget))} className="text-zinc-500 cursor-pointer"><Trash2 className="w-3 h-3" /></button>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <p className="text-sm text-zinc-500">还没有提纲。先点「生成全片提纲」。短视频请回时长页直接写稿。</p>

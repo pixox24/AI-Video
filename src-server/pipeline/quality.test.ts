@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { createExpressApp } from '../app';
 import { qualityInputKey, qualityRequestSchema, qualityResponseSchema, type QualityInput } from '../../src/shared/quality';
 import { groundedClaims, qualityRevisionActions, sectionIsLocked } from './quality';
-import { assessSectionDuration } from '../duration/engine';
+import { assessProjectDuration, assessSectionDuration } from '../duration/engine';
 import { OUTLINE_SYSTEM, SECTION_DRAFT_SYSTEM, SECTION_REVISE_SYSTEM } from '../../src/utils/scriptPrompts';
 
 test('quality input identity ignores field order and secrets but detects content and locks', () => {
@@ -86,14 +86,28 @@ test('HTTP quality loop: deletion → issue → in_range; locked 409; risk; two-
     const input = qualityFixture();
     const before = qualityResponseSchema.parse((await post('/api/script/quality-check', input)).body);
     assert.equal(before.report.verdict, 'in_range');
+    const offset = structuredClone(input);
+    offset.sections[0].narration = '字'.repeat(30); offset.sections[1].narration = '字'.repeat(290);
+    const balanced = qualityResponseSchema.parse((await post('/api/script/quality-check', { ...offset, repair: true })).body);
+    assert.equal(balanced.report.verdict, 'in_range'); assert.equal(balanced.rounds, 0); assert.deepEqual(balanced.sections, offset.sections);
+    const partial = qualityResponseSchema.parse((await post('/api/script/quality-check', { ...input, sections: input.sections.slice(0, 1), repair: true })).body);
+    assert.equal(partial.report.projectDuration?.complete, false); assert.equal(partial.rounds, 0); assert.equal(partial.report.issues.length, 0);
     input.sections[1].narration = input.sections[1].narration.slice(0,144);
     const shortened = qualityResponseSchema.parse((await post('/api/script/quality-check', input)).body);
     assert.equal(shortened.report.verdict, 'too_short');
-    assert.ok(shortened.report.issues.some(i => i.sectionId === 's2' && i.kind === 'duration'));
+    assert.ok(shortened.report.issues.some(i => !i.sectionId && i.kind === 'duration' && i.severity === 'medium'));
+    assert.equal(shortened.report.issues.some(i => i.sectionId === 's2'), false);
+    const advisory = qualityResponseSchema.parse((await post('/api/script/quality-check', { ...input, repair: true })).body);
+    assert.equal(advisory.rounds, 0); assert.deepEqual(advisory.sections, input.sections);
     const actions = qualityRevisionActions(input, { ...shortened.report, issues: [...shortened.report.issues, { sectionId: 's2', kind: 'pacing', severity: 'medium', message: '承接断裂', suggestedFix: '连接上一章' }] });
-    assert.equal(actions.length, 1); assert.match(actions[0].instruction, /duration/); assert.match(actions[0].instruction, /pacing/);
+    assert.equal(actions.length, 1); assert.equal(actions[0].targetDeltaUnits, 0); assert.equal(actions[0].action, 'replace-transition'); assert.match(actions[0].instruction, /pacing/);
+    fs.copyFileSync('tests/fixtures/section_revise.json', path.join(dir, 'section_revise.json'));
+    fs.writeFileSync(path.join(dir, 'quality.json'), JSON.stringify({ issues: [{ sectionId: 's2', severity: 'medium', kind: 'architecture', message: '章节承诺给出可执行步骤，正文未说明第一步', suggestedFix: '补充第一步的操作示例，只使用已知材料' }], claims: [] }));
+    process.env.LLM_FIXTURES_DIR = dir;
     const repaired = qualityResponseSchema.parse((await post('/api/script/quality-check', { ...input, repair: true })).body);
-    assert.equal(repaired.report.verdict, 'in_range'); assert.equal(repaired.rounds, 1);
+    assert.equal(repaired.report.verdict, 'in_range'); assert.equal(repaired.rounds, 2);
+    assert.equal(repaired.stoppedReason, 'round_limit'); // Persistent content issue, not a byte-count loop.
+    if (prior.fixtures === undefined) delete process.env.LLM_FIXTURES_DIR; else process.env.LLM_FIXTURES_DIR = prior.fixtures;
     assert.deepEqual(repaired.sections[0], input.sections[0]); assert.deepEqual(repaired.sections[2], input.sections[2]);
     assert.notEqual(repaired.sections[1].narration, input.sections[1].narration);
     // Both lock representations must block the shared revision execution and the quality action.
@@ -140,4 +154,20 @@ test('HTTP quality loop: deletion → issue → in_range; locked 409; risk; two-
     await new Promise<void>(resolve => server.close(() => resolve()));
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test('全文预算允许章节互补、支持 DurationSpec，部分草稿不能判为全文完成', () => {
+  const input = qualityFixture();
+  input.sections[0].narration = '字'.repeat(30);
+  input.sections[1].narration = '字'.repeat(290);
+  input.sections[2].narration = '字'.repeat(80);
+  const full = assessProjectDuration(input.sections, input.outline, 'zh', 'medium');
+  assert.equal(full.complete, true); assert.equal(full.verdict, 'in_range');
+  assert.equal(assessSectionDuration('s1', input.sections[0].narration, 72, 84, 'zh', 'medium').verdict, 'too_short');
+  assert.equal(assessProjectDuration(input.sections.slice(0, 1), input.outline, 'zh', 'medium').complete, false);
+  const spec = { preset: 'insight' as const, targetSeconds: 100, minSeconds: 90, maxSeconds: 110, narrationRatio: 0.8, pace: 'medium' as const };
+  const timed = assessProjectDuration(input.sections, input.outline, 'zh', 'medium', spec);
+  assert.equal(timed.minSec, 72); assert.equal(timed.maxSec, 88); assert.equal(timed.verdict, 'too_long');
+  assert.equal(assessProjectDuration([{ id: 's', narration: 'one two three four five' }], { sections: [{ id: 's', minUnits: 5, maxUnits: 5 }] }, 'en', 'medium').verdict, 'in_range');
 });

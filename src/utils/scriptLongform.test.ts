@@ -194,7 +194,7 @@ test('长视频进入章节模式，短稿 fallback 不能当成功稿', () => {
   assert.equal(fillStatus(658, 658), 'ok');
 });
 
-test('章节字数和 beat 覆盖不合格时必须拒绝', () => {
+test('章节角色不匹配仍须拒绝，即使字数只是提示', () => {
   const plans = planScriptSections({ targetSeconds: 180, maxChars: 658 });
   const sections = plans.map((plan, index) => ({
     ...plan,
@@ -360,7 +360,7 @@ test('content-driven 低于目标预算不会被当成生成失败', () => {
   assert.equal(result.ok, true);
 });
 
-test('目标驱动稿件超出 105% 也不能通过校验', () => {
+test('目标驱动稿件超出 105% 保留草稿并提示', () => {
   const result = validateDraftResult({
     fullNarration: '字'.repeat(720),
     beats: [
@@ -372,7 +372,8 @@ test('目标驱动稿件超出 105% 也不能通过校验', () => {
     scriptLanguage: 'zh',
     source: 'llm'
   } as any);
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some(warning => warning.includes('超出预算')));
 });
 
 test('60秒短视频超预算7%只警告不整稿丢弃', () => {

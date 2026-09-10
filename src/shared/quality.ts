@@ -53,6 +53,7 @@ export function qualityInputKey(input: unknown): string {
 }
 export const durationAssessmentSchema = z.object({ sectionId: z.string(), estimatedSec: z.number(), minSec: z.number(), maxSec: z.number(), verdict: z.enum(['too_short', 'in_range', 'too_long']) }).strict();
 export const qualityReportSchema = z.object({ id: z.string(), stage: z.literal('quality'), issues: z.array(qualityIssueSchema), claims: z.array(claimSchema), createdAt: z.string(),
+  projectDuration: durationAssessmentSchema.omit({ sectionId: true }).extend({ complete: z.boolean() }).optional(),
   durations: z.array(durationAssessmentSchema), verdict: z.enum(['too_short', 'in_range', 'too_long']) }).strict();
 export const qualityResponseSchema = z.object({ ok: z.boolean(), report: qualityReportSchema, sections: z.array(scriptSectionSchema), rounds: z.number().int().min(0).max(2),
   history: z.array(qualityReportSchema), stoppedReason: z.enum(['checked', 'resolved', 'round_limit', 'no_editable_issues', 'revision_failed']),
