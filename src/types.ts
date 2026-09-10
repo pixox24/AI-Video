@@ -890,6 +890,9 @@ export interface ResearchNotes {
 }
 
 export interface ScriptWorkspace {
+  qualityReport?: QualityReport;
+  qualityInputKey?: string;
+  claims?: Claim[];
   contentBrief?: ContentBrief;
   durationSpec?: DurationSpec;
   stage: ScriptStage;
@@ -976,3 +979,6 @@ export interface DurationSpec {
   pace: ScriptPace;
   narrationRatio: number;
 }
+export type Claim = import('zod').infer<typeof import('./shared/quality').claimSchema>;
+export type QualityIssue = import('zod').infer<typeof import('./shared/quality').qualityIssueSchema>;
+export type QualityReport = import('zod').infer<typeof import('./shared/quality').qualityReportSchema>;

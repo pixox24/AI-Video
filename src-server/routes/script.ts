@@ -1,4 +1,5 @@
 // @ts-nocheck — mechanical port of server.ts script routes; behavior frozen.
+import { executeSectionRevision } from '../pipeline/section-revise';
 import type { Express } from "express";
 import { Type } from "@google/genai";
 import type { ScriptGenre, ScriptLanguage, ScriptSection } from "../../src/types";
@@ -938,69 +939,15 @@ app.post("/api/script/revision-plan", async (req, res) => {
 
 app.post("/api/script/section-revise", async (req, res) => {
   const body = requestBody(req.body as unknown);
-  const { language, targetSeconds, title, brief, plans, unitName } = scriptDraftContext(body);
+  const { language, targetSeconds, brief } = scriptDraftContext(body);
   const action = body.action || body.revisionAction;
-  if (!action?.sectionId || !action?.action) {
-    return res.status(400).json({ ok: false, error: "缺少章节修订动作。" });
-  }
-  const existing: Loose[] = Array.isArray(body.sections) ? body.sections : [];
-  const current = existing.find((item) => String(item?.id) === String(action.sectionId));
-  if (!current) return res.status(400).json({ ok: false, error: "找不到要修订的章节。" });
-  if (current.status === "locked") {
-    return res.status(409).json({ ok: false, code: "draft_contract_failed", error: "锁定章节不会被自动回修。" });
-  }
-  const planned = (body.outline?.sections || []).find((item: Loose) => item.id === action.sectionId);
-  try {
-    const parsed = await runScriptLlmJson({
-      llmApi: body.llmApi,
-      stage: "section_revise",
-      role: "drafter",
-      system: SECTION_REVISE_SYSTEM,
-      user: sectionReviseUserPrompt({
-        language,
-        section: {
-          title: current.title,
-          narration: current.narration,
-          minUnits: planned?.minUnits || current.minUnits,
-          maxUnits: planned?.maxUnits || current.maxUnits
-        },
-        action,
-        unitName,
-        brief
-      }),
-      temperature: 0.4,
-      timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
-      maxTokens: LLM_LONGFORM_MAX_TOKENS
-    });
-    const narration = String(parsed?.narration || "").trim();
-    if (!narration) {
-      return res.status(503).json({ ok: false, code: "llm_response_invalid", error: "修订结果没有口播。", sections: existing });
-    }
-    const section = {
-      ...current,
-      narration,
-      beats: Array.isArray(parsed?.beats) && parsed.beats.length
-        ? parsed.beats.map((beat: Loose, index: number) => ({
-          ...(current.beats?.[index] || {}),
-          id: `${current.id}-beat-${index + 1}`,
-          order: index + 1,
-          function: beat.function || current.beats?.[index]?.function || "setup",
-          intent: beat.intent || current.beats?.[index]?.intent || "",
-          narration: String(beat.narration || "").trim(),
-          visualIntent: beat.visualIntent || current.beats?.[index]?.visualIntent || "",
-          energy: beat.energy || current.beats?.[index]?.energy || "medium",
-          needsHold: Boolean(beat.needsHold),
-          sectionId: current.id,
-          targetSeconds: current.targetSeconds
-        }))
-        : current.beats,
-      status: "ready"
-    };
-    const nextSections = mergeSectionIntoWorkspaceSections(existing, section);
-    return res.json({ ok: true, section, sections: nextSections });
-  } catch (error: unknown) {
-    return res.status(503).json({ ok: false, code: "llm_response_invalid", error: errorMessage(error) || "章节回修失败。", sections: existing });
-  }
+  if (!action?.sectionId || !action?.action) return res.status(400).json({ ok: false, error: "缺少章节修订动作。" });
+  const existing = Array.isArray(body.sections) ? body.sections : [];
+  const result = await executeSectionRevision({ sections: existing, action, language, targetSeconds, brief, llmApi: body.llmApi,
+    planned: (body.outline?.sections || []).find((item: Loose) => item.id === action.sectionId) });
+  if (result.status === 200) return res.json({ ok: true, section: result.section, sections: result.sections });
+  return res.status(result.status).json({ ok: false, ...(result.code ? { code: result.code } : {}), error: result.error,
+    ...(result.status === 503 ? { sections: result.sections } : {}) });
 });
 
 app.post("/api/script/validate", async (req, res) => {

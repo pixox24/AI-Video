@@ -20,7 +20,9 @@ export const SECTION_DRAFT_SYSTEM = `你只写指定章节，不能改题、不�
 export const SECTION_REVISE_SYSTEM = `你是精确编辑，只改指定章节以修正时长偏差。
 保持章节承诺、事实、术语、角色、前后衔接和已有 beat 顺序。
 压缩时优先删除重复修饰、重复举例和可替代过渡；扩写时优先补具体例子、必要解释、因果链或用户可执行步骤。
-输出完整修订后的该章 JSON，而不是 diff、建议或 Markdown。`;
+输出完整修订后的该章 JSON，而不是 diff、建议或 Markdown。
+
+【Phase 3 追加】仅按本章的质量问题定向修复，禁止全文重写。扩写只允许证据、案例、推导、演示、反例、可执行步骤；不得伪造来源、数据、人物或案例。压缩不得删除结论成立所必需的论证。无来源高风险事实应删去或明确标为待核实，不得捏造引文。`;
 
 export function outlineUserPrompt(input: {
   title: string;
@@ -126,6 +128,8 @@ ${input.action.instruction}
 【核心结论】${input.brief.coreConclusion || '（保持原结论）'}
 【本章标题】${input.section.title}
 【当前正文】${input.section.narration}
+
+${lang === 'en' ? `Section narration word count must be between ${input.section.minUnits} and ${input.section.maxUnits}.` : `本章口播汉字数必须在 ${input.section.minUnits}–${input.section.maxUnits} 之间。`}
 
 只输出 JSON：{"narration":string,"usedEvidenceIds":string[],"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
 }

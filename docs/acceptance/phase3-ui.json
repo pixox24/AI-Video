@@ -1,0 +1,356 @@
+{
+  "status": 200,
+  "request": {
+    "sections": [
+      {
+        "id": "s1",
+        "order": 1,
+        "role": "hook",
+        "title": "开头",
+        "targetSeconds": 20,
+        "minUnits": 72,
+        "maxUnits": 84,
+        "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+        "beats": [
+          {
+            "id": "s1-beat",
+            "sectionId": "s1",
+            "order": 1,
+            "function": "hook",
+            "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+            "targetSeconds": 20,
+            "intent": "解释步骤",
+            "visualIntent": "桌面操作演示",
+            "energy": "medium",
+            "needsHold": false
+          }
+        ],
+        "status": "ready"
+      },
+      {
+        "id": "s2",
+        "order": 2,
+        "role": "body",
+        "title": "论证",
+        "targetSeconds": 60,
+        "minUnits": 216,
+        "maxUnits": 252,
+        "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+        "beats": [
+          {
+            "id": "s2-beat",
+            "sectionId": "s2",
+            "order": 1,
+            "function": "proof",
+            "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+            "targetSeconds": 60,
+            "intent": "解释步骤",
+            "visualIntent": "桌面操作演示",
+            "energy": "medium",
+            "needsHold": false
+          }
+        ],
+        "status": "ready"
+      },
+      {
+        "id": "s3",
+        "order": 3,
+        "role": "cta",
+        "title": "结尾",
+        "targetSeconds": 20,
+        "minUnits": 72,
+        "maxUnits": 84,
+        "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+        "beats": [
+          {
+            "id": "s3-beat",
+            "sectionId": "s3",
+            "order": 1,
+            "function": "cta",
+            "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+            "targetSeconds": 20,
+            "intent": "解释步骤",
+            "visualIntent": "桌面操作演示",
+            "energy": "medium",
+            "needsHold": false
+          }
+        ],
+        "status": "ready"
+      }
+    ],
+    "outline": {
+      "status": "confirmed",
+      "version": 1,
+      "oneSentenceThesis": "具体步骤帮助理解",
+      "sections": [
+        {
+          "id": "s1",
+          "order": 1,
+          "title": "开头",
+          "role": "hook",
+          "audienceQuestion": "如何理解",
+          "promise": "给出可执行步骤",
+          "evidenceIds": [],
+          "bridgeFromPrevious": "",
+          "bridgeToNext": "",
+          "targetSeconds": 20,
+          "targetUnits": 80,
+          "minUnits": 72,
+          "maxUnits": 84,
+          "status": "ready",
+          "narrationBudgetSec": 17,
+          "visualHoldBudgetSec": 3,
+          "retentionDevice": "展示步骤",
+          "transitionOut": "下一步"
+        },
+        {
+          "id": "s2",
+          "order": 2,
+          "title": "论证",
+          "role": "body",
+          "audienceQuestion": "如何理解",
+          "promise": "给出可执行步骤",
+          "evidenceIds": [],
+          "bridgeFromPrevious": "",
+          "bridgeToNext": "",
+          "targetSeconds": 60,
+          "targetUnits": 240,
+          "minUnits": 216,
+          "maxUnits": 252,
+          "status": "ready",
+          "narrationBudgetSec": 51,
+          "visualHoldBudgetSec": 9,
+          "retentionDevice": "展示步骤",
+          "transitionOut": "下一步"
+        },
+        {
+          "id": "s3",
+          "order": 3,
+          "title": "结尾",
+          "role": "cta",
+          "audienceQuestion": "如何理解",
+          "promise": "给出可执行步骤",
+          "evidenceIds": [],
+          "bridgeFromPrevious": "",
+          "bridgeToNext": "",
+          "targetSeconds": 20,
+          "targetUnits": 80,
+          "minUnits": 72,
+          "maxUnits": 84,
+          "status": "ready",
+          "narrationBudgetSec": 17,
+          "visualHoldBudgetSec": 3,
+          "retentionDevice": "展示步骤",
+          "transitionOut": "下一步"
+        }
+      ]
+    },
+    "scriptLanguage": "zh",
+    "pace": "medium",
+    "contentBrief": {
+      "topic": "具体步骤帮助理解",
+      "audience": {
+        "roles": [],
+        "knowledgeLevel": "beginner",
+        "primaryNeed": ""
+      },
+      "objective": "",
+      "viewerPromise": "学会用具体步骤解释问题",
+      "contentType": "analysis",
+      "mustCover": [],
+      "mustAvoid": [],
+      "lockedFields": []
+    },
+    "claims": [],
+    "repair": true
+  },
+  "response": {
+    "ok": true,
+    "report": {
+      "id": "66bccbe0-2287-4fed-9573-bd2e3ec3bfaa",
+      "stage": "quality",
+      "issues": [],
+      "claims": [],
+      "createdAt": "2026-09-10T08:25:05.745Z",
+      "durations": [
+        {
+          "sectionId": "s1",
+          "estimatedSec": 18.6046511627907,
+          "minSec": 16.74418604651163,
+          "maxSec": 19.53488372093023,
+          "verdict": "in_range"
+        },
+        {
+          "sectionId": "s2",
+          "estimatedSec": 51.86046511627907,
+          "minSec": 50.23255813953489,
+          "maxSec": 58.6046511627907,
+          "verdict": "in_range"
+        },
+        {
+          "sectionId": "s3",
+          "estimatedSec": 18.6046511627907,
+          "minSec": 16.74418604651163,
+          "maxSec": 19.53488372093023,
+          "verdict": "in_range"
+        }
+      ],
+      "verdict": "in_range"
+    },
+    "sections": [
+      {
+        "id": "s1",
+        "order": 1,
+        "role": "hook",
+        "title": "开头",
+        "targetSeconds": 20,
+        "minUnits": 72,
+        "maxUnits": 84,
+        "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+        "beats": [
+          {
+            "id": "s1-beat",
+            "order": 1,
+            "function": "hook",
+            "intent": "解释步骤",
+            "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+            "targetSeconds": 20,
+            "energy": "medium",
+            "visualIntent": "桌面操作演示",
+            "needsHold": false,
+            "sectionId": "s1"
+          }
+        ],
+        "status": "ready"
+      },
+      {
+        "id": "s2",
+        "order": 2,
+        "role": "body",
+        "title": "论证",
+        "targetSeconds": 60,
+        "minUnits": 216,
+        "maxUnits": 252,
+        "narration": "第1章。修订后的模拟口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+        "beats": [
+          {
+            "id": "s2-beat-1",
+            "order": 1,
+            "function": "setup",
+            "intent": "兑现本章承诺",
+            "narration": "第1章。修订后的模拟口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+            "targetSeconds": 60,
+            "energy": "medium",
+            "visualIntent": "主体站在窗边看着外面的雨，雨水打在玻璃上",
+            "needsHold": false,
+            "sectionId": "s2"
+          }
+        ],
+        "status": "ready"
+      },
+      {
+        "id": "s3",
+        "order": 3,
+        "role": "cta",
+        "title": "结尾",
+        "targetSeconds": 20,
+        "minUnits": 72,
+        "maxUnits": 84,
+        "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+        "beats": [
+          {
+            "id": "s3-beat",
+            "order": 1,
+            "function": "cta",
+            "intent": "解释步骤",
+            "narration": "用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。用具体步骤帮助观众理解这个问题。",
+            "targetSeconds": 20,
+            "energy": "medium",
+            "visualIntent": "桌面操作演示",
+            "needsHold": false,
+            "sectionId": "s3"
+          }
+        ],
+        "status": "ready"
+      }
+    ],
+    "rounds": 1,
+    "history": [
+      {
+        "id": "799af4c3-d863-434b-84c6-3c5da78b2816",
+        "stage": "quality",
+        "issues": [
+          {
+            "sectionId": "s2",
+            "severity": "high",
+            "kind": "duration",
+            "message": "预计口播 33.5 秒，章节预算 50.2–58.6 秒（too_short）",
+            "suggestedFix": "补充证据、案例、推导、演示、反例或可执行步骤，回到本章字数预算；不要重复或编造。"
+          }
+        ],
+        "claims": [],
+        "createdAt": "2026-09-10T08:25:05.739Z",
+        "durations": [
+          {
+            "sectionId": "s1",
+            "estimatedSec": 18.6046511627907,
+            "minSec": 16.74418604651163,
+            "maxSec": 19.53488372093023,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "s2",
+            "estimatedSec": 33.48837209302326,
+            "minSec": 50.23255813953489,
+            "maxSec": 58.6046511627907,
+            "verdict": "too_short"
+          },
+          {
+            "sectionId": "s3",
+            "estimatedSec": 18.6046511627907,
+            "minSec": 16.74418604651163,
+            "maxSec": 19.53488372093023,
+            "verdict": "in_range"
+          }
+        ],
+        "verdict": "too_short"
+      },
+      {
+        "id": "66bccbe0-2287-4fed-9573-bd2e3ec3bfaa",
+        "stage": "quality",
+        "issues": [],
+        "claims": [],
+        "createdAt": "2026-09-10T08:25:05.745Z",
+        "durations": [
+          {
+            "sectionId": "s1",
+            "estimatedSec": 18.6046511627907,
+            "minSec": 16.74418604651163,
+            "maxSec": 19.53488372093023,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "s2",
+            "estimatedSec": 51.86046511627907,
+            "minSec": 50.23255813953489,
+            "maxSec": 58.6046511627907,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "s3",
+            "estimatedSec": 18.6046511627907,
+            "minSec": 16.74418604651163,
+            "maxSec": 19.53488372093023,
+            "verdict": "in_range"
+          }
+        ],
+        "verdict": "in_range"
+      }
+    ],
+    "stoppedReason": "resolved",
+    "failures": []
+  },
+  "untargetedNarrationUnchanged": true,
+  "ui": "质量评估\n\n检查承诺、时长、事实风险与节奏；修复只作用于有问题的未锁定章节，最多两轮。\n\n检查质量\n\n已修订 1 轮 · in_range\n\n口播预算判定：in_range · 0 个问题",
+  "untargetedSectionsDeepEqual": true
+}

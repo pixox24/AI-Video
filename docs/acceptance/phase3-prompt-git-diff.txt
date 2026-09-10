@@ -1,0 +1,12 @@
+diff --git a/src/utils/scriptPrompts.ts b/src/utils/scriptPrompts.ts
+index 6056499..35672d9 100644
+--- a/src/utils/scriptPrompts.ts
++++ b/src/utils/scriptPrompts.ts
+@@ -23 +23,3 @@ export const SECTION_REVISE_SYSTEM = `你是精确编辑，只改指定章节以
+-输出完整修订后的该章 JSON，而不是 diff、建议或 Markdown。`;
++输出完整修订后的该章 JSON，而不是 diff、建议或 Markdown。
++
++【Phase 3 追加】仅按本章的质量问题定向修复，禁止全文重写。扩写只允许证据、案例、推导、演示、反例、可执行步骤；不得伪造来源、数据、人物或案例。压缩不得删除结论成立所必需的论证。无来源高风险事实应删去或明确标为待核实，不得捏造引文。`;
+@@ -129,0 +132,2 @@ ${input.action.instruction}
++${lang === 'en' ? `Section narration word count must be between ${input.section.minUnits} and ${input.section.maxUnits}.` : `本章口播汉字数必须在 ${input.section.minUnits}–${input.section.maxUnits} 之间。`}
++

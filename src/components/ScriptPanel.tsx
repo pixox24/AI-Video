@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BriefStage } from './BriefStage';
+import { QualityPanel } from './QualityPanel';
 import { canEnterOutline } from '../utils/contentBrief';
 import { durationSpecForm } from '../../src-server/duration/engine';
 import {
@@ -1388,6 +1389,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           {workspace.stage === 'rhythm' && (
             <RhythmStage workspace={workspace} onHoldChange={handleHoldChange} />
           )}
+          {(['beats', 'copy', 'rhythm'] as const).some(stage => stage === workspace.stage) && <QualityPanel workspace={workspace} onChange={commit} customLlmApi={customLlmApi} />}
         </div>
 
         <aside className="hidden xl:flex w-72 flex-shrink-0 border-l border-[#23232c] bg-[#14141a] flex-col overflow-hidden">

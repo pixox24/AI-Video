@@ -14,6 +14,14 @@ export function durationSpecForm(spec: DurationSpec): ScriptForm {
 export function estimateNarrationSeconds(text: string, language: ScriptLanguage, pace: ScriptPace): number {
   return countBudgetUnits(text, language) / paceUnitsPerSecond(pace, language);
 }
+export function assessSectionDuration(sectionId: string, text: string, minUnits: number, maxUnits: number, language: ScriptLanguage, pace: ScriptPace) {
+  const estimatedSec = estimateNarrationSeconds(text, language, pace);
+  const rate = paceUnitsPerSecond(pace, language);
+  const minSec = minUnits / rate;
+  const maxSec = maxUnits / rate;
+  const verdict: 'too_short' | 'in_range' | 'too_long' = estimatedSec < minSec ? 'too_short' : estimatedSec > maxSec ? 'too_long' : 'in_range';
+  return { sectionId, estimatedSec, minSec, maxSec, verdict };
+}
 export function budgetOutlineSections(sections: ScriptOutlineSection[], targetSeconds: number, narrationRatio = 0.85): ScriptOutlineSection[] {
   const narration = targetSeconds * narrationRatio; const hold = targetSeconds - narration;
   const weights = sections.map(s => Math.max(1, s.targetSeconds)); const total = weights.reduce((a, b) => a + b, 0);
