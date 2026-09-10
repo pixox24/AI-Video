@@ -1,0 +1,14 @@
+MAIN CONTRACT MATCH /api/script/draft: res.json:stamped | res.status(409).json:brief,code,error,longForm,outline,recommendation,scriptForm,source | res.status(503).json:code,detail,error,longForm,recommendation,scriptForm,source,spread,validationDetail,warnings
+MAIN CONTRACT MATCH /api/script/outline: res.json:brief,ok,outline,scriptForm,warnings | res.status(503).json:brief,code,error,ok,outline,recommendation,scriptForm
+MAIN CONTRACT MATCH /api/script/section-revise: res.json:ok,section,sections | res.status(400).json:error,ok | res.status(409).json:code,error,ok | res.status(503).json:code,error,ok,sections
+MAIN CONTRACT MATCH /api/visual/generate: res.json:imageUrl,model,protocolUsed,provider,referenceAccepted,referenceDropped,referenceSent,source | res.status(400).json:diagnosis,error,model,ok,provider,rawError,referenceAccepted,referenceDropped,referenceSent | res.status(400).json:diagnosis,error,ok,referenceAccepted,referenceDropped,referenceSent | res.status(400).json:error | res.status(500).json:diagnosis,error,ok | res.status(500).json:diagnosis,error,ok,referenceAccepted,referenceDropped,referenceSent
+MAIN CONTRACT MATCH /api/script/split-text: res.json:parsed | res.json:splitFallback() | res.json:validated | res.status(400).json:error
+MAIN RESPONSE BUILDER MATCH stampDraft
+MAIN RESPONSE BUILDER MATCH pinDraftTitle
+MAIN RESPONSE BUILDER MATCH splitFallback
+CURL /api/script/draft 200 keys=beats,budgetStatus,fillRatio,fullNarration,longForm,overByChars,source,title,warnings
+CURL /api/script/outline 200 keys=brief,ok,outline,scriptForm,warnings
+CURL /api/script/section-revise 200 keys=ok,section,sections
+CURL /api/visual/generate 400 keys=error
+CURL /api/script/split-text 200 keys=shots,title
+MOCK fixture=script_draft.json; external calls=0; JSONL records=16; required fields verified; apiKey absent; split_text missing fixture logs failed and uses deterministic fallback
