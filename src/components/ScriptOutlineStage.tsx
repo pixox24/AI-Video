@@ -413,6 +413,7 @@ export function ScriptOutlineStage({
               {draft?.narration && <p className="text-[11px] text-zinc-400" role="status">
                 草稿 {used}{unit}{used < section.minUnits || used > section.maxUnits ? ' · 偏离参考篇幅，草稿已保留；可继续写作，全文完成后统一评估。' : ''}
               </p>}
+              {draft?.beatLabelWarnings?.map((warning, index) => <p key={index} className="text-[11px] text-zinc-400">{warning}</p>)}
               <input
                 value={section.audienceQuestion}
                 onChange={(e) => outline && patchOutline(updateOutlineSection(outline, section.id, { audienceQuestion: e.target.value }))}

@@ -1,7 +1,7 @@
 import { DraftSource, ScriptBeat, ScriptLanguage, ScriptSection } from '../types';
 import { countBudgetUnits, normalizeScriptLanguage } from './scriptLanguage';
 import { FILL_RATIO_MIN, fillRatio, isLongForm } from './scriptDuration';
-import { flattenSectionBeats, joinSectionNarrations } from './scriptSections';
+import { BEAT_FUNCTIONS, normalizeBeatFunction, flattenSectionBeats, joinSectionNarrations } from './scriptSections';
 import { splitCoversSource, splitPastedNarration } from './scriptSplit';
 
 export interface DraftValidation {
@@ -14,17 +14,6 @@ export interface DraftValidation {
   beatCount: number;
   longForm: boolean;
 }
-
-const BEAT_FNS = new Set(['hook', 'setup', 'turn', 'proof', 'reveal', 'cta']);
-const SECTION_BEAT_FNS: Record<ScriptSection['role'], Set<string>> = {
-  hook: new Set(['hook']),
-  setup: new Set(['setup']),
-  body: new Set(['setup', 'turn', 'proof', 'reveal']),
-  turn: new Set(['turn']),
-  proof: new Set(['proof']),
-  reveal: new Set(['reveal']),
-  cta: new Set(['cta', 'reveal'])
-};
 
 const NARRATION_KEYS = [
   'fullNarration', 'full_narration', 'narration', 'script', 'voiceover', 'voiceOver',
@@ -119,7 +108,7 @@ export function normalizeDraftBeats(raw: unknown): ScriptBeat[] {
     return {
       id: String((typeof beat === 'object' && beat?.id) || `beat-${index + 1}`),
       order: Number(typeof beat === 'object' ? beat?.order : 0) || index + 1,
-      function: (BEAT_FNS.has(functionName) ? functionName : (index === 0 ? 'hook' : 'setup')) as ScriptBeat['function'],
+      function: normalizeBeatFunction(functionName, index === 0 ? 'hook' : 'setup').function,
       intent: String((typeof beat === 'object' && (beat?.intent || beat?.purpose)) || ''),
       narration: beatNarration(beat),
       targetSeconds: Number(typeof beat === 'object' ? beat?.targetSeconds : 0) || 0,
@@ -211,10 +200,10 @@ export function validateScriptSections(
     } else if (narration && !splitCoversSource(beats.map((beat) => String(beat.narration || '')), narration)) {
       errors.push(`${label}的节拍口播没有完整覆盖章节口播`);
     }
-    const allowed = SECTION_BEAT_FNS[section.role];
-    if (allowed && beats.some((beat) => !allowed.has(String(beat.function || '')))) {
-      errors.push(`${label}包含不符合章节角色的节拍类型`);
-    }
+    warnings.push(...(section.beatLabelWarnings || []));
+    beats.forEach((beat, beatIndex) => {
+      if (!BEAT_FUNCTIONS.includes(beat.function)) errors.push(`${label}第 ${beatIndex + 1} 个节拍类型「${String(beat.function)}」未归一化；合法值：${BEAT_FUNCTIONS.join('、')}`);
+    });
   });
   return { ok: errors.length === 0, errors, warnings: [...errors, ...warnings] };
 }

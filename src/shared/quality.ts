@@ -1,3 +1,4 @@
+import { BEAT_FUNCTIONS } from '../utils/scriptSections';
 import { z } from 'zod';
 import { contentBriefDraftSchema, durationSpecSchema, scriptPaceSchema } from './contentBrief';
 
@@ -12,11 +13,11 @@ export const qualityIssueSchema = z.object({ sectionId: z.string().optional(), s
 export const evaluatorSchema = z.object({ issues: z.array(qualityIssueSchema), claims: z.array(claimSchema) }).strict();
 export const sectionStatusSchema = z.enum(['planned', 'drafting', 'ready', 'locked', 'needs-revision', 'failed']);
 const role = z.enum(['hook', 'setup', 'body', 'turn', 'proof', 'reveal', 'cta']);
-export const beatSchema = z.object({ id: z.string(), order: z.number(), function: z.enum(['hook', 'setup', 'turn', 'proof', 'reveal', 'cta']),
+export const beatSchema = z.object({ id: z.string(), order: z.number(), function: z.enum(BEAT_FUNCTIONS),
   intent: z.string(), narration: z.string(), targetSeconds: z.number(), energy: z.enum(['fast', 'medium', 'slow', 'hold']),
   visualIntent: z.string(), needsHold: z.boolean(), sectionId: z.string().optional() }).strict();
 export const scriptSectionSchema = z.object({ id: z.string().min(1), order: z.number(), role, title: z.string(), outline: z.string().optional(),
-  actualSec: z.number().positive().optional(),
+  actualSec: z.number().positive().optional(), beatLabelWarnings: z.array(z.string()).optional(),
   targetSeconds: z.number().nonnegative(), minUnits: z.number().nonnegative(), maxUnits: z.number().nonnegative(),
   narration: z.string(), beats: z.array(beatSchema), status: sectionStatusSchema.optional(), usedEvidenceIds: z.array(z.string()).optional(),
   audienceQuestion: z.string().optional(), promise: z.string().optional() }).strict();

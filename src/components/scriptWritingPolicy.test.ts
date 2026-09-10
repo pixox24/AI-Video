@@ -16,10 +16,10 @@ test('已保存的104字草稿显示软提示；未写完只显示当前估算�
   const outline = outlineFromPlans(plans, { status: 'confirmed' });
   outline.sections[1] = { ...outline.sections[1], minUnits: 130, maxUnits: 152, status: 'ready' };
   const section = { ...seedSectionsFromOutline(plans, outline, [])[1], narration: '字'.repeat(104), status: 'ready' as const };
-  workspace.outline = outline; workspace.sections = [section];
+  workspace.outline = outline; workspace.sections = [{ ...section, beatLabelWarnings: ['第 2 章第 1 个节拍：body 已修正为 proof，正文未改写。'] }];
   const html = renderToStaticMarkup(createElement(ScriptOutlineStage, { workspace, busy: false, onChange: () => {}, onStatus: () => {} }));
   assert.match(html, /草稿 104字/); assert.match(html, /参考 130–152字/); assert.match(html, /草稿已保留/);
-  assert.doesNotMatch(html, /已通过/);
+  assert.doesNotMatch(html, /已通过/); assert.match(html, /body 已修正为 proof/);
   workspace.qualityReport = { id: 'test', stage: 'quality', createdAt: new Date(0).toISOString(), issues: [], claims: [], verdict: 'too_short',
     durations: [assessSectionDuration(section.id, section.narration, 130, 152, 'zh', 'medium')],
     projectDuration: assessProjectDuration([section], outline, 'zh', 'medium') };

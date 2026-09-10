@@ -1,3 +1,4 @@
+import { BEAT_FUNCTIONS } from './scriptSections';
 import { ScriptBrief, ScriptLanguage, ScriptOutlineSection, ScriptRevisionAction } from '../types';
 import { normalizeScriptLanguage } from './scriptLanguage';
 
@@ -91,7 +92,9 @@ ${countRule}
 硬约束：
 - 节拍口播按顺序拼接后必须逐字覆盖本章正文
 - 只写这一章，兑现 promise，不要重复标题，不要预告下一章完整答案
-- beats 1 到 4 个，function 必须属于本章角色 ${input.section.role}
+- beats 1 到 4 个；章节角色 ${input.section.role} 表示全章任务，不限制章内节拍组合
+- beat.function 只能使用 ${BEAT_FUNCTIONS.join('、')}；含义依次为开头钩子、背景解释、转折、举证或机制、揭示、小结或行动
+- body 仅为章节角色，不是节拍类型；正文论证可用 proof。根据每个节拍的实际内容选择标签
 - visualIntent 写看得见的画面
 ${input.notesRule || ''}
 
@@ -127,6 +130,7 @@ ${input.action.targetDeltaUnits > 0 ? `参考增减量约 ${input.action.targetD
 硬约束：
 - 不能改变本章核心结论，也不得修改其他章节
 - beats.narration 按顺序完整拼接成 narration
+- beat.function 使用 ${BEAT_FUNCTIONS.join('、')}（开头钩子、背景解释、转折、举证或机制、揭示、小结或行动）；章节角色不限制节拍组合，body 不是节拍类型，可用 proof
 ${input.action.instruction}
 
 【核心结论】${input.brief.coreConclusion || '（保持原结论）'}

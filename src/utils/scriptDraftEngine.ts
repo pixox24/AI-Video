@@ -5,7 +5,7 @@ import {
   ScriptOutline,
   ScriptSection
 } from '../types';
-import { emptySectionFromPlan, ScriptSectionPlan } from './scriptSections';
+import { emptySectionFromPlan, normalizeBeatFunction, ScriptSectionPlan } from './scriptSections';
 import { draftNeedsOutlinePreview, draftRequiresOutline, validateSectionAgainstOutline } from './scriptOutline';
 
 export type DraftAsk = (user: string, maxTokens?: number, system?: string) => Promise<any | null>;
@@ -60,25 +60,30 @@ export function materializeSectionFromLlm(
 ): ScriptSection | null {
   const narration = String(piece?.narration || '').trim();
   if (!narration) return null;
+  const beatLabelWarnings: string[] = [];
   const beats = Array.isArray(piece?.beats) && piece.beats.length > 0
-    ? piece.beats.map((beat: any, index: number) => ({
+    ? piece.beats.map((beat: { function?: unknown; intent?: string; narration?: string; targetSeconds?: number; energy?: string; visualIntent?: string; needsHold?: boolean }, index: number) => {
+      const label = normalizeBeatFunction(beat.function, planned.role);
+      if (label.warning) beatLabelWarnings.push(`第 ${planned.order} 章第 ${index + 1} 个节拍：${label.warning}`);
+      return ({
       id: `${section.id}-beat-${index + 1}`,
       order: index + 1,
-      function: beat.function || section.beats[0]?.function || 'setup',
+      function: label.function,
       intent: beat.intent || '',
-      narration: String(beat.narration || '').trim() || (index === 0 ? narration : ''),
+      narration: String(beat.narration || '').trim(),
       targetSeconds: Number(beat.targetSeconds) || section.targetSeconds,
       energy: beat.energy || 'medium',
       visualIntent: beat.visualIntent || '',
       needsHold: Boolean(beat.needsHold),
       sectionId: section.id
-    }))
-    : [{ ...section.beats[0], narration, sectionId: section.id }];
+    }); })
+    : [];
   return {
     ...section,
     title: planned.title || section.title,
     narration,
     beats,
+    beatLabelWarnings,
     usedEvidenceIds: Array.isArray(piece?.usedEvidenceIds) ? piece.usedEvidenceIds.map(String) : [],
     status: 'ready'
   };

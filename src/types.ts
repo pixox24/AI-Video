@@ -727,6 +727,7 @@ export interface ScriptBeat {
 }
 
 export interface ScriptSection {
+  beatLabelWarnings?: string[];
   actualSec?: number;
   id: string;
   order: number;

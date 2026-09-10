@@ -138,7 +138,7 @@ test('HTTP 单章与整篇：字数偏差不丢稿，采用第3次结构重试�
         const order = Number(chapter[1]);
         const calls = (requests.get(order) || 0) + 1; requests.set(order, calls);
         const narration = `第${order}章讲清第${order}个具体任务。`;
-        const role = chapter[2] === 'body' ? 'proof' : chapter[2];
+        const role = order === 2 ? 'body' : 'unknown-label';
         const content = { narration, usedEvidenceIds: [], beats: [{ function: role, narration: calls < 3 ? '覆盖错误' : narration, energy: 'medium', visualIntent: '桌面物品', needsHold: false }] };
         return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }), { status: 200 });
       };
@@ -147,6 +147,8 @@ test('HTTP 单章与整篇：字数偏差不丢稿，采用第3次结构重试�
       assert.equal(single.status, 200, JSON.stringify(single.data));
       assert.equal(requests.get(2), 3); assert.match(single.data.warnings.join(''), /参考预算/);
       assert.match(single.data.section.narration, /第2章/);
+      assert.equal(single.data.section.beats[0].function, 'proof');
+      assert.match(single.data.warnings.join(''), /body.*proof/);
       assert.ok(qualityRequestSchema.safeParse({ outline, sections: [single.data.section] }).success, '单章结果必须能直接进入质量检查');
       const saved = { ...single.data.section, status: 'locked' };
       const locked = await send('/api/script/section-draft', { ...common, sectionId: saved.id, sections: [saved] });

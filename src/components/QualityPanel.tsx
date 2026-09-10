@@ -48,6 +48,7 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
     {!canCheck && <p>请先生成大纲与章节口播。</p>}
     {report && stale && <p className="text-amber-300">内容已变化，请重新检查后再修复。</p>}
     {message && <p role="status">{message}</p>}
+    {workspace.sections?.flatMap(s => s.beatLabelWarnings || []).map((warning, index) => <p key={index} className="text-sm text-zinc-400">{warning}</p>)}
     {report && <>
       <p>全文口播预算：{report.projectDuration?.complete === false ? '章节尚未写完，暂不作全文判定' : report.verdict} · {report.issues.length} 个内容 / 全文预算问题</p>
       {report.projectDuration && <p className="text-sm text-zinc-400">当前预计口播 {report.projectDuration.estimatedSec.toFixed(1)} 秒 · 全文参考 {report.projectDuration.minSec.toFixed(1)}–{report.projectDuration.maxSec.toFixed(1)} 秒</p>}

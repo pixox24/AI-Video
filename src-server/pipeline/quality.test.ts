@@ -171,3 +171,46 @@ test('全文预算允许章节互补、支持 DurationSpec，部分草稿不能�
   assert.equal(timed.minSec, 72); assert.equal(timed.maxSec, 88); assert.equal(timed.verdict, 'too_long');
   assert.equal(assessProjectDuration([{ id: 's', narration: 'one two three four five' }], { sections: [{ id: 's', minUnits: 5, maxUnits: 5 }] }, 'en', 'medium').verdict, 'in_range');
 });
+
+test('修订标签归一化通过严格质量 schema；未知标签不重试，漏文仍拒绝，锁定不调用', async () => {
+  const { executeSectionRevision } = await import('./section-revise');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'beat-revise-'));
+  const priorMock = process.env.LLM_MOCK, priorRuns = process.env.GENERATION_RUNS_PATH;
+  const nativeFetch = globalThis.fetch;
+  let calls = 0;
+  let label: unknown = 'body';
+  let omitText = false;
+  const narration = '重新定义可控，是指行动可选择，并不保证结果。';
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ narration, usedEvidenceIds: [],
+      beats: [{ function: label, narration: omitText ? '漏文' : narration, intent: '解释', energy: 'medium', visualIntent: '桌上两张卡片', needsHold: false }] }) } }] }));
+  };
+  process.env.LLM_MOCK = 'false'; process.env.GENERATION_RUNS_PATH = path.join(dir, 'runs.jsonl');
+  try {
+    const input = qualityFixture();
+    const opts = { sections: input.sections, planned: input.outline.sections[1], action: { sectionId: 's2', action: 'replace-transition' as const, targetDeltaUnits: 0, instruction: '解释概念' }, language: 'zh' as const,
+      brief: { audience: '', coreQuestion: '', coreConclusion: '', evidence: [], forbiddenClaims: [], requiredTerms: [] }, targetSeconds: 100,
+      llmApi: { endpoint: 'https://transport.invalid/v1', apiKey: 'test', model: 'test' }, strict: true };
+    for (label of ['body', 'unknown', null, 'setup']) {
+      const before = calls;
+      const result = await executeSectionRevision(opts);
+      assert.equal(result.status, 200); assert.equal(calls, before + 1);
+      assert.equal(result.section?.narration, narration);
+      assert.equal(result.section?.beats[0].narration, narration);
+      assert.equal(result.section?.beats[0].function, label === 'setup' ? 'setup' : 'proof');
+      assert.ok(qualityRequestSchema.safeParse({ ...input, sections: result.sections }).success);
+      assert.deepEqual(result.sections[0], input.sections[0]);
+    }
+    omitText = true;
+    for (const strict of [true, false]) assert.equal((await executeSectionRevision({ ...opts, strict })).status, 503);
+    const before = calls;
+    assert.equal((await executeSectionRevision({ ...opts, planned: { ...opts.planned, status: 'locked' } })).status, 409);
+    assert.equal(calls, before);
+  } finally {
+    globalThis.fetch = nativeFetch;
+    if (priorMock === undefined) delete process.env.LLM_MOCK; else process.env.LLM_MOCK = priorMock;
+    if (priorRuns === undefined) delete process.env.GENERATION_RUNS_PATH; else process.env.GENERATION_RUNS_PATH = priorRuns;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

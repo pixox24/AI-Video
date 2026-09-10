@@ -113,6 +113,18 @@ function beatsForRole(role: ScriptSectionRole): BeatFunction[] {
   }
 }
 
+export const BEAT_FUNCTIONS = ['hook', 'setup', 'turn', 'proof', 'reveal', 'cta'] as const;
+
+export function normalizeBeatFunction(value: unknown, role: ScriptSectionRole): { function: BeatFunction; warning?: string } {
+  const label = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  // ponytail: labels are metadata; reuse the chapter default instead of paying to rewrite valid prose.
+  const normalized = BEAT_FUNCTIONS.includes(label as BeatFunction) ? label as BeatFunction
+    : label === 'body' ? 'proof' : beatsForRole(role)[0];
+  if (value === normalized) return { function: normalized };
+  const original = typeof value === 'string' ? value.slice(0, 80) : value == null ? '缺失' : '非文本值';
+  return { function: normalized, warning: `节拍类型「${original}」已修正为 ${normalized}，仅调整标签，正文未改写。` };
+}
+
 function energyForRole(role: ScriptSectionRole): ShotEnergy {
   if (role === 'hook' || role === 'turn') return 'fast';
   if (role === 'cta') return 'hold';

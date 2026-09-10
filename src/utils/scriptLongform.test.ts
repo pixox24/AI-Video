@@ -194,7 +194,7 @@ test('长视频进入章节模式，短稿 fallback 不能当成功稿', () => {
   assert.equal(fillStatus(658, 658), 'ok');
 });
 
-test('章节角色不匹配仍须拒绝，即使字数只是提示', () => {
+test('合法节拍可跨章节角色组合，不因标签组合拒绝', () => {
   const plans = planScriptSections({ targetSeconds: 180, maxChars: 658 });
   const sections = plans.map((plan, index) => ({
     ...plan,
@@ -222,7 +222,7 @@ test('章节角色不匹配仍须拒绝，即使字数只是提示', () => {
     scriptLanguage: 'zh',
     source: 'llm'
   });
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true);
   assert.ok(result.warnings.some((warning) => warning.includes('第 1 章')));
 });
 

@@ -1,3 +1,4 @@
+import { normalizeBeatFunction, BEAT_FUNCTIONS } from './scriptSections';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDurationBudget } from './scriptBudget';
@@ -108,4 +109,39 @@ test('104字草稿以软提示保留；空正文、证据、节拍错误仍拒�
     assert.match(prompt, /参考篇幅|Reference length/);
     assert.match(revise, /不强制增减字数/);
   }
+});
+
+
+test('节拍标签本地修正，合法组合保留，不重写正文或额外调用模型', async () => {
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: 1000 });
+  const outline = outlineFromPlans(plans);
+  const section = seedSectionsFromOutline(plans, outline, [])[2];
+  const planned = outline.sections[2];
+  for (const value of BEAT_FUNCTIONS) assert.deepEqual(normalizeBeatFunction(value, 'hook'), { function: value });
+  assert.equal(normalizeBeatFunction('body', 'setup').function, 'proof');
+  assert.equal(normalizeBeatFunction(' PROOF ', 'setup').function, 'proof');
+  for (const value of ['unknown', '', null, 42, {}]) {
+    assert.equal(normalizeBeatFunction(value, 'body').function, 'proof');
+    assert.ok(normalizeBeatFunction(value, 'body').warning);
+  }
+  const narration = '概念先讲清。然后给出例子。';
+  for (const value of ['body', 'unknown', null, 'hook']) {
+    let calls = 0;
+    const result = await draftOneSection({ planned, section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
+      language: 'zh', maxTokens: 1024, ask: async () => {
+        calls++; return { narration, beats: [{ function: value, narration }] };
+      } });
+    assert.equal(calls, 1); assert.equal(result.failed, false);
+    assert.equal(result.section?.narration, narration);
+    assert.equal(result.section?.beats[0].narration, narration);
+    assert.equal(result.section?.beats[0].function, normalizeBeatFunction(value, planned.role).function);
+    assert.equal(result.section?.beatLabelWarnings?.length, value === 'hook' ? 0 : 1);
+  }
+  for (const beats of [[], [{ function: 'body', narration: '' }], [{ function: 'body', narration: '遗漏' }]]) {
+    let calls = 0;
+    const result = await draftOneSection({ planned, section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
+      language: 'zh', maxTokens: 1024, ask: async () => { calls++; return { narration, beats }; } });
+    assert.equal(result.failed, true); assert.equal(calls, 3);
+  }
+
 });
