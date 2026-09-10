@@ -1,7 +1,7 @@
 import { DraftSource, ScriptBeat, ScriptLanguage, ScriptSection } from '../types';
 import { countBudgetUnits, normalizeScriptLanguage } from './scriptLanguage';
 import { FILL_RATIO_MIN, fillRatio, isLongForm } from './scriptDuration';
-import { BEAT_FUNCTIONS, normalizeBeatFunction, flattenSectionBeats, joinSectionNarrations } from './scriptSections';
+import { BEAT_FUNCTIONS, normalizeBeatEnergy, normalizeBeatFunction, flattenSectionBeats, joinSectionNarrations } from './scriptSections';
 import { splitCoversSource, splitPastedNarration } from './scriptSplit';
 
 export interface DraftValidation {
@@ -112,7 +112,7 @@ export function normalizeDraftBeats(raw: unknown): ScriptBeat[] {
       intent: String((typeof beat === 'object' && (beat?.intent || beat?.purpose)) || ''),
       narration: beatNarration(beat),
       targetSeconds: Number(typeof beat === 'object' ? beat?.targetSeconds : 0) || 0,
-      energy: (typeof beat === 'object' && beat?.energy) || 'medium',
+      energy: normalizeBeatEnergy(typeof beat === 'object' ? beat?.energy : undefined).energy,
       visualIntent: String((typeof beat === 'object' && (beat?.visualIntent || beat?.visual || beat?.shot)) || ''),
       needsHold: Boolean(typeof beat === 'object' && beat?.needsHold),
       sectionId: typeof beat === 'object' && beat?.sectionId ? String(beat.sectionId) : undefined

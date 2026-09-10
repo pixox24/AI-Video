@@ -1,4 +1,4 @@
-import { BEAT_FUNCTIONS, normalizeBeatFunction } from '../../src/utils/scriptSections';
+import { BEAT_FUNCTIONS, normalizeBeatEnergy, normalizeBeatFunction } from '../../src/utils/scriptSections';
 import { z } from 'zod';
 import type { ScriptBrief, ScriptSection, ScriptRevisionAction, ScriptOutlineSection, ScriptLanguage } from '../../src/types';
 import { mergeSectionIntoWorkspaceSections } from '../../src/utils/scriptOutline';
@@ -10,7 +10,7 @@ import { splitCoversSource } from '../../src/utils/scriptSplit';
 
 const revisionSchema = z.object({ narration: z.string().trim().min(1), usedEvidenceIds: z.array(z.string()),
   beats: z.array(z.object({ id: z.string().optional(), order: z.number().optional(), function: z.unknown().optional().describe(`节拍标签，优先使用 ${BEAT_FUNCTIONS.join(', ')}；标签异常会在本地修正`),
-    intent: z.string(), narration: z.string(), energy: z.enum(['fast','medium','slow','hold']), visualIntent: z.string(), needsHold: z.boolean()
+    intent: z.string(), narration: z.string(), energy: z.unknown().optional(), visualIntent: z.string(), needsHold: z.boolean()
   }).strict()).min(1)
 }).strict();
 export type RevisionInput = { sections: ScriptSection[]; planned?: Pick<ScriptOutlineSection, 'status' | 'minUnits' | 'maxUnits'>;
@@ -40,13 +40,15 @@ export async function executeSectionRevision(input: RevisionInput): Promise<Revi
     const section: ScriptSection = { ...current, narration, status: 'ready', beatLabelWarnings,
       beats: Array.isArray(parsed.beats) && parsed.beats.length ? toLooseList(parsed.beats).map((beat, index) => {
         const label = normalizeBeatFunction(beat.function, current.role);
+        const energy = normalizeBeatEnergy(beat.energy);
+        if (energy.warning) beatLabelWarnings.push(`第 ${current.order} 章第 ${index + 1} 个节拍：${energy.warning}`);
         if (label.warning) beatLabelWarnings.push(`第 ${current.order} 章第 ${index + 1} 个节拍：${label.warning}`);
         return ({
         ...(current.beats?.[index] || {}), id: `${current.id}-beat-${index + 1}`, order: index + 1,
         function: label.function,
         intent: String(beat.intent || current.beats?.[index]?.intent || ''), narration: String(beat.narration || '').trim(),
         visualIntent: String(beat.visualIntent || current.beats?.[index]?.visualIntent || ''),
-        energy: (beat.energy || current.beats?.[index]?.energy || 'medium') as ScriptSection['beats'][number]['energy'],
+        energy: energy.energy,
         needsHold: Boolean(beat.needsHold), sectionId: current.id, targetSeconds: current.targetSeconds
       }); }) : current.beats };
     return { status: 200, section, sections: mergeSectionIntoWorkspaceSections(sections, section) };

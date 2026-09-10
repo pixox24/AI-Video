@@ -44,3 +44,5 @@ SPEC-v2.md 为当前规格；MIGRATION.md 为历史资产基准，已作废的 v
 ### 节拍标签
 
 章节角色描述全章任务，节拍类型描述章内的小段内容，两者不必相同。合法类型为 hook / setup / turn / proof / reveal / cta；误填 body 自动映射为 proof，大小写和首尾空白会归一化，其他未知或缺失标签沿用章节默认类型。标签修正记录保存在章节中并显示，不为此重写正文或新增模型调用。空正文、缺失节拍或节拍漏文仍会拒绝生成。
+
+节奏标签 energy 统一使用 fast / medium / slow / hold。旧草稿质检自动兼容 high/高→fast、low/低→slow、mid/中/steady→medium，其他未知或缺失值按 medium 处理并提示；无需重新生成文章。质检失败会显示 HTTP 状态、出错字段或服务端原因。

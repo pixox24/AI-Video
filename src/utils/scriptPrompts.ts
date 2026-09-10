@@ -113,6 +113,7 @@ ${evidence}
 【已完成章节摘要】
 ${input.summaries}
 
+beat.energy 只用 fast（快）、medium（中速）、slow（慢）、hold（停留）；这是节奏，不是情绪强度，不使用 high/low/peak/punch 或中文标签。
 只输出 JSON：{"narration":string,"usedEvidenceIds":string[],"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
 }
 
@@ -139,5 +140,6 @@ ${input.action.instruction}
 
 ${lang === 'en' ? `Reference length: ${input.section.minUnits}–${input.section.maxUnits} words. Fulfil the chapter promise first; do not pad or remove necessary reasoning to meet a quota.` : `参考篇幅：${input.section.minUnits}–${input.section.maxUnits} 字。优先讲清本章任务，不为凑字重复，也不为压字删去必要论证。`}
 
+beat.energy 只用 fast（快）、medium（中速）、slow（慢）、hold（停留）；这是节奏，不是情绪强度，不使用 high/low/peak/punch 或中文标签。
 只输出 JSON：{"narration":string,"usedEvidenceIds":string[],"beats":[{"id","order","function","intent","narration","energy","visualIntent","needsHold"}]}`;
 }

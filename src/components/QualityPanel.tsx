@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { CustomLlmApiConfig, ScriptWorkspace } from '../types';
-import { qualityInputKey, qualityResponseSchema } from '../shared/quality';
+import { qualityFailureMessage, qualityInputKey, qualityResponseSchema } from '../shared/quality';
 import { flattenSectionBeats, joinSectionNarrations } from '../utils/scriptSections';
 import { rebuildForecast } from '../utils/scriptWorkspace';
 
@@ -9,6 +9,7 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
 }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [labelWarnings, setLabelWarnings] = useState<string[]>([]);
   const live = useRef(workspace); live.current = workspace;
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -24,14 +25,17 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
   const locked = (id: string) => workspace.sections?.some(s => s.id === id && s.status === 'locked') || workspace.outline?.sections.some(s => s.id === id && s.status === 'locked');
   const run = async (repair = false, sectionIds?: string[]) => {
     const snapshot = workspace;
-    setBusy(true); setMessage('');
+    setBusy(true); setMessage(''); setLabelWarnings([]);
     try {
       const response = await fetch('/api/script/quality-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...request, repair, sectionIds }) });
-      const data: unknown = await response.json();
-      if (!response.ok) throw new Error(response.status === 409 ? '锁定章节不能修订（409）。' : '质量检查失败，请重试。');
+      const data: unknown = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(qualityFailureMessage(response.status, data));
       const result = qualityResponseSchema.parse(data);
       if (!mounted.current || live.current !== snapshot) { if (mounted.current) setMessage('文案或锁定状态已改变，已丢弃旧结果，请重新检查。'); return; }
-      const next = repair ? { ...rebuildForecast({ ...workspace, sections: result.sections, beats: flattenSectionBeats(result.sections), fullNarration: joinSectionNarrations(result.sections, workspace.scriptLanguage || 'zh') }), sections: result.sections } : workspace;
+      setLabelWarnings(result.sections.flatMap(s => s.beatLabelWarnings || []));
+      // Preserve saved locked chapters, including legacy metadata, when applying repairs.
+      const sections = result.sections.map(s => locked(s.id) ? workspace.sections!.find(original => original.id === s.id)! : s);
+      const next = repair ? { ...rebuildForecast({ ...workspace, sections, beats: flattenSectionBeats(sections), fullNarration: joinSectionNarrations(sections, workspace.scriptLanguage || 'zh') }), sections } : workspace;
       onChange({ ...next, qualityReport: result.report, claims: result.report.claims,
         qualityInputKey: qualityInputKey({ ...request, sections: next.sections, outline: next.outline, claims: result.report.claims }) });
       setMessage(repair ? `已修订 ${result.rounds} 轮 · ${result.report.verdict}${result.stoppedReason === 'round_limit' ? ' · 已达两轮上限，请人工核对剩余问题' : ''}${result.failures.length ? ' · 部分修订失败，已保留成功章节' : ''}` : '质量检查完成');
@@ -48,7 +52,7 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
     {!canCheck && <p>请先生成大纲与章节口播。</p>}
     {report && stale && <p className="text-amber-300">内容已变化，请重新检查后再修复。</p>}
     {message && <p role="status">{message}</p>}
-    {workspace.sections?.flatMap(s => s.beatLabelWarnings || []).map((warning, index) => <p key={index} className="text-sm text-zinc-400">{warning}</p>)}
+    {[...new Set([...(workspace.sections?.flatMap(s => s.beatLabelWarnings || []) || []), ...labelWarnings])].map((warning, index) => <p key={index} className="text-sm text-zinc-400">{warning}</p>)}
     {report && <>
       <p>全文口播预算：{report.projectDuration?.complete === false ? '章节尚未写完，暂不作全文判定' : report.verdict} · {report.issues.length} 个内容 / 全文预算问题</p>
       {report.projectDuration && <p className="text-sm text-zinc-400">当前预计口播 {report.projectDuration.estimatedSec.toFixed(1)} 秒 · 全文参考 {report.projectDuration.minSec.toFixed(1)}–{report.projectDuration.maxSec.toFixed(1)} 秒</p>}

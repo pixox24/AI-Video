@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createExpressApp } from '../app';
-import { qualityInputKey, qualityRequestSchema, qualityResponseSchema, type QualityInput } from '../../src/shared/quality';
+import { qualityFailureMessage, qualityInputKey, qualityRequestSchema, qualityResponseSchema, type QualityInput } from '../../src/shared/quality';
 import { groundedClaims, qualityRevisionActions, sectionIsLocked } from './quality';
 import { assessProjectDuration, assessSectionDuration } from '../duration/engine';
 import { OUTLINE_SYSTEM, SECTION_DRAFT_SYSTEM, SECTION_REVISE_SYSTEM } from '../../src/utils/scriptPrompts';
@@ -86,6 +86,16 @@ test('HTTP quality loop: deletion → issue → in_range; locked 409; risk; two-
     const input = qualityFixture();
     const before = qualityResponseSchema.parse((await post('/api/script/quality-check', input)).body);
     assert.equal(before.report.verdict, 'in_range');
+    const legacy = { ...input, sections: input.sections.map(s => ({ ...s, beats: [{ id: `${s.id}-beat`, order: 1, function: 'proof', intent: '', narration: s.narration, targetSeconds: 1, energy: '高', visualIntent: '', needsHold: false }] })) };
+    const legacySnapshot = JSON.stringify(legacy);
+    const compatible = await post('/api/script/quality-check', legacy);
+    assert.equal(compatible.status, 200);
+    const compatibleResult = qualityResponseSchema.parse(compatible.body);
+    assert.ok(compatibleResult.sections.every(s => s.beats[0].energy === 'fast' && s.beatLabelWarnings?.length));
+    assert.deepEqual(compatibleResult.sections.map(s => s.narration), legacy.sections.map(s => s.narration));
+    assert.equal(JSON.stringify(legacy), legacySnapshot);
+    assert.equal(qualityRequestSchema.safeParse({ ...legacy, sections: legacy.sections.map(s => ({ ...s, narration: null })) }).success, false);
+
     const offset = structuredClone(input);
     offset.sections[0].narration = '字'.repeat(30); offset.sections[1].narration = '字'.repeat(290);
     const balanced = qualityResponseSchema.parse((await post('/api/script/quality-check', { ...offset, repair: true })).body);
@@ -184,7 +194,7 @@ test('修订标签归一化通过严格质量 schema；未知标签不重试，�
   globalThis.fetch = async () => {
     calls++;
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ narration, usedEvidenceIds: [],
-      beats: [{ function: label, narration: omitText ? '漏文' : narration, intent: '解释', energy: 'medium', visualIntent: '桌上两张卡片', needsHold: false }] }) } }] }));
+      beats: [{ function: label, narration: omitText ? '漏文' : narration, intent: '解释', energy: 'peak', visualIntent: '桌上两张卡片', needsHold: false }] }) } }] }));
   };
   process.env.LLM_MOCK = 'false'; process.env.GENERATION_RUNS_PATH = path.join(dir, 'runs.jsonl');
   try {
@@ -198,6 +208,8 @@ test('修订标签归一化通过严格质量 schema；未知标签不重试，�
       assert.equal(result.status, 200); assert.equal(calls, before + 1);
       assert.equal(result.section?.narration, narration);
       assert.equal(result.section?.beats[0].narration, narration);
+      assert.equal(result.section?.beats[0].energy, 'medium');
+      assert.match(result.section?.beatLabelWarnings?.join('') || '', /默认节奏/);
       assert.equal(result.section?.beats[0].function, label === 'setup' ? 'setup' : 'proof');
       assert.ok(qualityRequestSchema.safeParse({ ...input, sections: result.sections }).success);
       assert.deepEqual(result.sections[0], input.sections[0]);
@@ -213,4 +225,11 @@ test('修订标签归一化通过严格质量 schema；未知标签不重试，�
     if (priorRuns === undefined) delete process.env.GENERATION_RUNS_PATH; else process.env.GENERATION_RUNS_PATH = priorRuns;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('质量失败提示保留具体原因、输入路径及非 JSON 状态', () => {
+  assert.match(qualityFailureMessage(400, { issues: [{ path: ['sections', 0, 'beats', 0, 'energy'], message: 'invalid' }] }), /sections.0.beats.0.energy/);
+  assert.match(qualityFailureMessage(503, { error: '模型超时' }), /模型超时/);
+  assert.match(qualityFailureMessage(502, null), /502/);
+  assert.match(qualityFailureMessage(409, {}), /锁定/);
 });

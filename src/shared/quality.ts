@@ -1,4 +1,4 @@
-import { BEAT_FUNCTIONS } from '../utils/scriptSections';
+import { BEAT_FUNCTIONS, BEAT_ENERGIES, normalizeBeatEnergy } from '../utils/scriptSections';
 import { z } from 'zod';
 import { contentBriefDraftSchema, durationSpecSchema, scriptPaceSchema } from './contentBrief';
 
@@ -14,7 +14,7 @@ export const evaluatorSchema = z.object({ issues: z.array(qualityIssueSchema), c
 export const sectionStatusSchema = z.enum(['planned', 'drafting', 'ready', 'locked', 'needs-revision', 'failed']);
 const role = z.enum(['hook', 'setup', 'body', 'turn', 'proof', 'reveal', 'cta']);
 export const beatSchema = z.object({ id: z.string(), order: z.number(), function: z.enum(BEAT_FUNCTIONS),
-  intent: z.string(), narration: z.string(), targetSeconds: z.number(), energy: z.enum(['fast', 'medium', 'slow', 'hold']),
+  intent: z.string(), narration: z.string(), targetSeconds: z.number(), energy: z.enum(BEAT_ENERGIES),
   visualIntent: z.string(), needsHold: z.boolean(), sectionId: z.string().optional() }).strict();
 export const scriptSectionSchema = z.object({ id: z.string().min(1), order: z.number(), role, title: z.string(), outline: z.string().optional(),
   actualSec: z.number().positive().optional(), beatLabelWarnings: z.array(z.string()).optional(),
@@ -28,8 +28,21 @@ export const qualityOutlineSchema = z.object({ status: z.enum(['draft', 'confirm
     narrationBudgetSec: z.number().nonnegative().optional(), visualHoldBudgetSec: z.number().nonnegative().optional(), retentionDevice: z.string().optional(), transitionOut: z.string().optional()
   }).strict()).min(1)
 }).strict();
+// Accept legacy pace metadata at the input boundary; all content fields remain strict.
+const qualityInputSectionSchema = scriptSectionSchema.extend({
+  beats: z.array(beatSchema.extend({ energy: z.unknown().optional() }))
+}).transform(section => {
+  const warnings = [...(section.beatLabelWarnings || [])];
+  const beats = section.beats.map((beat, index) => {
+    const normalized = normalizeBeatEnergy(beat.energy);
+    if (normalized.warning) warnings.push(`第 ${section.order} 章第 ${index + 1} 个节拍：${normalized.warning}`);
+    return { ...beat, energy: normalized.energy };
+  });
+  return { ...section, beats, ...(warnings.length ? { beatLabelWarnings: [...new Set(warnings)] } : {}) };
+});
+
 export const qualityRequestSchema = z.object({
-  sections: z.array(scriptSectionSchema).min(1), outline: qualityOutlineSchema,
+  sections: z.array(qualityInputSectionSchema).min(1), outline: qualityOutlineSchema,
   scriptLanguage: z.enum(['zh', 'en']).default('zh'), pace: scriptPaceSchema.default('medium'),
   contentBrief: contentBriefDraftSchema.optional(), durationSpec: durationSpecSchema.optional(),
   brief: z.object({ audience: z.string(), coreQuestion: z.string(), coreConclusion: z.string(),
@@ -59,3 +72,16 @@ export const qualityReportSchema = z.object({ id: z.string(), stage: z.literal('
 export const qualityResponseSchema = z.object({ ok: z.boolean(), report: qualityReportSchema, sections: z.array(scriptSectionSchema), rounds: z.number().int().min(0).max(2),
   history: z.array(qualityReportSchema), stoppedReason: z.enum(['checked', 'resolved', 'round_limit', 'no_editable_issues', 'revision_failed']),
   failures: z.array(z.object({ sectionId: z.string(), status: z.number(), error: z.string() }).strict()) }).strict();
+
+export function qualityFailureMessage(status: number, data: unknown): string {
+  if (status === 409) return '锁定章节不能修订（409）。';
+  const failure = z.object({ error: z.string().optional(), issues: z.array(z.object({
+    path: z.array(z.union([z.string(), z.number()])), message: z.string()
+  })).optional() }).safeParse(data);
+  const details = failure.success ? failure.data : undefined;
+  if (status === 400 && details?.issues?.length) {
+    const paths = details.issues.slice(0, 3).map(issue => issue.path.join('.') || '请求内容').join('、');
+    return `质量检查输入格式不正确（400）：${paths}，共 ${details.issues.length} 处。请更新代码并刷新；若仍失败，请反馈这些字段。`;
+  }
+  return `质量检查失败（${status}）：${details?.error?.slice(0, 600) || '服务未返回具体原因，请检查服务日志或网络连接。'}`;
+}

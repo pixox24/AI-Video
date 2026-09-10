@@ -5,7 +5,7 @@ import {
   ScriptOutline,
   ScriptSection
 } from '../types';
-import { emptySectionFromPlan, normalizeBeatFunction, ScriptSectionPlan } from './scriptSections';
+import { emptySectionFromPlan, normalizeBeatEnergy, normalizeBeatFunction, ScriptSectionPlan } from './scriptSections';
 import { draftNeedsOutlinePreview, draftRequiresOutline, validateSectionAgainstOutline } from './scriptOutline';
 
 export type DraftAsk = (user: string, maxTokens?: number, system?: string) => Promise<any | null>;
@@ -64,6 +64,8 @@ export function materializeSectionFromLlm(
   const beats = Array.isArray(piece?.beats) && piece.beats.length > 0
     ? piece.beats.map((beat: { function?: unknown; intent?: string; narration?: string; targetSeconds?: number; energy?: string; visualIntent?: string; needsHold?: boolean }, index: number) => {
       const label = normalizeBeatFunction(beat.function, planned.role);
+      const energy = normalizeBeatEnergy(beat.energy);
+      if (energy.warning) beatLabelWarnings.push(`第 ${planned.order} 章第 ${index + 1} 个节拍：${energy.warning}`);
       if (label.warning) beatLabelWarnings.push(`第 ${planned.order} 章第 ${index + 1} 个节拍：${label.warning}`);
       return ({
       id: `${section.id}-beat-${index + 1}`,
@@ -72,7 +74,7 @@ export function materializeSectionFromLlm(
       intent: beat.intent || '',
       narration: String(beat.narration || '').trim(),
       targetSeconds: Number(beat.targetSeconds) || section.targetSeconds,
-      energy: beat.energy || 'medium',
+      energy: energy.energy,
       visualIntent: beat.visualIntent || '',
       needsHold: Boolean(beat.needsHold),
       sectionId: section.id

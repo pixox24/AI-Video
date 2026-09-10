@@ -1,4 +1,4 @@
-import { normalizeBeatFunction, BEAT_FUNCTIONS } from './scriptSections';
+import { normalizeBeatEnergy, normalizeBeatFunction, BEAT_FUNCTIONS } from './scriptSections';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDurationBudget } from './scriptBudget';
@@ -129,7 +129,7 @@ test('节拍标签本地修正，合法组合保留，不重写正文或额外�
     let calls = 0;
     const result = await draftOneSection({ planned, section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
       language: 'zh', maxTokens: 1024, ask: async () => {
-        calls++; return { narration, beats: [{ function: value, narration }] };
+        calls++; return { narration, beats: [{ function: value, narration, energy: 'medium' }] };
       } });
     assert.equal(calls, 1); assert.equal(result.failed, false);
     assert.equal(result.section?.narration, narration);
@@ -144,4 +144,26 @@ test('节拍标签本地修正，合法组合保留，不重写正文或额外�
     assert.equal(result.failed, true); assert.equal(calls, 3);
   }
 
+});
+
+test('节奏标签共用归一化：合法值、旧别名、未知值及正文不变', async () => {
+  for (const energy of ['fast', 'medium', 'slow', 'hold'] as const) assert.deepEqual(normalizeBeatEnergy(energy), { energy });
+  for (const [value, expected] of [['high', 'fast'], ['高', 'fast'], ['low', 'slow'], ['低', 'slow'], ['mid', 'medium'], ['中', 'medium'], ['steady', 'medium'], [' FAST ', 'fast']]) {
+    assert.equal(normalizeBeatEnergy(value).energy, expected);
+    assert.ok(normalizeBeatEnergy(value).warning);
+  }
+  for (const value of ['peak', 'punch', '__proto__', 'constructor', '', null, undefined, 42, {}]) {
+    assert.equal(normalizeBeatEnergy(value).energy, 'medium');
+    assert.match(normalizeBeatEnergy(value).warning!, /默认节奏/);
+  }
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: 1000 });
+  const outline = outlineFromPlans(plans);
+  const section = seedSectionsFromOutline(plans, outline, [])[2];
+  let calls = 0;
+  const narration = '已有正文逐字保留。';
+  const result = await draftOneSection({ planned: outline.sections[2], section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
+    language: 'zh', maxTokens: 1024, ask: async () => { calls++; return { narration, beats: [{ function: 'proof', narration, energy: 'peak' }] }; } });
+  assert.equal(calls, 1); assert.equal(result.failed, false);
+  assert.equal(result.section?.narration, narration); assert.equal(result.section?.beats[0].narration, narration);
+  assert.equal(result.section?.beats[0].energy, 'medium'); assert.match(result.section?.beatLabelWarnings?.join('') || '', /默认节奏/);
 });
