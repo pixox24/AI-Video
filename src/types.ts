@@ -775,6 +775,10 @@ export interface ScriptOutlineSection {
   minUnits: number;
   maxUnits: number;
   status: SectionStatus;
+  narrationBudgetSec: number;
+  visualHoldBudgetSec: number;
+  retentionDevice: string;
+  transitionOut: string;
 }
 
 export interface ScriptOutline {

@@ -28,6 +28,8 @@ export const durationSpecSchema = z.object({
   pace: scriptPaceSchema,
   narrationRatio: z.number().positive().max(1)
 }).strict().refine(s => s.minSeconds <= s.targetSeconds && s.targetSeconds <= s.maxSeconds, { message: '需满足 min ≤ target ≤ max', path: ['targetSeconds'] });
+export const outlineSectionSchema = z.object({ id: z.string(), order: z.number(), title: z.string(), role: z.string(), audienceQuestion: z.string(), promise: z.string(), evidenceIds: z.array(z.string()), bridgeFromPrevious: z.string(), bridgeToNext: z.string(), targetSeconds: z.number(), targetUnits: z.number(), minUnits: z.number(), maxUnits: z.number(), status: z.enum(['planned','drafting','ready','locked','needs-revision','failed']), narrationBudgetSec: z.number().nonnegative(), visualHoldBudgetSec: z.number().nonnegative(), retentionDevice: z.string(), transitionOut: z.string() }).strict();
+export const outlineSchema = z.object({ status: z.enum(['draft','confirmed','stale']), version: z.number(), oneSentenceThesis: z.string(), sections: z.array(outlineSectionSchema).min(1), confirmedAt: z.number().optional() }).strict();
 
 export const DURATION_PRESETS = {
   insight: { label: '观点解析', minSeconds: 300, targetSeconds: 420, maxSeconds: 480 },

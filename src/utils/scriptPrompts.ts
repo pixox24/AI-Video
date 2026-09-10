@@ -6,7 +6,9 @@ export const OUTLINE_SYSTEM = `你是长视频编导与结构编辑，不是一�
 不得把用户未提供或未确认的事实写成事实；不确定的内容标为观点或待核实。
 每章只完成一个明确任务，并且必须给观众带来新的信息、证据、步骤或因果推进。
 不得为了填满时长重复题目、重复结论或写空泛过渡。
-只输出指定 JSON，禁止 Markdown。`;
+只输出指定 JSON，禁止 Markdown。
+
+【Phase 2 追加约束】必须围绕 viewerPromise 规划唯一核心命题；每段输出 narrationBudgetSec、visualHoldBudgetSec、retentionDevice、transitionOut。口播预算合计须在全片预算 ±10%，hook 总预算不超过 35 秒，30 秒内交付第一份实质信息。`;
 
 export const SECTION_DRAFT_SYSTEM = `你只写指定章节，不能改题、不能改全片结论、不能改变其他章节。
 本章必须兑现 promise，并且仅使用列出的 evidenceIds 对应事实；没有证据时使用“观点/经验”表达，禁止伪造来源、数据、人物和案例。
@@ -27,6 +29,7 @@ export function outlineUserPrompt(input: {
   plans: Array<{ id: string; order: number; title: string; role: string; targetSeconds: number; minUnits: number; maxUnits: number }>;
   unitName: string;
   notesRule?: string;
+  viewerPromise?: string;
 }): string {
   const evidence = input.brief.evidence.length
     ? input.brief.evidence.map((item) => `${item.id}: ${item.claim}${item.source ? `（${item.source}）` : ''}`).join('\n')
@@ -39,6 +42,7 @@ export function outlineUserPrompt(input: {
 ${input.notesRule || ''}
 
 ${input.contextBlock}
+【观众承诺】${input.viewerPromise || '（未填）'}
 
 【核心问题】${input.brief.coreQuestion || '（未填）'}
 【目标受众】${input.brief.audience || '（未填）'}
@@ -52,7 +56,7 @@ ${evidence}
 【章节方案】
 ${input.plans.map((plan) => `${plan.order}. ${plan.id} ${plan.title} ${plan.role} ${plan.targetSeconds}s ${plan.minUnits}–${plan.maxUnits}${input.unitName}`).join('\n')}
 
-只输出 JSON：{"oneSentenceThesis":string,"sections":[{"id","title","audienceQuestion","promise","evidenceIds","bridgeFromPrevious","bridgeToNext"}]}`;
+只输出 JSON：{"oneSentenceThesis":string,"sections":[{"id","title","audienceQuestion","promise","evidenceIds","bridgeFromPrevious","bridgeToNext","narrationBudgetSec","visualHoldBudgetSec","retentionDevice","transitionOut"}]}`;
 }
 
 export function sectionDraftUserPrompt(input: {

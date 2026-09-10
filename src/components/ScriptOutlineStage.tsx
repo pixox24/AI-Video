@@ -411,6 +411,8 @@ export function ScriptOutlineStage({
                 placeholder="章节承诺，禁止写「继续讲解」"
                 className="w-full bg-[#121217] border border-[#2b2b36] rounded-lg px-2 py-1.5 text-[12px] text-zinc-200"
               />
+              <input value={section.retentionDevice} onChange={(e) => outline && patchOutline(updateOutlineSection(outline, section.id, { retentionDevice: e.target.value }))} placeholder="留存设计：这一段靠什么留住观众" className="w-full bg-[#121217] border border-[#2b2b36] rounded-lg px-2 py-1.5 text-[12px] text-zinc-200" />
+              <input value={section.transitionOut} onChange={(e) => outline && patchOutline(updateOutlineSection(outline, section.id, { transitionOut: e.target.value }))} placeholder="移交下一段的问题" className="w-full bg-[#121217] border border-[#2b2b36] rounded-lg px-2 py-1.5 text-[12px] text-zinc-200" />
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"

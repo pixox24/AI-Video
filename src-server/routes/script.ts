@@ -65,6 +65,7 @@ import { fallbackTopicCardsServer } from "../pipeline/script-fallbacks";
 import { fetchPageFinding, searchWeb } from "../pipeline/research";
 import { scriptDraftContext } from "../pipeline/script-context";
 import { asClientLlmApi } from "../llm/client-api";
+import { outlineSchema } from '../../src/shared/contentBrief';
 
 /** Compatibility shim: existing callOpenAiCompatibleChat sites go through gateway. */
 async function gatewayChat(opts: {
@@ -765,7 +766,8 @@ app.post("/api/script/outline", async (req, res) => {
         brief,
         contextBlock: `${styleContract}\n${contextBlock}`,
         plans,
-        unitName
+        unitName,
+        viewerPromise: body.contentBrief?.viewerPromise
       }),
       temperature: 0.5,
       timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
@@ -775,13 +777,17 @@ app.post("/api/script/outline", async (req, res) => {
       status: "draft",
       thesis: String(parsed?.oneSentenceThesis || title)
     }), plans, parsed?.sections);
+    const locked = new Map((body.outline?.sections || []).filter((item: Loose) => item.status === 'locked').map((item: Loose) => [item.id, item]));
+    for (const section of outline.sections) { const old = locked.get(section.id); if (old) Object.assign(section, old); }
+    const strict = outlineSchema.safeParse(outline);
+    if (!strict.success) return res.status(503).json({ ok: false, code: 'outline_schema_invalid', error: strict.error.message });
     const validation = validateOutline(outline, brief, {
       ...body.budget,
       targetSeconds,
       maxChars,
       durationMode: body.budget?.durationMode || "target-driven"
     });
-    return res.json({ ok: validation.ok, outline, brief, warnings: validation.warnings, scriptForm: form });
+    return res.json({ ok: validation.ok, outline: strict.data, brief, warnings: validation.warnings, scriptForm: form });
   } catch (error: unknown) {
     const outline = outlineFromPlans(plans, { status: "draft", thesis: title });
     return res.status(503).json({

@@ -1,4 +1,5 @@
 import type { DurationBudget, DurationPreset, DurationSpec, ScriptForm, ScriptLanguage, ScriptPace } from '../../src/types';
+import type { ScriptOutlineSection } from '../../src/types';
 import { DURATION_PRESETS, durationSpecSchema } from '../../src/shared/contentBrief';
 import { countBudgetUnits, paceUnitsPerSecond } from '../../src/utils/scriptLanguage';
 import { FILL_RATIO_MIN, FILL_RATIO_MAX } from '../../src/utils/scriptDuration';
@@ -12,6 +13,11 @@ export function durationSpecForm(spec: DurationSpec): ScriptForm {
 }
 export function estimateNarrationSeconds(text: string, language: ScriptLanguage, pace: ScriptPace): number {
   return countBudgetUnits(text, language) / paceUnitsPerSecond(pace, language);
+}
+export function budgetOutlineSections(sections: ScriptOutlineSection[], targetSeconds: number, narrationRatio = 0.85): ScriptOutlineSection[] {
+  const narration = targetSeconds * narrationRatio; const hold = targetSeconds - narration;
+  const weights = sections.map(s => Math.max(1, s.targetSeconds)); const total = weights.reduce((a, b) => a + b, 0);
+  return sections.map((s, i) => ({ ...s, narrationBudgetSec: narration * weights[i] / total, visualHoldBudgetSec: hold * weights[i] / total }));
 }
 /** Layer new budgets on the existing budget without changing legacy pace tables. Browser-safe. */
 export function applyDurationSpec(budget: DurationBudget, input: DurationSpec): DurationBudget {

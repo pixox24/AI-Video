@@ -98,6 +98,10 @@ export function outlineFromPlans(
       minUnits: plan.minUnits,
       maxUnits: plan.maxUnits,
       status: 'planned'
+      ,narrationBudgetSec: plan.targetSeconds * 0.85
+      ,visualHoldBudgetSec: plan.targetSeconds * 0.15
+      ,retentionDevice: ''
+      ,transitionOut: ''
     }))
   };
 }
@@ -129,6 +133,10 @@ export function stampOutlineBudgets(
       minUnits: plan.minUnits,
       maxUnits: plan.maxUnits,
       status: previousStatus && previousStatus !== 'planned' ? previousStatus : 'planned'
+      ,narrationBudgetSec: Number(hit.narrationBudgetSec) || plan.targetSeconds * 0.85
+      ,visualHoldBudgetSec: Number(hit.visualHoldBudgetSec) || plan.targetSeconds * 0.15
+      ,retentionDevice: String(hit.retentionDevice || '').trim()
+      ,transitionOut: String(hit.transitionOut || '').trim()
     } satisfies ScriptOutlineSection;
   });
   return {
@@ -201,6 +209,12 @@ export function validateOutline(
     warnings.push(`章节目标字数合计 ${unitSum}，与全片目标 ${length.targetUnits} 相差超过 1`);
   }
   const form = scriptFormForSeconds(budget.targetSeconds);
+  const totalNarration = outline.sections.reduce((sum, section) => sum + section.narrationBudgetSec, 0);
+  const totalHold = outline.sections.reduce((sum, section) => sum + section.visualHoldBudgetSec, 0);
+  const speechBudget = budget.speechTargetSeconds || budget.speechSeconds;
+  if (Math.abs(totalNarration - speechBudget) > speechBudget * 0.1) warnings.push('章节口播预算合计必须在全片口播预算 ±10% 内');
+  if (Math.abs(totalNarration + totalHold - budget.targetSeconds) > budget.targetSeconds * 0.1) warnings.push('章节总时长预算合计必须在全片目标 ±10% 内');
+  if (outline.sections[0] && outline.sections[0].narrationBudgetSec + outline.sections[0].visualHoldBudgetSec > 35) warnings.push('hook 段总预算不得超过 35 秒');
   if (form === 'medium' && outline.sections.length < 3) warnings.push('段落视频至少需要 3 章');
   if ((form === 'long' || form === 'extended') && outline.sections.length < 6) warnings.push('章节视频至少需要 6 章');
   return { ok: warnings.length === 0, warnings };
@@ -447,7 +461,11 @@ export function addOutlineSection(outline: ScriptOutline, afterId: string | null
     targetUnits: 40,
     minUnits: 36,
     maxUnits: 42,
-    status: 'planned'
+    status: 'planned',
+    narrationBudgetSec: 10.2,
+    visualHoldBudgetSec: 1.8,
+    retentionDevice: '',
+    transitionOut: ''
   };
   sections.splice(insertAt, 0, template);
   return rescaleOutline({ ...outline, sections }, budget);
@@ -464,7 +482,7 @@ export function removeOutlineSection(outline: ScriptOutline, sectionId: string, 
 export function updateOutlineSection(
   outline: ScriptOutline,
   sectionId: string,
-  updates: Partial<Pick<ScriptOutlineSection, 'title' | 'promise' | 'audienceQuestion' | 'bridgeFromPrevious' | 'bridgeToNext' | 'role'>>
+  updates: Partial<Pick<ScriptOutlineSection, 'title' | 'promise' | 'audienceQuestion' | 'bridgeFromPrevious' | 'bridgeToNext' | 'role' | 'retentionDevice' | 'transitionOut'>>
 ): ScriptOutline {
   return {
     ...outline,
