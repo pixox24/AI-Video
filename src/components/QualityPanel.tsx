@@ -4,8 +4,8 @@ import { qualityInputKey, qualityResponseSchema } from '../shared/quality';
 import { flattenSectionBeats, joinSectionNarrations } from '../utils/scriptSections';
 import { rebuildForecast } from '../utils/scriptWorkspace';
 
-export function QualityPanel({ workspace, onChange, customLlmApi }: {
-  workspace: ScriptWorkspace; onChange: (workspace: ScriptWorkspace) => void; customLlmApi?: CustomLlmApiConfig;
+export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
+  workspace: ScriptWorkspace; onChange: (workspace: ScriptWorkspace) => void; customLlmApi?: CustomLlmApiConfig; projectId?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -15,7 +15,7 @@ export function QualityPanel({ workspace, onChange, customLlmApi }: {
   const request = {
     sections: workspace.sections || [], outline: workspace.outline, scriptLanguage: workspace.scriptLanguage || 'zh',
     pace: workspace.durationBudget.pace, durationSpec: workspace.durationSpec, contentBrief: workspace.contentBrief,
-    brief: workspace.brief, claims: workspace.claims || [], llmApi: customLlmApi
+    brief: workspace.brief, claims: workspace.claims || [], llmApi: customLlmApi, projectId
   };
   const report = workspace.qualityReport;
   // Exclude secrets from persisted comparison data.

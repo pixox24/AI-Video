@@ -379,7 +379,8 @@ app.post("/api/script/draft", async (req, res) => {
     outline: rawOutline,
     sections: existingDraftSections,
     scriptFormOverride,
-    confirmOutlineBeforeDraft
+    confirmOutlineBeforeDraft,
+    projectId
   } = requestBody(req.body as unknown);
   const language = normalizeScriptLanguage(scriptLanguage || budget?.scriptLanguage);
   const title = String(
@@ -571,7 +572,8 @@ ${contextBlock}
             : systemPrompt === SECTION_DRAFT_SYSTEM
               ? "script_section"
               : "script_draft",
-          role: systemPrompt === OUTLINE_SYSTEM ? "planner" : "drafter"
+          role: systemPrompt === OUTLINE_SYSTEM ? "planner" : "drafter",
+          projectId
         }).then((result) => {
           clearTimeout(timer);
           if (!result.data && result.reason) latestLlmFailureReason = result.reason;
@@ -772,7 +774,8 @@ app.post("/api/script/outline", async (req, res) => {
       }),
       temperature: 0.5,
       timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
-      maxTokens: 4000
+      maxTokens: 4000,
+      projectId: body.projectId
     });
     const outline = stampOutlineBudgets(outlineFromPlans(plans, {
       status: "draft",
@@ -848,7 +851,8 @@ app.post("/api/script/section-draft", async (req, res) => {
       user,
       temperature: 0.7,
       timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
-      maxTokens: LLM_LONGFORM_MAX_TOKENS
+      maxTokens: LLM_LONGFORM_MAX_TOKENS,
+      projectId: body.projectId
     });
     let warnings: string[] = [];
     let section = emptySectionFromPlan(plans[planned.order - 1] || plans[0]);
@@ -896,7 +900,8 @@ app.post("/api/script/section-draft", async (req, res) => {
         user: `${user}\n上次输出未通过校验：${warnings.join("；")}。请重写本章。`,
         temperature: 0.5,
         timeoutMs: llmTimeoutMsForSeconds(targetSeconds),
-        maxTokens: LLM_LONGFORM_MAX_TOKENS
+        maxTokens: LLM_LONGFORM_MAX_TOKENS,
+        projectId: body.projectId
       });
     }
     return res.status(503).json({
@@ -944,7 +949,7 @@ app.post("/api/script/section-revise", async (req, res) => {
   if (!action?.sectionId || !action?.action) return res.status(400).json({ ok: false, error: "缺少章节修订动作。" });
   const existing = Array.isArray(body.sections) ? body.sections : [];
   const result = await executeSectionRevision({ sections: existing, action, language, targetSeconds, brief, llmApi: body.llmApi,
-    planned: (body.outline?.sections || []).find((item: Loose) => item.id === action.sectionId) });
+    planned: (body.outline?.sections || []).find((item: Loose) => item.id === action.sectionId), projectId: body.projectId });
   if (result.status === 200) return res.json({ ok: true, section: result.section, sections: result.sections });
   return res.status(result.status).json({ ok: false, ...(result.code ? { code: result.code } : {}), error: result.error,
     ...(result.status === 503 ? { sections: result.sections } : {}) });

@@ -47,6 +47,7 @@ export function ScriptOutlineStage({
   busy,
   customLlmApi,
   stylePack,
+  projectId,
   onChange,
   onStatus
 }: {
@@ -54,6 +55,7 @@ export function ScriptOutlineStage({
   busy: boolean;
   customLlmApi?: CustomLlmApiConfig;
   stylePack?: StylePack | null;
+  projectId?: string;
   onChange: (next: ScriptWorkspace) => void;
   onStatus: (message: string, error?: string) => void;
 }) {
@@ -109,7 +111,8 @@ export function ScriptOutlineStage({
           llmApi: customLlmApi,
           stylePack,
           scriptLanguage: workspace.scriptLanguage,
-          scriptFormOverride: workspace.scriptFormOverride
+          scriptFormOverride: workspace.scriptFormOverride,
+          projectId
         })
       });
       const data = await res.json().catch(() => ({}));
@@ -160,7 +163,8 @@ export function ScriptOutlineStage({
           stylePack,
           scriptLanguage: workspace.scriptLanguage,
           scriptFormOverride: workspace.scriptFormOverride,
-          confirmOutlineBeforeDraft: workspace.confirmOutlineBeforeDraft
+          confirmOutlineBeforeDraft: workspace.confirmOutlineBeforeDraft,
+          projectId
         })
       });
       const data = await res.json().catch(() => ({}));

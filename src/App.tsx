@@ -53,6 +53,7 @@ import { runConcurrencyPool } from './utils/concurrencyPool';
 import { forecastScriptHash, hydrateScriptWorkspace, stylePackFingerprint } from './utils/scriptWorkspace';
 import { SidebarNav } from './components/SidebarNav';
 import { ScriptPanel } from './components/ScriptPanel';
+import { ScriptWorkspaceView } from './components/ScriptWorkspaceView';
 import { StoryboardPanel } from './components/StoryboardPanel';
 import { StylePanel } from './components/StylePanel';
 import { SubtitlePanel } from './components/SubtitlePanel';
@@ -1827,62 +1828,25 @@ export default function App() {
           onOpenStylePanel={() => setActiveTab('style')}
         />
       ) : activeTab === 'script' ? (
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        <ScriptPanel
-          key={project.id}
-          projectId={project.id}
-          workspace={project.scriptWorkspace || hydrateScriptWorkspace(project)}
-          onChange={(scriptWorkspace) => updateProject({ scriptWorkspace })}
-          onTopicChange={(topic) => updateProject({ topic, title: topic ? topic.slice(0, 20) : project.title })}
+        <ScriptWorkspaceView
+          project={project}
+          onProjectChange={updateProject}
           onClipsChange={applyClipsChange}
-          existingClips={project.clips}
-          visualStyle={project.settings.visualStyle}
-          stylePack={hydrateActiveStylePack(project.settings)}
-          aspectRatio={project.settings.aspectRatio}
-          customLlmApi={resolveLlmApi(project.settings.customLlmApi)}
-          customTtsApi={resolveTtsApi(project.settings.customTtsApi)}
-          voiceCharacter={project.audio.voiceCharacter}
-          speechRate={project.audio.speechRate}
           onSelectClip={setSelectedClipId}
           onOpenStoryboard={() => setActiveTab('storyboard')}
           onNeedFullNarration={handleApplyStoryboard}
-          sentenceGap={resolveSentenceGap(project.audio)}
-          outroHold={resolveOutro(project.settings).hold}
           onGenerateCharacterRef={handleGenerateCharacterRef}
           onGenerateCharacterRefAll={handleGenerateAllCharacterRefs}
           onApplyStyleOnly={handleApplyStyleToAllClips}
           isApplyingStyle={isGeneratingAllImages}
           isGeneratingNarration={isGeneratingNarration}
           narrationError={narrationError}
-          narrationFresh={isNarrationTrackFresh(project.audio, project.clips, resolveTtsApi(project.settings.customTtsApi))}
           isPlaying={isPlaying}
           currentTime={currentTime}
+          onTimeUpdate={setCurrentTime}
           onTogglePlay={() => setIsPlaying((prev) => !prev)}
-          onRecommendBgm={(trackId) => {
-            updateProject({
-              audio: project.audio.bgmTrackId === 'custom-uploaded'
-                ? project.audio
-                : { ...project.audio, bgmEnabled: true, bgmTrackId: trackId }
-            });
-          }}
+          selectedClipId={selectedClipId}
         />
-        <div className="h-0 w-0 overflow-hidden" aria-hidden>
-          <VideoPlayerStage
-            clips={project.clips}
-            subtitles={project.subtitles}
-            audio={project.audio}
-            settings={project.settings}
-            currentTime={currentTime}
-            onTimeUpdate={setCurrentTime}
-            isPlaying={isPlaying}
-            onTogglePlay={() => setIsPlaying((prev) => !prev)}
-            selectedClipId={selectedClipId}
-            onSelectClip={setSelectedClipId}
-            isGeneratingNarration={isGeneratingNarration}
-            narrationError={narrationError}
-          />
-        </div>
-        </div>
       ) : (
         <main className="flex-1 flex flex-col h-full min-w-0 gap-2.5 sm:gap-3 overflow-hidden">
           <TopHeader

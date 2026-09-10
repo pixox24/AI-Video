@@ -5,8 +5,8 @@ import { canEnterOutline, emptyContentBrief } from '../utils/contentBrief';
 import { durationSpecForPreset, durationSpecForm, applyDurationSpec, estimateNarrationSeconds } from '../../src-server/duration/engine';
 import { buildDurationBudget, PACE_PRESETS } from '../utils/scriptBudget';
 
-export function BriefStage({ workspace, onChange, customLlmApi }: {
-  workspace: ScriptWorkspace; onChange: (next: ScriptWorkspace) => void; customLlmApi?: CustomLlmApiConfig;
+export function BriefStage({ workspace, onChange, customLlmApi, projectId }: {
+  workspace: ScriptWorkspace; onChange: (next: ScriptWorkspace) => void; customLlmApi?: CustomLlmApiConfig; projectId?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -28,7 +28,7 @@ export function BriefStage({ workspace, onChange, customLlmApi }: {
     setBusy(true); setError('');
     try {
       const response = await fetch('/api/script/brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        input: brief.topic || workspace.intentNotes, contentBrief: brief, durationSpec: spec, scriptLanguage: workspace.scriptLanguage, llmApi: customLlmApi
+        input: brief.topic || workspace.intentNotes, contentBrief: brief, durationSpec: spec, scriptLanguage: workspace.scriptLanguage, llmApi: customLlmApi, projectId
       }) });
       const data: unknown = await response.json();
       const result = contentBriefSchema.safeParse(typeof data === 'object' && data !== null && 'contentBrief' in data ? data.contentBrief : null);

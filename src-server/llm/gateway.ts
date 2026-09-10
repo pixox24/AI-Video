@@ -199,6 +199,7 @@ export async function runScriptLlmJsonDetailed(opts: {
   maxTokens?: number;
   stage?: string;
   role?: GenerateStructuredInput["role"];
+  projectId?: string;
 }): Promise<ScriptLlmJsonAttempt> {
   const result = await generateStructured({
     stage: opts.stage || "script_draft",
@@ -208,7 +209,8 @@ export async function runScriptLlmJsonDetailed(opts: {
     user: opts.user,
     temperature: opts.temperature,
     timeoutMs: opts.timeoutMs,
-    maxTokens: opts.maxTokens
+    maxTokens: opts.maxTokens,
+    projectId: opts.projectId
   });
   return { data: result.data, reason: result.reason };
 }
@@ -222,6 +224,7 @@ export async function runScriptLlmJson(opts: {
   maxTokens?: number;
   stage?: string;
   role?: GenerateStructuredInput["role"];
+  projectId?: string;
 }): Promise<unknown> {
   return (await runScriptLlmJsonDetailed(opts)).data;
 }
