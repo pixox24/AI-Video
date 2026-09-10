@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { BriefStage } from './BriefStage';
+import { canEnterOutline } from '../utils/contentBrief';
+import { durationSpecForm } from '../../src-server/duration/engine';
 import {
   ArrowRight,
   Clapperboard,
@@ -319,7 +322,14 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
     return committed;
   };
 
-  const setStage = (stage: ScriptStage) => commit({ ...workspace, stage, gate: 'deep' });
+  const setStage = (stage: ScriptStage) => {
+    if (stage === 'beats' && !canEnterOutline(workspace)) {
+      setError('请先填写观众承诺。');
+      commit({ ...workspace, stage: 'brief', gate: 'deep' });
+      return;
+    }
+    commit({ ...workspace, stage, gate: 'deep' });
+  };
 
   const handleFastGate = async () => {
     if (workspace.intent === 'have-title' && !titleValid) {
@@ -463,6 +473,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
   };
 
   const handleDraft = async () => {
+    if (!canEnterOutline(workspace)) { setError('请先填写观众承诺。'); setStage('brief'); return; }
     let source = workspace;
     let card = selected;
     if (workspace.intent === 'have-title' && !card && isLockedTitleValid(workspace.lockedTitle, scriptLanguage)) {
@@ -502,6 +513,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           stylePack,
           scriptLanguage,
           brief: source.brief,
+          contentBrief: source.contentBrief,
+          durationSpec: source.durationSpec,
           outline: source.outline,
           sections: source.sections,
           scriptFormOverride: source.scriptFormOverride,
@@ -1243,6 +1256,10 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
         </nav>
 
         <div key={workspace.stage} className="flex-1 min-w-0 overflow-y-auto custom-scrollbar bg-[#121217] p-5 lg:p-6">
+          {workspace.stage === 'brief' && <BriefStage workspace={workspace} onChange={(next) => {
+            if (canEnterOutline(next)) setError(null);
+            commit(next);
+          }} customLlmApi={customLlmApi} />}
           {workspace.stage === 'intent' && (
             <IntentStage
               workspace={workspace}
@@ -1253,7 +1270,7 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
               onLockedTitle={handleTitleChange}
               onReferenceUrl={(referenceUrl) => commit({ ...workspace, referenceUrl })}
               onPlatform={(platform) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, platform, scriptLanguage }) })}
-              onPace={(pace) => commit({ ...workspace, durationBudget: buildDurationBudget({ ...workspace.durationBudget, pace, scriptLanguage }) })}
+              onPace={(pace) => commit({ ...workspace, durationSpec: workspace.durationSpec ? { ...workspace.durationSpec, pace } : undefined, durationBudget: buildDurationBudget({ ...workspace.durationBudget, pace, scriptLanguage }) })}
               onGenrePack={handleGenrePack}
               onScout={handleScoutTopics}
               onDiagnose={handleDiagnose}
@@ -1296,7 +1313,12 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
               selected={selected}
               busy={busy === 'draft'}
               onBudget={(durationBudget) => {
-                const next = { ...workspace, durationBudget };
+                const durationSpec = workspace.durationSpec && durationBudget.targetSeconds >= workspace.durationSpec.minSeconds && durationBudget.targetSeconds <= workspace.durationSpec.maxSeconds ? {
+                  ...workspace.durationSpec, targetSeconds: durationBudget.targetSeconds, pace: durationBudget.pace,
+                  minSeconds: Math.min(workspace.durationSpec.minSeconds, durationBudget.targetSeconds),
+                  maxSeconds: Math.max(workspace.durationSpec.maxSeconds, durationBudget.targetSeconds)
+                } : undefined;
+                const next = { ...workspace, durationBudget, durationSpec, scriptFormOverride: durationSpec ? durationSpecForm(durationSpec) : workspace.durationSpec ? null : workspace.scriptFormOverride };
                 onChange(workspace.fullNarration.trim() ? rebuildForecast(next) : refreshWorkspaceDerived(next));
               }}
               onDraft={handleDraft}
@@ -2043,7 +2065,7 @@ function DurationStage({
         <span className="text-[10px] px-2 py-1 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/30">
           {scriptFormLabel(form)} · {budget.targetSeconds}s
         </span>
-        {(['auto', 'short', 'medium', 'long', 'extended'] as const).map((item) => (
+        {!workspace.durationSpec && (['auto', 'short', 'medium', 'long', 'extended'] as const).map((item) => (
           <Chip
             key={item}
             active={(workspace.scriptFormOverride || 'auto') === item}
@@ -2829,7 +2851,7 @@ function DirectorRail({
                 </div>
               </div>
             ))}
-            {bibleHasCast(bible) && bible.characters.map((character) => (
+            {bible && bibleHasCast(bible) && bible.characters.map((character) => (
               <div key={character.id} className="rounded-xl border border-[#2b2b36] bg-[#18181f] p-2.5 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <input

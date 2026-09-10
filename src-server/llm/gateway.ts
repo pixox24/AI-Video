@@ -1,4 +1,5 @@
 import { LLM_JSON_MAX_TOKENS } from "../../src/utils/scriptDuration";
+import { z } from 'zod';
 import type { GenerationRun } from "../../src/types";
 import { errorMessage } from "../loose";
 import { promiseWithTimeout } from "../http";
@@ -109,6 +110,7 @@ export async function generateStructured<T = unknown>(
   opts: GenerateStructuredInput<T>
 ): Promise<GenerateStructuredResult<T>> {
   const started = Date.now();
+  const system = opts.schema ? `${opts.system}\nOutput must match this JSON Schema: ${JSON.stringify(z.toJSONSchema(opts.schema))}` : opts.system;
   const cached = getIdempotentResult(opts.idempotencyKey);
   if (cached) {
     return cached as GenerateStructuredResult<T>;
@@ -116,6 +118,8 @@ export async function generateStructured<T = unknown>(
 
   if (isLlmMock()) {
     const loaded = loadMockPayload(opts.stage, opts.user);
+    const validated = !loaded.missing && opts.schema ? opts.schema.safeParse(loaded.data) : undefined;
+    const invalid = validated?.success === false;
     const run = finishRun({
       id: createRunId(),
       projectId: opts.projectId,
@@ -125,28 +129,42 @@ export async function generateStructured<T = unknown>(
       outputTokens: 0,
       costUsd: 0,
       durationMs: Date.now() - started,
-      status: loaded.missing ? "failed" : "mocked",
-      promptHash: promptHash(opts.system, opts.user)
+      status: loaded.missing || invalid ? "failed" : "mocked",
+      promptHash: promptHash(system, opts.user)
     });
     const result: GenerateStructuredResult<T> = {
-      data: loaded.missing ? null : (loaded.data as T),
-      reason: loaded.missing ? `缺少 Mock fixture：${opts.stage}` : undefined,
+      data: loaded.missing || invalid ? null : validated?.success ? validated.data : (loaded.data as T),
+      reason: loaded.missing ? `缺少 Mock fixture：${opts.stage}` : validated?.success === false ? validated.error.message : undefined,
       run
     };
-    setIdempotentResult(opts.idempotencyKey, result);
+    if (!opts.schema || result.data !== null) setIdempotentResult(opts.idempotencyKey, result);
     return result;
   }
 
-  const called = await callModelJson({
+  let user = opts.user;
+  let called: Awaited<ReturnType<typeof callModelJson>>;
+  for (let attempt = 0; ; attempt++) {
+    called = await callModelJson({
     clientLlmApi: opts.clientLlmApi,
     role: opts.role,
-    system: opts.system,
-    user: opts.user,
+    system,
+    user,
     temperature: opts.temperature,
     timeoutMs: opts.timeoutMs,
     maxTokens: opts.maxTokens,
     json: opts.json
-  });
+    });
+    if (!opts.schema) break;
+    const parsed = opts.schema.safeParse(called.data);
+    if (parsed.success) { called.data = parsed.data; break; }
+    called.data = null;
+    called.reason = `Schema validation failed: ${parsed.error.message}`;
+    if (attempt >= 2) break;
+    finishRun({ id: createRunId(), projectId: opts.projectId, stage: opts.stage, model: called.model,
+      endpointHost: called.host, inputTokens: 0, outputTokens: 0, costUsd: 0,
+      durationMs: Date.now() - started, status: 'failed', promptHash: promptHash(system, user) });
+    user = `${opts.user}\nPrevious output failed validation. Correct these errors: ${parsed.error.message}`;
+  }
   const ok = called.data != null;
   const run = finishRun({
     id: createRunId(),
@@ -159,7 +177,7 @@ export async function generateStructured<T = unknown>(
     costUsd: 0,
     durationMs: Date.now() - started,
     status: ok ? "success" : "failed",
-    promptHash: promptHash(opts.system, opts.user)
+    promptHash: promptHash(system, user)
   });
   const result: GenerateStructuredResult<T> = {
     data: ok ? (called.data as T) : null,
@@ -167,7 +185,7 @@ export async function generateStructured<T = unknown>(
     run,
     text: called.text
   };
-  setIdempotentResult(opts.idempotencyKey, result);
+  if (!opts.schema || result.data !== null) setIdempotentResult(opts.idempotencyKey, result);
   return result;
 }
 

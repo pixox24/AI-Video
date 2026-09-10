@@ -12,6 +12,8 @@ import { registerAudioRoutes } from "./routes/audio";
 import { registerProjectRoutes } from "./routes/project";
 import { registerAssetsRoutes } from "./routes/assets";
 import { registerUsageRoutes } from "./routes/usage";
+import { registerBriefRoutes } from './routes/brief';
+import { validateContentInput } from './routes/content-input';
 
 export function createExpressApp(): express.Express {
   ensureAppDirs();
@@ -19,6 +21,8 @@ export function createExpressApp(): express.Express {
   app.use(express.json({ limit: "50mb" }));
   app.use("/generated", express.static(generatedDir));
   registerHealthRoutes(app);
+  registerBriefRoutes(app);
+  app.post(['/api/script/outline', '/api/script/draft'], validateContentInput);
   registerScriptRoutes(app);
   registerStyleRoutes(app);
   registerVisualRoutes(app);

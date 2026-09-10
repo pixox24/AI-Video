@@ -71,7 +71,7 @@ export const PLATFORM_OPTIONS: { id: ScriptPlatform; label: string; defaultSecon
   { id: 'shipinhao', label: '视频号', defaultSeconds: 30, min: 15, max: 60 },
   { id: 'reels', label: 'Reels / Shorts', defaultSeconds: 30, min: 21, max: 45 },
   { id: 'bilibili', label: 'B 站', defaultSeconds: 60, min: 45, max: 90 },
-  { id: 'youtube', label: 'YouTube', defaultSeconds: 60, min: 60, max: 90 }
+  { id: 'youtube', label: 'YouTube', defaultSeconds: 60, min: 60, max: MAX_VIDEO_SECONDS }
 ];
 
 export const GENRE_OPTIONS: { id: ScriptGenre; hint: string }[] = [
@@ -116,6 +116,7 @@ export function genrePackById(id: ScriptGenre | null | undefined): GenrePack | n
 
 export const STAGE_META: { id: import('../types').ScriptStage; label: string; hint: string }[] = [
   { id: 'intent', label: '意图', hint: '从哪开始' },
+  { id: 'brief', label: '观众承诺', hint: '看完带走什么' },
   { id: 'topic', label: '选题', hint: '锁题 / 角度卡' },
   { id: 'research', label: '调研', hint: '四刀浅调研' },
   { id: 'duration', label: '时长', hint: '字数与停留' },

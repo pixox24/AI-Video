@@ -345,7 +345,7 @@ export interface ProjectSettings {
   customVideoApi?: CustomVideoApiConfig;
 }
 
-export type ScriptStage = 'intent' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
+export type ScriptStage = 'intent' | 'brief' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
 export type ScriptForm = 'short' | 'medium' | 'long' | 'extended';
 export type OutlineStatus = 'none' | 'draft' | 'confirmed' | 'stale';
 export type SectionStatus = 'planned' | 'drafting' | 'ready' | 'locked' | 'needs-revision' | 'failed';
@@ -886,6 +886,8 @@ export interface ResearchNotes {
 }
 
 export interface ScriptWorkspace {
+  contentBrief?: ContentBrief;
+  durationSpec?: DurationSpec;
   stage: ScriptStage;
   gate: ScriptGate;
   scriptLanguage?: ScriptLanguage;
@@ -958,3 +960,15 @@ export interface ProjectLibraryItem {
 export type ActiveTab = 'script' | 'storyboard' | 'style' | 'subtitles' | 'voice' | 'music' | 'audio' | 'projects' | 'settings';
 
 export type StoryboardSubTab = 'split' | 'shots';
+
+/** Audience promise, distinct from the existing evidence-oriented ScriptBrief. */
+export type ContentBrief = import('zod').infer<typeof import('./shared/contentBrief').contentBriefDraftSchema>;
+export type DurationPreset = 'insight' | 'deep_dive' | 'tutorial';
+export interface DurationSpec {
+  preset: DurationPreset;
+  targetSeconds: number;
+  minSeconds: number;
+  maxSeconds: number;
+  pace: ScriptPace;
+  narrationRatio: number;
+}

@@ -1,0 +1,10 @@
+{
+  "topic": "睡眠与判断力",
+  "audience": { "roles": ["知识工作者"], "knowledgeLevel": "beginner", "primaryNeed": "改善日常决策" },
+  "objective": "理解睡眠对判断的影响并制定休息计划",
+  "viewerPromise": "看完能识别疲劳决策的信号，并制定一份可执行的休息清单。",
+  "contentType": "analysis",
+  "mustCover": ["疲劳信号", "休息清单"],
+  "mustAvoid": ["未经证实的医学结论"],
+  "lockedFields": []
+}

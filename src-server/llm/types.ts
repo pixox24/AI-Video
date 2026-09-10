@@ -62,7 +62,7 @@ export type GenerateStructuredInput<T = unknown> = {
   json?: boolean;
   idempotencyKey?: string;
   projectId?: string;
-  /** Present from Phase 1. Phase 0 ignores this to keep existing coerce behavior. */
+  /** Opt-in strict schema; legacy callers retain their existing coerce behavior. */
   schema?: z.ZodType<T>;
 };
 

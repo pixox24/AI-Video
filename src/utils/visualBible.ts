@@ -517,7 +517,7 @@ export function normalizeVisualBible(raw: unknown, fallbackMode: VisualBibleMode
   const pendingCharacters = assignUniqueIds(
     (Array.isArray(data.pendingCharacters) ? data.pendingCharacters : [])
       .map((item, index) => normalizeCharacter(item, index))
-      .filter((item): item is VisualCharacter => Boolean(item) && !isObjectKind(item.kind)),
+      .filter((item): item is VisualCharacter => item !== null && !isObjectKind(item.kind)),
     'pend'
   ).slice(0, 4);
   return {
@@ -539,7 +539,7 @@ export function normalizeVisualBible(raw: unknown, fallbackMode: VisualBibleMode
     locations,
     motif: normalizeMotif(data.motif),
     castPolicy: 'evidence' as VisualCastPolicy,
-    candidates: (Array.isArray((data as VisualBible).candidates) ? (data as VisualBible).candidates : [])
+    candidates: (Array.isArray(data.candidates) ? data.candidates : [])
       .map((item, index) => normalizeCandidate(item, index))
       .filter((item): item is CastCandidate => Boolean(item))
       .slice(0, 8),

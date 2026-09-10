@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
+import { canEnterOutline } from '../utils/contentBrief';
 import { ArrowDown, ArrowUp, Loader2, Lock, Plus, RefreshCw, Trash2, Unlock } from 'lucide-react';
 import {
   CustomLlmApiConfig,
   ScriptBrief,
   ScriptOutline,
+  ScriptOutlineSection,
   ScriptSection,
   ScriptWorkspace,
   StylePack
@@ -87,6 +89,7 @@ export function ScriptOutlineStage({
   };
 
   const requestOutline = async () => {
+    if (!canEnterOutline(workspace)) { onStatus('请先填写观众承诺'); onChange({ ...workspace, stage: 'brief' }); return; }
     setPendingId('outline');
     try {
       const res = await fetch('/api/script/outline', {
@@ -99,6 +102,8 @@ export function ScriptOutlineStage({
           intentNotes: workspace.intentNotes,
           budget: workspace.durationBudget,
           brief,
+          contentBrief: workspace.contentBrief,
+          durationSpec: workspace.durationSpec,
           outline,
           genrePack: workspace.genrePackId ? { id: workspace.genrePackId } : undefined,
           llmApi: customLlmApi,
@@ -122,6 +127,7 @@ export function ScriptOutlineStage({
   };
 
   const confirmOutline = () => {
+    if (!canEnterOutline(workspace)) { onChange({ ...workspace, stage: 'brief' }); return; }
     if (!outline) return;
     patchOutline({ ...outline, status: 'confirmed', confirmedAt: Date.now(), version: (outline.version || 1) + 1 });
     onStatus('提纲已确认。可以生成第 1 章。');
@@ -162,7 +168,7 @@ export function ScriptOutlineStage({
         const sections = Array.isArray(data.sections) ? data.sections : [data.section];
         const nextOutline: ScriptOutline = {
           ...(data.outline || activeOutline),
-          sections: (data.outline || activeOutline).sections.map((item) => (
+          sections: (data.outline || activeOutline).sections.map((item: ScriptOutlineSection) => (
             item.id === sectionId ? { ...item, status: 'ready' as const } : item
           ))
         };

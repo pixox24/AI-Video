@@ -58,6 +58,8 @@ import { buildSpeechSpans, gateSpeechSpans, normalizeSpeechSpans, splitCompleteS
 import { resolveScriptForm, scriptFormForSeconds, usesSectionWorkflow } from './scriptDuration';
 import { sectionsFromNarration, shouldUseSections } from './scriptSections';
 import { markOutlineStale, normalizeScriptBrief, outlineFromExistingSections } from './scriptOutline';
+import { contentBriefDraftSchema, durationSpecSchema } from '../shared/contentBrief';
+import { applyDurationSpec, durationSpecForm } from '../../src-server/duration/engine';
 
 export const EMPTY_RESEARCH: ResearchNotes = {
   competitor: '',
@@ -130,7 +132,7 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
   }
 
   const narration = joinClipNarrations(project.clips || []);
-  const scriptLanguage = normalizeScriptLanguage(project.scriptWorkspace?.scriptLanguage);
+  const scriptLanguage = normalizeScriptLanguage(undefined);
   const hasCopy = countBudgetUnits(narration, scriptLanguage) >= 8;
   const totalDuration = (project.clips || []).reduce((sum, clip) => sum + (clip.duration || 0), 0);
   const durationBudget = buildDurationBudget({
@@ -200,6 +202,8 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
   return {
     ...base,
     ...raw,
+    contentBrief: contentBriefDraftSchema.safeParse(raw.contentBrief).success ? contentBriefDraftSchema.parse(raw.contentBrief) : undefined,
+    durationSpec: durationSpecSchema.safeParse(raw.durationSpec).success ? durationSpecSchema.parse(raw.durationSpec) : undefined,
     scriptLanguage,
     researchNotes: { ...EMPTY_RESEARCH, ...(raw.researchNotes || {}) },
     durationBudget,
@@ -258,13 +262,14 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
   const scriptLanguage = normalizeScriptLanguage(workspace.scriptLanguage);
   const usedChars = countBudgetUnits(workspace.fullNarration, scriptLanguage);
   const selected = workspace.topicCards.find((card) => card.id === workspace.selectedTopicId);
-  const durationBudget = buildDurationBudget({
+  const legacyBudget = buildDurationBudget({
     ...workspace.durationBudget,
     usedChars,
     conceptUsed: selected?.conceptCount || workspace.durationBudget.conceptUsed,
     scriptLanguage
   });
-  const scriptForm = resolveScriptForm(durationBudget.targetSeconds, workspace.scriptFormOverride);
+  const durationBudget = workspace.durationSpec ? applyDurationSpec(legacyBudget, workspace.durationSpec) : legacyBudget;
+  const scriptForm = workspace.durationSpec ? durationSpecForm(workspace.durationSpec) : resolveScriptForm(durationBudget.targetSeconds, workspace.scriptFormOverride);
   let outline = workspace.outline;
   if (outline && workspace.scriptForm && workspace.scriptForm !== scriptForm && outline.status === 'confirmed') {
     outline = markOutlineStale(outline);
@@ -284,7 +289,8 @@ export function refreshWorkspaceDerived(workspace: ScriptWorkspace): ScriptWorks
       message
     }))
   ];
-  return { ...workspace, durationBudget, directorNotes, scriptForm, outline };
+  return { ...workspace, durationBudget, directorNotes, scriptForm, outline,
+    scriptFormOverride: workspace.durationSpec ? durationSpecForm(workspace.durationSpec) : workspace.scriptFormOverride };
 }
 
 /** Intent-stage paste lives in intentNotes; the copy editor is fullNarration. */
@@ -1044,6 +1050,8 @@ export function stageCompleted(workspace: ScriptWorkspace, stage: ScriptWorkspac
   switch (stage) {
     case 'intent':
       return Boolean(workspace.intent);
+    case 'brief':
+      return Boolean(workspace.contentBrief?.viewerPromise.trim());
     case 'topic':
       if (workspace.intent === 'have-script') return 'skipped';
       return Boolean(workspace.selectedTopicId);

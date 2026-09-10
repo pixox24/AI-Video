@@ -266,7 +266,7 @@ export function validateDraftResult(input: {
     || fillOutOfContract
     || (input.source !== 'fallback' && sectionValidation.ok === false)
     || (input.source !== 'fallback' && beats.length > 0 && !splitCoversSource(beats.map((beat) => beat.narration), narration))
-    || (input.source !== 'fallback' && hasSections && Boolean(input.fullNarration) && !splitCoversSource([input.fullNarration], fromSections));
+    || (input.source !== 'fallback' && hasSections && Boolean(input.fullNarration) && !splitCoversSource([input.fullNarration!], fromSections));
   return {
     ok: !reject,
     source: input.source || 'llm',
