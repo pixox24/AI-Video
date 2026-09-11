@@ -5,7 +5,7 @@ import {
   ScriptOutline,
   ScriptSection
 } from '../types';
-import { emptySectionFromPlan, ScriptSectionPlan } from './scriptSections';
+import { emptySectionFromPlan, normalizeBeatEnergy, normalizeBeatFunction, ScriptSectionPlan } from './scriptSections';
 import { draftNeedsOutlinePreview, draftRequiresOutline, validateSectionAgainstOutline } from './scriptOutline';
 
 export type DraftAsk = (user: string, maxTokens?: number, system?: string) => Promise<any | null>;
@@ -60,25 +60,32 @@ export function materializeSectionFromLlm(
 ): ScriptSection | null {
   const narration = String(piece?.narration || '').trim();
   if (!narration) return null;
+  const beatLabelWarnings: string[] = [];
   const beats = Array.isArray(piece?.beats) && piece.beats.length > 0
-    ? piece.beats.map((beat: any, index: number) => ({
+    ? piece.beats.map((beat: { function?: unknown; intent?: string; narration?: string; targetSeconds?: number; energy?: string; visualIntent?: string; needsHold?: boolean }, index: number) => {
+      const label = normalizeBeatFunction(beat.function, planned.role);
+      const energy = normalizeBeatEnergy(beat.energy);
+      if (energy.warning) beatLabelWarnings.push(`第 ${planned.order} 章第 ${index + 1} 个节拍：${energy.warning}`);
+      if (label.warning) beatLabelWarnings.push(`第 ${planned.order} 章第 ${index + 1} 个节拍：${label.warning}`);
+      return ({
       id: `${section.id}-beat-${index + 1}`,
       order: index + 1,
-      function: beat.function || section.beats[0]?.function || 'setup',
+      function: label.function,
       intent: beat.intent || '',
-      narration: String(beat.narration || '').trim() || (index === 0 ? narration : ''),
+      narration: String(beat.narration || '').trim(),
       targetSeconds: Number(beat.targetSeconds) || section.targetSeconds,
-      energy: beat.energy || 'medium',
+      energy: energy.energy,
       visualIntent: beat.visualIntent || '',
       needsHold: Boolean(beat.needsHold),
       sectionId: section.id
-    }))
-    : [{ ...section.beats[0], narration, sectionId: section.id }];
+    }); })
+    : [];
   return {
     ...section,
     title: planned.title || section.title,
     narration,
     beats,
+    beatLabelWarnings,
     usedEvidenceIds: Array.isArray(piece?.usedEvidenceIds) ? piece.usedEvidenceIds.map(String) : [],
     status: 'ready'
   };
@@ -94,28 +101,22 @@ export async function draftOneSection(input: {
   language?: ScriptLanguage;
   maxTokens: number;
 }): Promise<{ section?: ScriptSection; warnings: string[]; failed: boolean }> {
-  let piece = await input.ask(input.prompt, input.maxTokens, input.system);
-  let candidate: ScriptSection | null = null;
+  if (input.section.status === 'locked' || input.planned.status === 'locked') {
+    return { failed: true, warnings: ['锁定章节不会被自动改写。'] };
+  }
   let warnings: string[] = [];
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    candidate = materializeSectionFromLlm(piece, input.section, input.planned);
+  // Initial attempt plus two retries; every paid response is materialized and checked.
+  for (let attempt = 0; attempt <= 2; attempt += 1) {
+    const prompt = attempt === 0 ? input.prompt : `${input.prompt}\n上次输出未通过结构校验：${warnings.join('；')}。请修正本章，并让 beats.narration 按顺序完整拼接成 narration。`;
+    const piece = await input.ask(prompt, input.maxTokens, input.system);
+    const candidate = materializeSectionFromLlm(piece, input.section, input.planned);
     if (candidate) {
       const check = validateSectionAgainstOutline(candidate, input.planned, input.brief, input.language);
-      if (check.ok) return { section: candidate, warnings: [], failed: false };
-      warnings = check.warnings;
+      if (check.ok) return { section: candidate, warnings: check.warnings, failed: false };
+      warnings = check.errors;
     } else {
       warnings = [`第 ${input.section.order} 章「${input.section.title}」没有口播`];
     }
-    piece = await input.ask(
-      `${input.prompt}\n上次输出未通过校验：${warnings.join('；')}。请重写本章，并让 beats.narration 按顺序完整拼接成 narration。`,
-      input.maxTokens,
-      input.system
-    );
-  }
-  if (candidate) {
-    const check = validateSectionAgainstOutline(candidate, input.planned, input.brief, input.language);
-    if (check.ok) return { section: candidate, warnings: [], failed: false };
-    warnings = check.warnings;
   }
   return { warnings, failed: true };
 }
@@ -137,6 +138,7 @@ export async function runSectionedDraft(input: {
   warnings: string[];
 }> {
   const sections = seedSectionsFromOutline(input.plans, input.outline, input.priorSections);
+  const warnings: string[] = [];
   for (let i = 0; i < sections.length; i++) {
     const section = sections[i];
     if (section.status === 'locked' || String(section.narration || '').trim()) continue;
@@ -162,6 +164,7 @@ export async function runSectionedDraft(input: {
       };
     }
     sections[i] = result.section;
+    warnings.push(...result.warnings);
   }
-  return { ok: true, sections, warnings: [] };
+  return { ok: true, sections, warnings };
 }

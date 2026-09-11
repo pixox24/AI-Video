@@ -79,7 +79,7 @@ export function resolveImagePromptProfile(
   return 'gpt-image';
 }
 
-function compact(text: string): string {
+function compact(text: string | undefined): string {
   return (text || '').replace(/\s+/g, '').replace(/[。！？.!?…，,、]/g, '');
 }
 

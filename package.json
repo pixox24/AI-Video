@@ -10,7 +10,7 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "test": "tsx --test src/utils/castStrategy.test.ts src/utils/characterCardPrompt.test.ts src/utils/scriptLongform.test.ts src/utils/visualBible.contract.test.ts src/utils/visualBible.acceptance.test.ts src/utils/visualBible.workflow.test.ts src/utils/openAiModels.test.ts src/utils/geminiNative.test.ts src/utils/scriptDraftEngine.test.ts src/utils/ttsReuse.test.ts",
+    "test": "tsx --test src/utils/castStrategy.test.ts src/utils/characterCardPrompt.test.ts src/utils/scriptLongform.test.ts src/utils/visualBible.contract.test.ts src/utils/visualBible.acceptance.test.ts src/utils/visualBible.workflow.test.ts src/utils/openAiModels.test.ts src/utils/geminiNative.test.ts src/utils/scriptDraftEngine.test.ts src/utils/ttsReuse.test.ts src-server/llm/gateway.test.ts src-server/routes/script.draft-mock.test.ts src/utils/contentBrief.test.ts src-server/routes/brief.test.ts src-server/llm/gateway.schema.test.ts src-server/llm/usage.test.ts src/utils/scriptOutline.phase2.test.ts src-server/pipeline/quality.test.ts src-server/duration/calibration.test.ts src/components/scriptWritingPolicy.test.ts",
     "lint": "tsc --noEmit",
     "test:cast": "tsx scripts/check-visual-bible-cast.mts",
     "test:bible": "tsx --test src/utils/visualBible.contract.test.ts src/utils/visualBible.acceptance.test.ts src/utils/visualBible.workflow.test.ts && tsx scripts/audit-visual-bible-2026-09-08.mts && tsx scripts/audit-visual-bible-round2-2026-09-08.mts && tsx scripts/audit-visual-bible-round3-2026-09-08.mts"
@@ -31,7 +31,8 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^6.2.3",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

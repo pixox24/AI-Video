@@ -11,6 +11,7 @@ export interface GeminiNativeChatOptions {
 }
 
 export interface GeminiNativeResult {
+  usage?: unknown;
   ok: boolean;
   text?: string;
   model?: string;
@@ -159,7 +160,7 @@ export async function callGeminiNativeChat(options: GeminiNativeChatOptions): Pr
       }
 
       const text = extractGeminiText(data);
-      if (text) return { ok: true, text, model, status: response.status };
+      if (text) return { ok: true, text, model, status: response.status, ...(data?.usageMetadata ? { usage: data.usageMetadata } : {}) };
       lastError = 'Gemini 未返回有效文本';
       break;
     } catch (error: any) {

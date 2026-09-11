@@ -1,0 +1,644 @@
+
+> react-example@0.0.0 test
+> tsx --test src/utils/castStrategy.test.ts src/utils/characterCardPrompt.test.ts src/utils/scriptLongform.test.ts src/utils/visualBible.contract.test.ts src/utils/visualBible.acceptance.test.ts src/utils/visualBible.workflow.test.ts src/utils/openAiModels.test.ts src/utils/geminiNative.test.ts src/utils/scriptDraftEngine.test.ts src/utils/ttsReuse.test.ts src-server/llm/gateway.test.ts src-server/routes/script.draft-mock.test.ts src/utils/contentBrief.test.ts src-server/routes/brief.test.ts src-server/llm/gateway.schema.test.ts src/utils/scriptOutline.phase2.test.ts src-server/pipeline/quality.test.ts
+
+TAP version 13
+# Subtest: schema retry feeds errors back, stops after two retries, and permits retry after a failed request
+ok 1 - schema retry feeds errors back, stops after two retries, and permits retry after a failed request
+  ---
+  duration_ms: 89.6567
+  ...
+# Subtest: cleanAndParseJSON strips fences and trailing commas
+ok 2 - cleanAndParseJSON strips fences and trailing commas
+  ---
+  duration_ms: 2.51
+  ...
+# Subtest: compactLlmFailureReason maps region and timeout
+ok 3 - compactLlmFailureReason maps region and timeout
+  ---
+  duration_ms: 0.5574
+  ...
+# Subtest: isUsableLlmApi rejects builtin and incomplete configs
+ok 4 - isUsableLlmApi rejects builtin and incomplete configs
+  ---
+  duration_ms: 0.2851
+  ...
+# Subtest: promptHash is stable
+ok 5 - promptHash is stable
+  ---
+  duration_ms: 1.3604
+  ...
+# Subtest: mock script_section fills unit range from prompt
+ok 6 - mock script_section fills unit range from prompt
+  ---
+  duration_ms: 2.0357
+  ...
+# Subtest: generateStructured mock writes JSONL and honors idempotency
+ok 7 - generateStructured mock writes JSONL and honors idempotency
+  ---
+  duration_ms: 15.0394
+  ...
+# Subtest: quality input identity ignores field order and secrets but detects content and locks
+ok 8 - quality input identity ignores field order and secrets but detects content and locks
+  ---
+  duration_ms: 9.2042
+  ...
+# Subtest: duration engine boundary decisions preserve language rates and detect 40% deletion
+ok 9 - duration engine boundary decisions preserve language rates and detect 40% deletion
+  ---
+  duration_ms: 0.6051
+  ...
+# Subtest: claims use exact evidence, distrust model sources and discard hallucinated spans
+ok 10 - claims use exact evidence, distrust model sources and discard hallucinated spans
+  ---
+  duration_ms: 1.0606
+  ...
+# Subtest: baseline system prompts retain every original character as prefix
+ok 11 - baseline system prompts retain every original character as prefix
+  ---
+  duration_ms: 0.9717
+  ...
+# Subtest: HTTP quality loop: deletion → issue → in_range; locked 409; risk; two-round bound; strict failures
+ok 12 - HTTP quality loop: deletion → issue → in_range; locked 409; risk; two-round bound; strict failures
+  ---
+  duration_ms: 181.596
+  ...
+# Subtest: Brief API validates, preserves locks, gates outline and logs zero-cost mock calls
+ok 13 - Brief API validates, preserves locks, gates outline and logs zero-cost mock calls
+  ---
+  duration_ms: 121.2869
+  ...
+# Subtest: frozen contracts: health / generate 410 / generate 400
+ok 14 - frozen contracts: health / generate 410 / generate 400
+  ---
+  duration_ms: 69.4332
+  ...
+# Subtest: LLM_MOCK draft longform goes through fixtures with zero real LLM
+ok 15 - LLM_MOCK draft longform goes through fixtures with zero real LLM
+  ---
+  duration_ms: 39.6389
+  ...
+# Subtest: 「只为找」这类口播片段不再被挖成人名
+ok 16 - 「只为找」这类口播片段不再被挖成人名
+  ---
+  duration_ms: 7.8387
+  ...
+# Subtest: 回归：整段“走遍全城，只为找到…”成不了角色卡
+ok 17 - 回归：整段“走遍全城，只为找到…”成不了角色卡
+  ---
+  duration_ms: 6.3062
+  ...
+# Subtest: 真正具名的人物仍能建卡
+ok 18 - 真正具名的人物仍能建卡
+  ---
+  duration_ms: 7.7472
+  ...
+# Subtest: looksLikeFragmentPersonName 判定
+ok 19 - looksLikeFragmentPersonName 判定
+  ---
+  duration_ms: 0.6294
+  ...
+# Subtest: 决策层：拟人/叙事/产品/讲解员分别落到正确策略
+ok 20 - 决策层：拟人/叙事/产品/讲解员分别落到正确策略
+  ---
+  duration_ms: 1.1184
+  ...
+# Subtest: 触发判定：强挖掘命中不触发分析，故事缺名触发，纯说明不触发
+ok 21 - 触发判定：强挖掘命中不触发分析，故事缺名触发，纯说明不触发
+  ---
+  duration_ms: 0.8628
+  ...
+# Subtest: face / sheet 变体的尺寸与 refKind 正确
+ok 22 - face / sheet 变体的尺寸与 refKind 正确
+  ---
+  duration_ms: 1.8936
+  ...
+# Subtest: 中性棚拍：注入外观字段、不注入美术介质词
+ok 23 - 中性棚拍：注入外观字段、不注入美术介质词
+  ---
+  duration_ms: 0.4962
+  ...
+# Subtest: object / 空卡不提供 AI 自动参考图入口
+ok 24 - object / 空卡不提供 AI 自动参考图入口
+  ---
+  duration_ms: 0.2532
+  ...
+# Subtest: promise gate rejects missing, empty and whitespace, accepts an explicit promise
+ok 25 - promise gate rejects missing, empty and whitespace, accepts an explicit promise
+  ---
+  duration_ms: 2.3447
+  ...
+# Subtest: strict schema distinguishes editable drafts from complete generated briefs
+ok 26 - strict schema distinguishes editable drafts from complete generated briefs
+  ---
+  duration_ms: 8.8299
+  ...
+# Subtest: all supported brief locks survive regeneration and preserve the input
+ok 27 - all supported brief locks survive regeneration and preserve the input
+  ---
+  duration_ms: 1.6578
+  ...
+# Subtest: duration presets map forms and reject invalid bounds, pace and extra fields
+ok 28 - duration presets map forms and reject invalid bounds, pace and extra fields
+  ---
+  duration_ms: 2.4933
+  ...
+# Subtest: new duration layer shares all five language rates and leaves the legacy budget intact
+ok 29 - new duration layer shares all five language rates and leaves the legacy budget intact
+  ---
+  duration_ms: 1.6129
+  ...
+# Subtest: workspace round trip retains both brief types, locks and spec
+ok 30 - workspace round trip retains both brief types, locks and spec
+  ---
+  duration_ms: 3.4873
+  ...
+# Subtest: only YouTube platform upper limit expands
+ok 31 - only YouTube platform upper limit expands
+  ---
+  duration_ms: 0.3365
+  ...
+# Subtest: Gemini native URLs normalize base URLs and model names
+ok 32 - Gemini native URLs normalize base URLs and model names
+  ---
+  duration_ms: 1.9306
+  ...
+# Subtest: Gemini native request uses generateContent format and x-goog-api-key
+ok 33 - Gemini native request uses generateContent format and x-goog-api-key
+  ---
+  duration_ms: 160.8151
+  ...
+# Subtest: Gemini native model list keeps generateContent models only
+ok 34 - Gemini native model list keeps generateContent models only
+  ---
+  duration_ms: 0.8505
+  ...
+# Subtest: Gemini native model list sends the native API key header
+ok 35 - Gemini native model list sends the native API key header
+  ---
+  duration_ms: 27.6082
+  ...
+# Subtest: Gemini request builder omits JSON mime when a model rejects it
+ok 36 - Gemini request builder omits JSON mime when a model rejects it
+  ---
+  duration_ms: 0.2944
+  ...
+# Subtest: sanitize strips quotes, bearer prefix and trailing slash
+ok 37 - sanitize strips quotes, bearer prefix and trailing slash
+  ---
+  duration_ms: 1.5943
+  ...
+# Subtest: resolveOpenAiModelsUrls covers root, /v1 and chat completions endpoints
+ok 38 - resolveOpenAiModelsUrls covers root, /v1 and chat completions endpoints
+  ---
+  duration_ms: 1.4695
+  ...
+# Subtest: parseOpenAiModelsPayload accepts data/models/array shapes
+ok 39 - parseOpenAiModelsPayload accepts data/models/array shapes
+  ---
+  duration_ms: 0.3362
+  ...
+# Subtest: classifyLlmChatModels drops image/audio/embedding ids and keeps chat models
+ok 40 - classifyLlmChatModels drops image/audio/embedding ids and keeps chat models
+  ---
+  duration_ms: 0.4828
+  ...
+# Subtest: classifyLlmChatModels falls back to the full list when nothing looks like chat
+ok 41 - classifyLlmChatModels falls back to the full list when nothing looks like chat
+  ---
+  duration_ms: 0.2627
+  ...
+# Subtest: extractOpenAiChatText 兼容字符串、分段和 reasoning_content
+ok 42 - extractOpenAiChatText 兼容字符串、分段和 reasoning_content
+  ---
+  duration_ms: 0.3748
+  ...
+# Subtest: LLM 自定义兼容接口已开放且可拉取模型
+ok 43 - LLM 自定义兼容接口已开放且可拉取模型
+  ---
+  duration_ms: 0.3069
+  ...
+# Subtest: LLM 百炼已接入且可拉取模型
+ok 44 - LLM 百炼已接入且可拉取模型
+  ---
+  duration_ms: 0.2202
+  ...
+# Subtest: resolveBailianLlmEndpoint 归一到 compatible-mode/v1
+ok 45 - resolveBailianLlmEndpoint 归一到 compatible-mode/v1
+  ---
+  duration_ms: 0.812
+  ...
+# Subtest: 百炼模型列表保留千问聊天、去掉语音和向量
+ok 46 - 百炼模型列表保留千问聊天、去掉语音和向量
+  ---
+  duration_ms: 0.5211
+  ...
+# Subtest: fetchOpenAiCompatibleModelList 读取 /v1/models 并带上 Bearer
+ok 47 - fetchOpenAiCompatibleModelList 读取 /v1/models 并带上 Bearer
+  ---
+  duration_ms: 124.9314
+  ...
+# Subtest: draftGate：短视频直写，中视频先提纲，长视频未确认拦截
+ok 48 - draftGate：短视频直写，中视频先提纲，长视频未确认拦截
+  ---
+  duration_ms: 2.8847
+  ...
+# Subtest: mock LLM：第 4 章失败时前三章仍保留
+ok 49 - mock LLM：第 4 章失败时前三章仍保留
+  ---
+  duration_ms: 3.6083
+  ...
+# Subtest: seedSectionsFromOutline 不覆盖 locked 章
+ok 50 - seedSectionsFromOutline 不覆盖 locked 章
+  ---
+  duration_ms: 0.527
+  ...
+# Subtest: ScriptForm 在 60/61/180/181/600/601 秒分层正确
+ok 51 - ScriptForm 在 60/61/180/181/600/601 秒分层正确
+  ---
+  duration_ms: 1.5834
+  ...
+# Subtest: 时长 120/180/181/300 秒不会被静默截回 180
+ok 52 - 时长 120/180/181/300 秒不会被静默截回 180
+  ---
+  duration_ms: 1.1172
+  ...
+# Subtest: 平台推荐范围不是硬上限
+ok 53 - 平台推荐范围不是硬上限
+  ---
+  duration_ms: 0.4959
+  ...
+# Subtest: 内容反推时长也不再封顶 180 秒
+ok 54 - 内容反推时长也不再封顶 180 秒
+  ---
+  duration_ms: 0.3616
+  ...
+# Subtest: 英文句号能拆成两句，且不会变成双句号
+ok 55 - 英文句号能拆成两句，且不会变成双句号
+  ---
+  duration_ms: 2.801
+  ...
+# Subtest: 5 句话配 2 个节拍时第 2–5 句不会全部变成 cta
+ok 56 - 5 句话配 2 个节拍时第 2–5 句不会全部变成 cta
+  ---
+  duration_ms: 1.1811
+  ...
+# Subtest: 80 句配 6 个节拍时后文不会全部变成 cta
+ok 57 - 80 句配 6 个节拍时后文不会全部变成 cta
+  ---
+  duration_ms: 1.1774
+  ...
+# Subtest: 快速拆镜不再静默丢掉后文
+ok 58 - 快速拆镜不再静默丢掉后文
+  ---
+  duration_ms: 0.7967
+  ...
+# Subtest: 镜数范围不再倒置，锁镜数会真正切到目标数
+ok 59 - 镜数范围不再倒置，锁镜数会真正切到目标数
+  ---
+  duration_ms: 3.1411
+  ...
+# Subtest: 超过 60 条翻译会按 24 条分批
+ok 60 - 超过 60 条翻译会按 24 条分批
+  ---
+  duration_ms: 0.6184
+  ...
+# Subtest: 长视频进入章节模式，短稿 fallback 不能当成功稿
+ok 61 - 长视频进入章节模式，短稿 fallback 不能当成功稿
+  ---
+  duration_ms: 1.512
+  ...
+# Subtest: 章节字数和 beat 覆盖不合格时必须拒绝
+ok 62 - 章节字数和 beat 覆盖不合格时必须拒绝
+  ---
+  duration_ms: 1.1143
+  ...
+# Subtest: 有章节时不应把 7 章误报成短视频节拍
+ok 63 - 有章节时不应把 7 章误报成短视频节拍
+  ---
+  duration_ms: 0.4975
+  ...
+# Subtest: 故事型长视频会使用转折章节而不是通用证明模板
+ok 64 - 故事型长视频会使用转折章节而不是通用证明模板
+  ---
+  duration_ms: 0.2663
+  ...
+# Subtest: 目标镜头数拆分保持全文覆盖并受资源上限保护
+ok 65 - 目标镜头数拆分保持全文覆盖并受资源上限保护
+  ---
+  duration_ms: 5.6925
+  ...
+# Subtest: 预算字段迁移出 targetUnits/minUnits/maxUnits
+ok 66 - 预算字段迁移出 targetUnits/minUnits/maxUnits
+  ---
+  duration_ms: 3.0661
+  ...
+# Subtest: 章节预算总和与全片目标误差不超过 1
+ok 67 - 章节预算总和与全片目标误差不超过 1
+  ---
+  duration_ms: 0.6144
+  ...
+# Subtest: outline 缺章、未知 evidence、预算失衡必须失败
+ok 68 - outline 缺章、未知 evidence、预算失衡必须失败
+  ---
+  duration_ms: 1.8011
+  ...
+# Subtest: locked 章节不会进入 revision plan
+ok 69 - locked 章节不会进入 revision plan
+  ---
+  duration_ms: 1.3482
+  ...
+# Subtest: content-driven 低于目标预算不会被当成生成失败
+ok 70 - content-driven 低于目标预算不会被当成生成失败
+  ---
+  duration_ms: 0.4071
+  ...
+# Subtest: 目标驱动稿件超出 105% 也不能通过校验
+ok 71 - 目标驱动稿件超出 105% 也不能通过校验
+  ---
+  duration_ms: 0.3529
+  ...
+# Subtest: 60秒短视频超预算7%只警告不整稿丢弃
+ok 72 - 60秒短视频超预算7%只警告不整稿丢弃
+  ---
+  duration_ms: 0.2577
+  ...
+# Subtest: 英文 beat 合并时保留词间空格
+ok 73 - 英文 beat 合并时保留词间空格
+  ---
+  duration_ms: 0.183
+  ...
+# Subtest: 预测镜会带停留，口播加停留才能靠近目标时长
+ok 74 - 预测镜会带停留，口播加停留才能靠近目标时长
+  ---
+  duration_ms: 0.4279
+  ...
+# Subtest: 提纲可上移增删并重算预算，锁定章编辑不改状态
+ok 75 - 提纲可上移增删并重算预算，锁定章编辑不改状态
+  ---
+  duration_ms: 1.2325
+  ...
+# Subtest: 停留二次分配不给无口播镜头补时长，needsHold 权重更高
+ok 76 - 停留二次分配不给无口播镜头补时长，needsHold 权重更高
+  ---
+  duration_ms: 0.2444
+  ...
+# Subtest: 锁定章节不会被后续 merge 覆盖，失败隔离成立
+ok 77 - 锁定章节不会被后续 merge 覆盖，失败隔离成立
+  ---
+  duration_ms: 0.1594
+  ...
+# Subtest: 刷新后恢复到未完成章节而不是意图页
+ok 78 - 刷新后恢复到未完成章节而不是意图页
+  ---
+  duration_ms: 0.3739
+  ...
+# Subtest: 短稿兼容自定义 LLM 的别名字段和缺 beats
+ok 79 - 短稿兼容自定义 LLM 的别名字段和缺 beats
+  ---
+  duration_ms: 1.0615
+  ...
+# Subtest: Phase 2 outline section budgets stay within ten percent and hook is capped
+ok 80 - Phase 2 outline section budgets stay within ten percent and hook is capped
+  ---
+  duration_ms: 4.4818
+  ...
+# Subtest: 未改动的旁白句会复用上一轨音频，改动句才新合成
+ok 81 - 未改动的旁白句会复用上一轨音频，改动句才新合成
+  ---
+  duration_ms: 2.5928
+  ...
+# Subtest: 换音色后不复用旧句音频
+ok 82 - 换音色后不复用旧句音频
+  ---
+  duration_ms: 0.3866
+  ...
+# Subtest: 选题卡标题编圣经后，不因 lockedTitle 为空误报过期
+ok 83 - 选题卡标题编圣经后，不因 lockedTitle 为空误报过期
+  ---
+  duration_ms: 15.6429
+  ...
+# Subtest: 无班底圣经即使来源偏移也不阻拦镜头生图
+ok 84 - 无班底圣经即使来源偏移也不阻拦镜头生图
+  ---
+  duration_ms: 1.9669
+  ...
+# Subtest: T01 刚生成不误报过期
+ok 85 - T01 刚生成不误报过期
+  ---
+  duration_ms: 9.8306
+  ...
+# Subtest: T02 相同输入缓存分析
+ok 86 - T02 相同输入缓存分析
+  ---
+  duration_ms: 7.9744
+  ...
+# Subtest: T03 确认匿名角色后 ground 保持 include
+ok 87 - T03 确认匿名角色后 ground 保持 include
+  ---
+  duration_ms: 4.7457
+  ...
+# Subtest: T04 拒绝匿名角色后不再回到 pending
+ok 88 - T04 拒绝匿名角色后不再回到 pending
+  ---
+  duration_ms: 1.8734
+  ...
+# Subtest: T05 高置信科普 no-cast 前后端一致
+ok 89 - T05 高置信科普 no-cast 前后端一致
+  ---
+  duration_ms: 4.8497
+  ...
+# Subtest: T06 真实句子不能证明不存在的人
+ok 90 - T06 真实句子不能证明不存在的人
+  ---
+  duration_ms: 2.3467
+  ...
+# Subtest: T07 同卡 ID 不同实体不串脸
+ok 91 - T07 同卡 ID 不同实体不串脸
+  ---
+  duration_ms: 3.3866
+  ...
+# Subtest: T08 refsLocked=false 重编不清回 true
+ok 92 - T08 refsLocked=false 重编不清回 true
+  ---
+  duration_ms: 1.8516
+  ...
+# Subtest: T09 代词连续动作三镜都上王小明
+ok 93 - T09 代词连续动作三镜都上王小明
+  ---
+  duration_ms: 3.5322
+  ...
+# Subtest: T10 虚构产品不进入 subjects
+ok 94 - T10 虚构产品不进入 subjects
+  ---
+  duration_ms: 1.7771
+  ...
+# Subtest: T12 英文词边界与 CRLF 规范化
+ok 95 - T12 英文词边界与 CRLF 规范化
+  ---
+  duration_ms: 0.4325
+  ...
+# Subtest: T18 锁迁移：旧 locked=true 与显式 refs=false
+ok 96 - T18 锁迁移：旧 locked=true 与显式 refs=false
+  ---
+  duration_ms: 0.2618
+  ...
+# Subtest: T23 窗外树木 insert 必须无人
+ok 97 - T23 窗外树木 insert 必须无人
+  ---
+  duration_ms: 1.0335
+  ...
+# Subtest: T26 改外形后 bibleRevision 变、sourceKey 不变
+ok 98 - T26 改外形后 bibleRevision 变、sourceKey 不变
+  ---
+  duration_ms: 1.3586
+  ...
+# Subtest: P0 错配 ID：李小红不能挂上王小明的 candidateId
+ok 99 - P0 错配 ID：李小红不能挂上王小明的 candidateId
+  ---
+  duration_ms: 12.6713
+  ...
+# Subtest: P0 重复 ID：多个缺省 id 不得都变成 char-lead
+ok 100 - P0 重复 ID：多个缺省 id 不得都变成 char-lead
+  ---
+  duration_ms: 0.453
+  ...
+# Subtest: P0 object 出现在 story 时拆到 subjects，不算叙事角色
+ok 101 - P0 object 出现在 story 时拆到 subjects，不算叙事角色
+  ---
+  duration_ms: 2.4903
+  ...
+# Subtest: P0 标题造角色：标题里的李小红不能进入角色卡
+ok 102 - P0 标题造角色：标题里的李小红不能进入角色卡
+  ---
+  duration_ms: 1.8116
+  ...
+# Subtest: P0 伪造 evidence 不能建卡
+ok 103 - P0 伪造 evidence 不能建卡
+  ---
+  duration_ms: 3.2312
+  ...
+# Subtest: P2 年龄缺省不得写成成年
+ok 104 - P2 年龄缺省不得写成成年
+  ---
+  duration_ms: 0.7266
+  ...
+# Subtest: P1 匿名人物进入待确认，不直接做硬角色
+ok 105 - P1 匿名人物进入待确认，不直接做硬角色
+  ---
+  duration_ms: 1.4543
+  ...
+# Subtest: P1 普通实物能进 object 锁
+ok 106 - P1 普通实物能进 object 锁
+  ---
+  duration_ms: 1.4429
+  ...
+# Subtest: P1 sourceFingerprint 含标题，改标题会判定来源变化
+ok 107 - P1 sourceFingerprint 含标题，改标题会判定来源变化
+  ---
+  duration_ms: 1.4808
+  ...
+# Subtest: P1 低置信进入待确认
+ok 108 - P1 低置信进入待确认
+  ---
+  duration_ms: 0.8405
+  ...
+# Subtest: P3 分镜 occupancy 不默认绑 lead
+ok 109 - P3 分镜 occupancy 不默认绑 lead
+  ---
+  duration_ms: 4.8218
+  ...
+# Subtest: P4 三把锁互相独立
+ok 110 - P4 三把锁互相独立
+  ---
+  duration_ms: 2.7855
+  ...
+# Subtest: 体裁必须传到决策层：Gemini 空卡也不能把故事编没
+ok 111 - 体裁必须传到决策层：Gemini 空卡也不能把故事编没
+  ---
+  duration_ms: 2.9552
+  ...
+# Subtest: 决策层：第一人称默认旁白，不把 object 当角色
+ok 112 - 决策层：第一人称默认旁白，不把 object 当角色
+  ---
+  duration_ms: 1.223
+  ...
+# Subtest: G01 有效响应版本变化仍可接收，旧请求及语言不符拒绝
+ok 113 - G01 有效响应版本变化仍可接收，旧请求及语言不符拒绝
+  ---
+  duration_ms: 15.36
+  ...
+# Subtest: G01 工作区异步操作：改稿/改锁/新请求/卸载都使旧提交无效
+ok 114 - G01 工作区异步操作：改稿/改锁/新请求/卸载都使旧提交无效
+  ---
+  duration_ms: 2.4976
+  ...
+# Subtest: G02 四个字段逐一修改、主动清空和 JSON 重载保持其余值
+ok 115 - G02 四个字段逐一修改、主动清空和 JSON 重载保持其余值
+  ---
+  duration_ms: 10.7808
+  ...
+# Subtest: G03 改显示名后，点名及后续代词都保留相同实体
+ok 116 - G03 改显示名后，点名及后续代词都保留相同实体
+  ---
+  duration_ms: 4.2014
+  ...
+# Subtest: G04 未变更的有效参考图请求正常落库，项目/实体/来源变化拒绝
+ok 117 - G04 未变更的有效参考图请求正常落库，项目/实体/来源变化拒绝
+  ---
+  duration_ms: 1.7922
+  ...
+# Subtest: G04 请求中上传/清除参考图、改外形或切锁，旧图片不得写回
+ok 118 - G04 请求中上传/清除参考图、改外形或切锁，旧图片不得写回
+  ---
+  duration_ms: 2.0047
+  ...
+# Subtest: G05 完整分析快照保存后重启缓存仍命中，换模型及强制重分析会重跑
+ok 119 - G05 完整分析快照保存后重启缓存仍命中，换模型及强制重分析会重跑
+  ---
+  duration_ms: 7.7758
+  ...
+# Subtest: G05 分析失败明确降级且可重试，失败不得标记成功分析
+ok 120 - G05 分析失败明确降级且可重试，失败不得标记成功分析
+  ---
+  duration_ms: 3.0278
+  ...
+# Subtest: G05 同时请求相同分析合并调用，完整实体快照不被丢弃
+ok 121 - G05 同时请求相同分析合并调用，完整实体快照不被丢弃
+  ---
+  duration_ms: 3.3175
+  ...
+# Subtest: G05 英文来源语言、CRLF 和重复粘贴规范化保持一致
+ok 122 - G05 英文来源语言、CRLF 和重复粘贴规范化保持一致
+  ---
+  duration_ms: 3.3111
+  ...
+# Subtest: G08 include/exclude/auto 多次切换并重载保留基础 pending 事实
+ok 123 - G08 include/exclude/auto 多次切换并重载保留基础 pending 事实
+  ---
+  duration_ms: 1.5147
+  ...
+# Subtest: G08 旧工程没有基础状态字段时从原文恢复，已拒绝匿名角色可恢复自动
+ok 124 - G08 旧工程没有基础状态字段时从原文恢复，已拒绝匿名角色可恢复自动
+  ---
+  duration_ms: 1.0427
+  ...
+# Subtest: G08 排除角色的参考图保持资产引用，恢复自动仍可找回
+ok 125 - G08 排除角色的参考图保持资产引用，恢复自动仍可找回
+  ---
+  duration_ms: 1.7911
+  ...
+# Subtest: 钉住快照换稿时保持完整事实和来源，显式重编才解钉
+ok 126 - 钉住快照换稿时保持完整事实和来源，显式重编才解钉
+  ---
+  duration_ms: 1.1204
+  ...
+1..126
+# tests 126
+# suites 0
+# pass 126
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2991.8351

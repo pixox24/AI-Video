@@ -71,7 +71,7 @@ export const PLATFORM_OPTIONS: { id: ScriptPlatform; label: string; defaultSecon
   { id: 'shipinhao', label: '视频号', defaultSeconds: 30, min: 15, max: 60 },
   { id: 'reels', label: 'Reels / Shorts', defaultSeconds: 30, min: 21, max: 45 },
   { id: 'bilibili', label: 'B 站', defaultSeconds: 60, min: 45, max: 90 },
-  { id: 'youtube', label: 'YouTube', defaultSeconds: 60, min: 60, max: 90 }
+  { id: 'youtube', label: 'YouTube', defaultSeconds: 60, min: 60, max: MAX_VIDEO_SECONDS }
 ];
 
 export const GENRE_OPTIONS: { id: ScriptGenre; hint: string }[] = [
@@ -116,6 +116,7 @@ export function genrePackById(id: ScriptGenre | null | undefined): GenrePack | n
 
 export const STAGE_META: { id: import('../types').ScriptStage; label: string; hint: string }[] = [
   { id: 'intent', label: '意图', hint: '从哪开始' },
+  { id: 'brief', label: '观众承诺', hint: '看完带走什么' },
   { id: 'topic', label: '选题', hint: '锁题 / 角度卡' },
   { id: 'research', label: '调研', hint: '四刀浅调研' },
   { id: 'duration', label: '时长', hint: '字数与停留' },
@@ -478,7 +479,6 @@ export function predictShots(input: {
     const maxShots = maxForecastShotsForDuration(input.budget.targetSeconds);
     if (shots.length > maxShots) shots = fitVisualShotCount(shots, maxShots, language);
   }
-  shots = assignSceneIds(shots, input.budget);
   shots = distributeBudgetHolds(shots, input.budget, input.beats);
   const used = input.budget.usedChars || countNarrationChars(input.narration);
   const fillTarget = input.budget.durationMode === 'target-driven' && used >= input.budget.maxChars * FILL_RATIO_MIN;
@@ -588,20 +588,40 @@ function distributeBudgetHolds(shots: ForecastShot[], budget: DurationBudget, be
   return redistributeHolds(shots, budget, beats);
 }
 
+/**
+ * Groups consecutive shots that can safely reuse one generated image.
+ *
+ * Must run after continuity / occupancy / location are stamped on the shots
+ * (see stampShotsWithBible + withCoverage), otherwise the continuity and
+ * location signals are still empty and scenes collapse into long runs.
+ *
+ * A new scene starts when: it is the first shot, the location lock changes,
+ * continuity is contrast/new-info/callback, the beat function is hook or a CTA
+ * turn, or the current scene already reached the `stride` hard cap. The cap is
+ * a per-scene run limit (not a global scene budget) so the tail of the video
+ * can no longer collapse into one repeated image.
+ */
 export function assignSceneIds(shots: ForecastShot[], budget?: DurationBudget): ForecastShot[] {
   if (shots.length === 0) return shots;
   const targetScenes = maxUniqueScenesForDuration(budget?.targetSeconds || shots.length * 3);
   const stride = Math.max(2, Math.ceil(shots.length / targetScenes));
   let sceneIndex = 1;
+  let runLength = 0;
   return shots.map((shot, index) => {
     const prev = shots[index - 1];
-    const wantsNewScene = index === 0
-      || shot.function === 'hook'
+    const locationChanged = index > 0 && (prev?.locationId || '') !== (shot.locationId || '');
+    const semanticCut = shot.function === 'hook'
       || shot.continuity === 'contrast'
       || shot.continuity === 'new-info'
-      || (shot.function === 'cta' && prev?.function !== 'cta')
-      || (index > 0 && index % stride === 0 && shot.function !== prev?.function);
-    if (wantsNewScene && index > 0 && sceneIndex < targetScenes) sceneIndex += 1;
+      || shot.continuity === 'callback'
+      || locationChanged
+      || (shot.function === 'cta' && prev?.function !== 'cta');
+    const startNewScene = index === 0 || semanticCut || runLength >= stride;
+    if (index > 0 && startNewScene) {
+      sceneIndex += 1;
+      runLength = 0;
+    }
+    runLength += 1;
     return { ...shot, sceneId: `scene-${sceneIndex}` };
   });
 }

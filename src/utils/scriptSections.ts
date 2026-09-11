@@ -113,6 +113,31 @@ function beatsForRole(role: ScriptSectionRole): BeatFunction[] {
   }
 }
 
+export const BEAT_FUNCTIONS = ['hook', 'setup', 'turn', 'proof', 'reveal', 'cta'] as const;
+
+export function normalizeBeatFunction(value: unknown, role: ScriptSectionRole): { function: BeatFunction; warning?: string } {
+  const label = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  // ponytail: labels are metadata; reuse the chapter default instead of paying to rewrite valid prose.
+  const normalized = BEAT_FUNCTIONS.includes(label as BeatFunction) ? label as BeatFunction
+    : label === 'body' ? 'proof' : beatsForRole(role)[0];
+  if (value === normalized) return { function: normalized };
+  const original = typeof value === 'string' ? value.slice(0, 80) : value == null ? '缺失' : '非文本值';
+  return { function: normalized, warning: `节拍类型「${original}」已修正为 ${normalized}，仅调整标签，正文未改写。` };
+}
+
+export const BEAT_ENERGIES = ['fast', 'medium', 'slow', 'hold'] as const;
+
+export function normalizeBeatEnergy(value: unknown): { energy: ShotEnergy; warning?: string } {
+  const label = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  const aliases: Record<string, ShotEnergy> = { high: 'fast', '高': 'fast', low: 'slow', '低': 'slow', mid: 'medium', '中': 'medium', steady: 'medium' };
+  // ponytail: ambiguous intensity labels default to neutral pace; never infer timing from them.
+  const alias = Object.hasOwn(aliases, label) ? aliases[label] : undefined;
+  const energy = BEAT_ENERGIES.includes(label as ShotEnergy) ? label as ShotEnergy : alias || 'medium';
+  if (value === energy) return { energy };
+  const original = typeof value === 'string' ? value.slice(0, 80) : value == null ? '缺失' : '非文本值';
+  return { energy, warning: `节奏标签「${original}」已修正为 ${energy}${!BEAT_ENERGIES.includes(label as ShotEnergy) && !alias ? '（无法确定含义，采用默认节奏）' : ''}，正文未改写。` };
+}
+
 function energyForRole(role: ScriptSectionRole): ShotEnergy {
   if (role === 'hook' || role === 'turn') return 'fast';
   if (role === 'cta') return 'hold';

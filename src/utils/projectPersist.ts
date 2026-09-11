@@ -27,7 +27,7 @@ function slimAssetRef<T extends { thumbDataUrl?: string; imageUrl?: string }>(it
   };
 }
 
-function slimBible(bible?: VisualBible): VisualBible | undefined {
+function slimBible(bible?: VisualBible | null): VisualBible | null | undefined {
   if (!bible) return bible;
   return {
     ...bible,

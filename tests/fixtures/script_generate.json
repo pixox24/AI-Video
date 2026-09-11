@@ -1,0 +1,47 @@
+{
+  "title": "模拟短视频",
+  "genre": "爆款科普",
+  "totalDuration": 30,
+  "shots": [
+    {
+      "order": 1,
+      "duration": 7.5,
+      "narration": "你以为你懂这件事，其实关键不在那儿。",
+      "secondaryText": "You think you know this. You don't.",
+      "visualPrompt": "Cinematic close-up of a person looking off camera, rain on glass, 8k",
+      "chineseVisualPrompt": "人物特写看向镜头外，玻璃上有雨",
+      "cameraMotion": "zoom-in",
+      "transition": "crossfade"
+    },
+    {
+      "order": 2,
+      "duration": 7.5,
+      "narration": "真正起作用的，是中间那一下你没注意到的变化。",
+      "secondaryText": "The missed change is what actually matters.",
+      "visualPrompt": "Medium shot revealing a small detail catching the light",
+      "chineseVisualPrompt": "中景推进到被忽略的细节",
+      "cameraMotion": "pan-left",
+      "transition": "crossfade"
+    },
+    {
+      "order": 3,
+      "duration": 7.5,
+      "narration": "看清这一点之后，后面的选择会简单很多。",
+      "secondaryText": "Once you see it, the next choice is simple.",
+      "visualPrompt": "Wide shot of the same space now quiet and resolved",
+      "chineseVisualPrompt": "同一空间的全景，环境安静",
+      "cameraMotion": "cinematic-orbit",
+      "transition": "slide-left"
+    },
+    {
+      "order": 4,
+      "duration": 7.5,
+      "narration": "记住这一句就够：把注意力放回事情本身。",
+      "secondaryText": "Keep your attention on the thing itself.",
+      "visualPrompt": "Poetic closing wide shot, golden hour",
+      "chineseVisualPrompt": "意境深远的收尾镜头",
+      "cameraMotion": "zoom-out",
+      "transition": "fade-black"
+    }
+  ]
+}

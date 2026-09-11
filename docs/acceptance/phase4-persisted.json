@@ -1,0 +1,103 @@
+{
+  "sections": [
+    {
+      "id": "s1",
+      "narration": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校",
+      "order": 1,
+      "role": "body",
+      "title": "章节 1",
+      "targetSeconds": 20,
+      "minUnits": 1,
+      "maxUnits": 100,
+      "status": "locked",
+      "beats": [
+        {
+          "id": "s1-beat",
+          "sectionId": "s1",
+          "order": 1,
+          "function": "proof",
+          "narration": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校",
+          "targetSeconds": 20,
+          "intent": "",
+          "visualIntent": "",
+          "energy": "medium",
+          "needsHold": false
+        }
+      ],
+      "actualSec": 20
+    },
+    {
+      "id": "s2",
+      "narration": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准",
+      "order": 2,
+      "role": "body",
+      "title": "章节 2",
+      "targetSeconds": 20,
+      "minUnits": 1,
+      "maxUnits": 100,
+      "status": "locked",
+      "beats": [
+        {
+          "id": "s2-beat",
+          "sectionId": "s2",
+          "order": 2,
+          "function": "proof",
+          "narration": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准",
+          "targetSeconds": 20,
+          "intent": "",
+          "visualIntent": "",
+          "energy": "medium",
+          "needsHold": false
+        }
+      ],
+      "actualSec": 20.000000000000004
+    }
+  ],
+  "calibration": {
+    "sections": [
+      {
+        "sectionId": "s1",
+        "estimatedSec": 20,
+        "actualSec": 20
+      },
+      {
+        "sectionId": "s2",
+        "estimatedSec": 20,
+        "actualSec": 20.000000000000004
+      }
+    ],
+    "estimatedSec": 40,
+    "actualSec": 40,
+    "sampleCount": 2,
+    "rateScale": 0.5,
+    "recorded": true
+  },
+  "alignment": {
+    "version": 2,
+    "source": "per-utterance",
+    "utterances": [
+      {
+        "text": "校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校校。",
+        "audioStart": 0,
+        "audioEnd": 20,
+        "clipIds": [
+          "s1"
+        ],
+        "source": "per-utterance",
+        "audioUrl": "/phase4-fixture.wav",
+        "words": []
+      },
+      {
+        "text": "准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准准。",
+        "audioStart": 20.2,
+        "audioEnd": 40.2,
+        "clipIds": [
+          "s2"
+        ],
+        "source": "per-utterance",
+        "audioUrl": "/phase4-fixture.wav",
+        "words": []
+      }
+    ]
+  }
+}

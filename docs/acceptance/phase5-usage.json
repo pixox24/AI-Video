@@ -1,0 +1,11 @@
+{
+  "projectId": "project-1788933507771",
+  "total": 1,
+  "byStage": {
+    "brief": {
+      "calls": 1,
+      "tokens": 0,
+      "costUsd": 0
+    }
+  }
+}

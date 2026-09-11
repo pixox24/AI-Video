@@ -8,3 +8,12 @@ coverage/
 !.env.example
 public/generated/
 data/
+
+.playwright-mcp/
+*.lnk
+
+.playwright-mcp/
+*.lnk
+
+.playwright-mcp/
+*.lnk

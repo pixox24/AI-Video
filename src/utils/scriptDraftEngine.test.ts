@@ -1,10 +1,11 @@
+import { normalizeBeatEnergy, normalizeBeatFunction, BEAT_FUNCTIONS } from './scriptSections';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDurationBudget } from './scriptBudget';
 import { planScriptSections } from './scriptSections';
-import { outlineFromPlans } from './scriptOutline';
-import { draftGate, runSectionedDraft, seedSectionsFromOutline } from './scriptDraftEngine';
-import { SECTION_DRAFT_SYSTEM } from './scriptPrompts';
+import { outlineFromPlans, validateSectionAgainstOutline } from './scriptOutline';
+import { draftGate, draftOneSection, runSectionedDraft, seedSectionsFromOutline } from './scriptDraftEngine';
+import { SECTION_DRAFT_SYSTEM, sectionDraftUserPrompt, sectionReviseUserPrompt } from './scriptPrompts';
 
 function beatFn(role: string) {
   if (role === 'hook') return 'hook';
@@ -47,7 +48,7 @@ test('mock LLM：第 4 章失败时前三章仍保留', async () => {
       assert.equal(system, SECTION_DRAFT_SYSTEM);
       const plan = plans.find((item) => user.includes(item.id)) || plans[Math.min(calls, plans.length - 1)];
       calls += 1;
-      if (plan.order === 4) return { narration: '短', beats: [{ narration: '短', function: 'setup' }] };
+      if (plan.order === 4) return { narration: '正文', beats: [{ narration: '遗漏正文', function: 'setup' }] };
       return validPiece(plan);
     },
     plans,
@@ -75,4 +76,94 @@ test('seedSectionsFromOutline 不覆盖 locked 章', () => {
   const seeded = seedSectionsFromOutline(plans, outline, [locked]);
   assert.equal(seeded[0].narration, locked.narration);
   assert.equal(seeded[0].status, 'locked');
+});
+
+
+test('104字草稿以软提示保留；空正文、证据、节拍错误仍拒绝；最后一次重试可采用', async () => {
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: 1000 });
+  const outline = outlineFromPlans(plans);
+  const planned = { ...outline.sections[1], minUnits: 130, maxUnits: 152 };
+  const section = { ...seedSectionsFromOutline(plans, outline, [])[1], minUnits: 130, maxUnits: 152 };
+  const narration = '字'.repeat(104);
+  const piece = { narration, usedEvidenceIds: [], beats: [{ function: beatFn(planned.role), narration }] };
+  const brief = { audience: '', coreQuestion: '', coreConclusion: '', evidence: [], forbiddenClaims: [], requiredTerms: [] };
+  let calls = 0;
+  const input = { planned, section, brief, prompt: '本章任务', system: SECTION_DRAFT_SYSTEM, language: 'zh' as const, maxTokens: 1024 };
+  const saved = await draftOneSection({ ...input, ask: async () => { calls++; return piece; } });
+  assert.equal(calls, 1); assert.equal(saved.failed, false); assert.equal(saved.section?.narration, narration);
+  assert.match(saved.warnings.join(''), /104.*参考预算 130–152/);
+  assert.equal(validateSectionAgainstOutline({ ...saved.section!, usedEvidenceIds: ['invented'] }, planned, brief, 'zh').ok, false);
+  assert.equal(validateSectionAgainstOutline({ ...saved.section!, id: 'other' }, planned, brief, 'zh').ok, false);
+  calls = 0;
+  const retry = await draftOneSection({ ...input, ask: async () => {
+    calls++; return calls === 3 ? piece : { ...piece, beats: [{ function: beatFn(planned.role), narration: '不匹配' }] };
+  } });
+  assert.equal(calls, 3); assert.equal(retry.failed, false); assert.equal(retry.section?.narration, narration);
+  calls = 0;
+  const empty = await draftOneSection({ ...input, ask: async () => { calls++; return { narration: '' }; } });
+  assert.equal(calls, 3); assert.equal(empty.failed, true);
+  for (const language of ['zh', 'en'] as const) {
+    const prompt = sectionDraftUserPrompt({ language, section: planned, sectionIndex: 1, sectionCount: plans.length, brief, thesis: '', summaries: '', contextBlock: '', styleContract: '', unitName: '字' });
+    const revise = sectionReviseUserPrompt({ language, section, brief, unitName: '字', action: { sectionId: section.id, action: 'replace-transition', targetDeltaUnits: 0, instruction: '解释可控的含义' } });
+    assert.doesNotMatch(prompt + revise, /汉字数必须在|word count must be between|口播仍须在/);
+    assert.match(prompt, /参考篇幅|Reference length/);
+    assert.match(revise, /不强制增减字数/);
+  }
+});
+
+
+test('节拍标签本地修正，合法组合保留，不重写正文或额外调用模型', async () => {
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: 1000 });
+  const outline = outlineFromPlans(plans);
+  const section = seedSectionsFromOutline(plans, outline, [])[2];
+  const planned = outline.sections[2];
+  for (const value of BEAT_FUNCTIONS) assert.deepEqual(normalizeBeatFunction(value, 'hook'), { function: value });
+  assert.equal(normalizeBeatFunction('body', 'setup').function, 'proof');
+  assert.equal(normalizeBeatFunction(' PROOF ', 'setup').function, 'proof');
+  for (const value of ['unknown', '', null, 42, {}]) {
+    assert.equal(normalizeBeatFunction(value, 'body').function, 'proof');
+    assert.ok(normalizeBeatFunction(value, 'body').warning);
+  }
+  const narration = '概念先讲清。然后给出例子。';
+  for (const value of ['body', 'unknown', null, 'hook']) {
+    let calls = 0;
+    const result = await draftOneSection({ planned, section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
+      language: 'zh', maxTokens: 1024, ask: async () => {
+        calls++; return { narration, beats: [{ function: value, narration, energy: 'medium' }] };
+      } });
+    assert.equal(calls, 1); assert.equal(result.failed, false);
+    assert.equal(result.section?.narration, narration);
+    assert.equal(result.section?.beats[0].narration, narration);
+    assert.equal(result.section?.beats[0].function, normalizeBeatFunction(value, planned.role).function);
+    assert.equal(result.section?.beatLabelWarnings?.length, value === 'hook' ? 0 : 1);
+  }
+  for (const beats of [[], [{ function: 'body', narration: '' }], [{ function: 'body', narration: '遗漏' }]]) {
+    let calls = 0;
+    const result = await draftOneSection({ planned, section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
+      language: 'zh', maxTokens: 1024, ask: async () => { calls++; return { narration, beats }; } });
+    assert.equal(result.failed, true); assert.equal(calls, 3);
+  }
+
+});
+
+test('节奏标签共用归一化：合法值、旧别名、未知值及正文不变', async () => {
+  for (const energy of ['fast', 'medium', 'slow', 'hold'] as const) assert.deepEqual(normalizeBeatEnergy(energy), { energy });
+  for (const [value, expected] of [['high', 'fast'], ['高', 'fast'], ['low', 'slow'], ['低', 'slow'], ['mid', 'medium'], ['中', 'medium'], ['steady', 'medium'], [' FAST ', 'fast']]) {
+    assert.equal(normalizeBeatEnergy(value).energy, expected);
+    assert.ok(normalizeBeatEnergy(value).warning);
+  }
+  for (const value of ['peak', 'punch', '__proto__', 'constructor', '', null, undefined, 42, {}]) {
+    assert.equal(normalizeBeatEnergy(value).energy, 'medium');
+    assert.match(normalizeBeatEnergy(value).warning!, /默认节奏/);
+  }
+  const plans = planScriptSections({ targetSeconds: 240, maxChars: 1000 });
+  const outline = outlineFromPlans(plans);
+  const section = seedSectionsFromOutline(plans, outline, [])[2];
+  let calls = 0;
+  const narration = '已有正文逐字保留。';
+  const result = await draftOneSection({ planned: outline.sections[2], section, prompt: '任务', system: SECTION_DRAFT_SYSTEM,
+    language: 'zh', maxTokens: 1024, ask: async () => { calls++; return { narration, beats: [{ function: 'proof', narration, energy: 'peak' }] }; } });
+  assert.equal(calls, 1); assert.equal(result.failed, false);
+  assert.equal(result.section?.narration, narration); assert.equal(result.section?.beats[0].narration, narration);
+  assert.equal(result.section?.beats[0].energy, 'medium'); assert.match(result.section?.beatLabelWarnings?.join('') || '', /默认节奏/);
 });

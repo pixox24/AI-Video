@@ -1,0 +1,7 @@
+src/utils/narrationTrack.ts : unchanged (4c5cf2f174ad16ee9a41e9776673d6a5cfbee7e6)
+src/utils/narrationAlignClient.ts : unchanged (3b1acd2fce6ca1ee7f30e0e7d0b394dda9440d4d)
+src/utils/ttsReuse.ts : unchanged (18d77767ae4ea1115e306057d92d76387d24521e)
+src/utils/ttsReuse.test.ts : unchanged (430a7c85de9eb83ce66a53e0a8e541163e621537)
+src/utils/audioEngine.ts : unchanged (17325eca1051f7e2707e5ccb742af5d27e0321a9)
+src-server/routes/audio.ts : unchanged (1d95f06b476cf0a8b1ebe0c6f36624cc37ef115a)
+src/utils/scriptPrompts.ts : unchanged (35672d90ffad28f9a515fd85a274fd57cb467efd)

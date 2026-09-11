@@ -345,7 +345,7 @@ export interface ProjectSettings {
   customVideoApi?: CustomVideoApiConfig;
 }
 
-export type ScriptStage = 'intent' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
+export type ScriptStage = 'intent' | 'brief' | 'topic' | 'research' | 'duration' | 'beats' | 'copy' | 'rhythm';
 export type ScriptForm = 'short' | 'medium' | 'long' | 'extended';
 export type OutlineStatus = 'none' | 'draft' | 'confirmed' | 'stale';
 export type SectionStatus = 'planned' | 'drafting' | 'ready' | 'locked' | 'needs-revision' | 'failed';
@@ -727,6 +727,8 @@ export interface ScriptBeat {
 }
 
 export interface ScriptSection {
+  beatLabelWarnings?: string[];
+  actualSec?: number;
   id: string;
   order: number;
   role: ScriptSectionRole;
@@ -775,6 +777,10 @@ export interface ScriptOutlineSection {
   minUnits: number;
   maxUnits: number;
   status: SectionStatus;
+  narrationBudgetSec: number;
+  visualHoldBudgetSec: number;
+  retentionDevice: string;
+  transitionOut: string;
 }
 
 export interface ScriptOutline {
@@ -798,6 +804,23 @@ export interface ScriptRevisionPlan {
   targetSeconds: number;
   deltaSeconds: number;
   sectionActions: ScriptRevisionAction[];
+}
+
+/** LLM call cost log (JSONL). Keys are never stored. */
+export interface GenerationRun {
+  id: string;
+  projectId?: string;
+  stage: string;
+  model: string;
+  endpointHost?: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  costSource?: string;
+  durationMs: number;
+  status: 'success' | 'failed' | 'mocked';
+  promptHash: string;
+  createdAt: string;
 }
 
 export interface SpeechVisual {
@@ -870,6 +893,12 @@ export interface ResearchNotes {
 }
 
 export interface ScriptWorkspace {
+  durationCalibration?: import('./shared/calibration').CalibrationResult;
+  qualityReport?: QualityReport;
+  qualityInputKey?: string;
+  claims?: Claim[];
+  contentBrief?: ContentBrief;
+  durationSpec?: DurationSpec;
   stage: ScriptStage;
   gate: ScriptGate;
   scriptLanguage?: ScriptLanguage;
@@ -942,3 +971,18 @@ export interface ProjectLibraryItem {
 export type ActiveTab = 'script' | 'storyboard' | 'style' | 'subtitles' | 'voice' | 'music' | 'audio' | 'projects' | 'settings';
 
 export type StoryboardSubTab = 'split' | 'shots';
+
+/** Audience promise, distinct from the existing evidence-oriented ScriptBrief. */
+export type ContentBrief = import('zod').infer<typeof import('./shared/contentBrief').contentBriefDraftSchema>;
+export type DurationPreset = 'insight' | 'deep_dive' | 'tutorial';
+export interface DurationSpec {
+  preset: DurationPreset;
+  targetSeconds: number;
+  minSeconds: number;
+  maxSeconds: number;
+  pace: ScriptPace;
+  narrationRatio: number;
+}
+export type Claim = import('zod').infer<typeof import('./shared/quality').claimSchema>;
+export type QualityIssue = import('zod').infer<typeof import('./shared/quality').qualityIssueSchema>;
+export type QualityReport = import('zod').infer<typeof import('./shared/quality').qualityReportSchema>;

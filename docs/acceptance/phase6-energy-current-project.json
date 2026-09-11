@@ -1,0 +1,13 @@
+{
+  "date": "2026-09-10T16:13:59.439Z",
+  "mode": "Mock evaluator with current saved project; no real provider call",
+  "httpStatus": 200,
+  "sections": 8,
+  "beats": 27,
+  "normalizedEnergyWarnings": 26,
+  "narrationUnchanged": true,
+  "sourceUnmodified": true,
+  "reportSchemaValid": true,
+  "rounds": 0,
+  "narrationSha256": "bfcb29e549ea328c6b974be5835f45aa268309fdf7da87d5f9efdb3428db2785"
+}
