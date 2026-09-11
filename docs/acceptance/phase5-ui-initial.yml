@@ -1,0 +1,61 @@
+- generic [ref=e3] [box=0,0,1740,1233]:
+  - complementary [ref=e4] [box=12,12,64,1209]:
+    - generic [ref=e5] [box=13,25,63,400]:
+      - generic "已写入磁盘" [ref=e238] [box=24,77,40,24]
+      - button "文案" [ref=e12] [cursor=pointer] [box=20,107,48,48]
+      - button "分镜" [ref=e17] [cursor=pointer] [box=20,161,48,48]
+      - button "风格" [ref=e21] [cursor=pointer] [box=20,215,48,48]
+      - button "字幕" [ref=e29] [cursor=pointer] [box=20,269,48,48]
+      - button "旁白" [ref=e34] [cursor=pointer] [box=20,323,48,48]
+      - button "音乐" [ref=e39] [cursor=pointer] [box=20,377,48,48]
+    - generic [ref=e45] [box=13,1099,63,110]:
+      - button "作品" [ref=e46] [cursor=pointer] [box=20,1107,48,48]
+      - button "设置" [ref=e53] [cursor=pointer] [box=20,1161,48,48]
+  - generic [ref=e58] [box=88,12,1640,1209]:
+    - generic [ref=e239] [box=88,12,1640,1209]:
+      - generic [ref=e240] [box=89,13,1639,73]:
+        - generic [ref=e245] [box=161,29,348,40]:
+          - heading "文案预制作台" [level=2] [ref=e246] [box=161,29,348,20]
+          - paragraph [ref=e247] [box=161,51,348,18]: 先锁题，再定时长，最后写口播。预览已收起，把空间留给结构。
+        - generic [ref=e248] [box=1087,33,617,31]:
+          - generic [ref=e249] [box=1087,36,220,26]: 单身最大的好处，是你永远不用向任何人解释你的人生
+          - generic [ref=e250] [box=1315,34,120,30]
+          - button "快闸 · 按预算写稿" [ref=e253] [cursor=pointer] [box=1443,34,138,30]
+          - button "试听钩子 8秒" [ref=e256] [cursor=pointer] [box=1588,33,115,31]
+      - generic [ref=e261] [box=89,85,1639,1075]:
+        - navigation [ref=e262] [box=89,85,224,1075]:
+          - button "意图 从哪开始" [ref=e263] [cursor=pointer] [box=101,97,199,58]
+          - button "观众承诺 看完带走什么" [ref=e269] [cursor=pointer] [box=101,159,199,58]
+          - button "选题 锁题 / 角度卡" [ref=e275] [cursor=pointer] [box=101,221,199,58]
+          - button "调研 四刀浅调研" [ref=e281] [cursor=pointer] [box=101,283,199,58]
+          - button "时长 字数与停留" [ref=e287] [cursor=pointer] [box=101,345,199,58]
+          - button "节拍 叙事骨架" [ref=e293] [cursor=pointer] [box=101,407,199,58]
+          - button "口播 整段旁白" [ref=e299] [cursor=pointer] [box=101,469,199,58]
+          - button "节奏 镜数预测" [ref=e305] [cursor=pointer] [box=101,531,199,58]
+        - generic [ref=e313] [box=337,109,768,535]:
+          - generic [ref=e314] [box=337,109,768,49]
+          - textbox "对标链接，可空。有的话会算进对标刀。" [ref=e317] [box=337,178,768,37]
+          - generic [ref=e318] [box=337,235,768,41]
+          - generic [ref=e324] [box=337,296,768,39]: 钩子槽 · 把调研卡拖到这里，或在调研页点「填进钩子」
+          - generic [ref=e325] [box=337,355,768,289]
+        - complementary [ref=e346] [box=1439,85,288,1075]:
+          - generic [ref=e347] [box=1440,85,287,937]
+          - region "项目调用成本" [ref=e415] [box=1440,1022,287,139]
+      - generic [ref=e431] [box=89,1161,1639,60]:
+        - button "写入分镜" [ref=e432] [cursor=pointer] [box=109,1174,104,34]
+        - button "只更新画面，旁白沿用" [ref=e438] [cursor=pointer] [box=225,1182,120,18]
+        - button "播放预览 0.0s" [ref=e439] [cursor=pointer] [box=357,1173,121,35]:
+          - text: 播放预览
+          - generic [ref=e444] [box=443,1184,22,15]: 0.0s
+        - button "进入分镜台" [ref=e445] [cursor=pointer] [box=490,1182,78,18]
+        - generic [ref=e448] [box=580,1183,1127,17]: 上次写入 10 镜
+    - generic [ref=e212] [box=104,1238,1,1]:
+      - button [ref=e213] [cursor=pointer] [box=105,1207,64,64]
+      - generic [ref=e216] [box=117,1165,29,61]:
+        - generic [ref=e217] [box=131,1174,118,44]:
+          - button [ref=e218] [cursor=pointer] [box=131,1184,24,24]
+          - button [ref=e221] [cursor=pointer] [box=167,1185,22,22]
+          - generic [ref=e225] [box=201,1174,48,44]: 00:00:00 \ 00:42:17
+        - generic [ref=e226] [box=250,1184,60,24]:
+          - button [ref=e227] [cursor=pointer] [box=250,1184,24,24]
+          - button [ref=e232] [cursor=pointer] [box=286,1184,24,24]
