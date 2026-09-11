@@ -60,6 +60,7 @@ import { resolveScriptForm, scriptFormForSeconds, usesSectionWorkflow } from './
 import { sectionsFromNarration, shouldUseSections } from './scriptSections';
 import { markOutlineStale, normalizeScriptBrief, outlineFromExistingSections } from './scriptOutline';
 import { contentBriefDraftSchema, durationSpecSchema } from '../shared/contentBrief';
+import { writingStyleProfileSchema } from '../shared/writingStyle';
 import { applyDurationSpec, durationSpecForm } from '../../src-server/duration/engine';
 
 export const EMPTY_RESEARCH: ResearchNotes = {
@@ -207,6 +208,10 @@ export function normalizeScriptWorkspace(raw: ScriptWorkspace): ScriptWorkspace 
     ...raw,
     contentBrief: contentBriefDraftSchema.safeParse(raw.contentBrief).success ? contentBriefDraftSchema.parse(raw.contentBrief) : undefined,
     durationSpec: durationSpecSchema.safeParse(raw.durationSpec).success ? durationSpecSchema.parse(raw.durationSpec) : undefined,
+    // Phase 7: drop malformed archives instead of failing the whole workspace.
+    writingStyles: Array.isArray(raw.writingStyles)
+      ? raw.writingStyles.map(profile => writingStyleProfileSchema.safeParse(profile)).flatMap(result => result.success ? [result.data] : [])
+      : [],
     scriptLanguage,
     researchNotes: { ...EMPTY_RESEARCH, ...(raw.researchNotes || {}) },
     durationBudget,

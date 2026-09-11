@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { ContentBrief, CustomLlmApiConfig, DurationPreset, ScriptPace, ScriptWorkspace } from '../types';
+import type { ContentBrief, CustomLlmApiConfig, DurationPreset, ScriptPace, ScriptWorkspace, WritingStyleProfile } from '../types';
 import { contentBriefFields, contentBriefSchema, DURATION_PRESETS } from '../shared/contentBrief';
+import { BUILTIN_WRITING_STYLES } from '../shared/writingStyle';
 import { canEnterOutline, emptyContentBrief } from '../utils/contentBrief';
 import { durationSpecForPreset, durationSpecForm, applyDurationSpec, estimateNarrationSeconds } from '../../src-server/duration/engine';
 import { buildDurationBudget, PACE_PRESETS } from '../utils/scriptBudget';
@@ -10,6 +11,7 @@ export function BriefStage({ workspace, onChange, customLlmApi, projectId }: {
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [previewId, setPreviewId] = useState<string | null>(null);
   const current = useRef(workspace);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -41,7 +43,14 @@ export function BriefStage({ workspace, onChange, customLlmApi, projectId }: {
   };
   const budget = spec ? applyDurationSpec(workspace.durationBudget, spec) : workspace.durationBudget;
   const estimated = estimateNarrationSeconds(workspace.fullNarration, workspace.scriptLanguage || 'zh', budget.pace);
-  const label: Record<(typeof contentBriefFields)[number], string> = { topic: '主题', audience: '受众', objective: '内容目标', viewerPromise: '观众承诺', contentType: '内容类型', mustCover: '必须覆盖', mustAvoid: '必须避免' };
+  const label: Record<(typeof contentBriefFields)[number], string> = { topic: '主题', audience: '受众', objective: '内容目标', viewerPromise: '观众承诺', contentType: '内容类型', mustCover: '必须覆盖', mustAvoid: '必须避免', writingStyleId: '写作风格' };
+  const styleOptions: WritingStyleProfile[] = [...BUILTIN_WRITING_STYLES, ...(workspace.writingStyles || [])];
+  const selectedStyle = styleOptions.find(profile => profile.id === brief.writingStyleId);
+  const styleLocked = busy || brief.lockedFields.includes('writingStyleId');
+  const selectStyle = (id: string | undefined) => {
+    if (styleLocked) return;
+    patch({ writingStyleId: id });
+  };
   return <section className="max-w-3xl space-y-5 text-zinc-200">
     <h3 className="text-lg font-semibold">观众承诺</h3>
     <p className="text-sm text-zinc-400">先明确看完能带走什么，再选择时长。锁定字段在重新生成时保留。</p>
@@ -68,6 +77,34 @@ export function BriefStage({ workspace, onChange, customLlmApi, projectId }: {
       <input type="checkbox" checked={brief.lockedFields.includes(field)} onChange={e => patch({ lockedFields: e.target.checked ? [...brief.lockedFields, field] : brief.lockedFields.filter(f => f !== field) })} /> {label[field]}
     </label>)}</fieldset>
     <button disabled={busy || !brief.topic.trim()} onClick={generate} className="rounded-lg bg-indigo-600 px-4 py-2 disabled:opacity-40">{busy ? '正在生成…' : '生成 / 重新生成承诺'}</button>
+    <div className="space-y-2">
+      <h4>写作风格</h4>
+      <p className="text-sm text-zinc-400">风格只约束"怎么说话"，不改变本章承诺与时长预算。不选 = 不加任何风格约束。</p>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2" role="radiogroup" aria-label="写作风格">
+        <button type="button" role="radio" aria-checked={!brief.writingStyleId} aria-pressed={!brief.writingStyleId}
+          disabled={styleLocked} onClick={() => selectStyle(undefined)}
+          className={`rounded-xl border p-3 text-left disabled:opacity-50 ${!brief.writingStyleId ? 'border-indigo-400 bg-indigo-500/20' : 'border-zinc-700'}`}>
+          <div>不选风格</div>
+          <div className="text-xs text-zinc-400">保持现状：只按承诺、证据与时长预算写，不加风格约束。</div>
+        </button>
+        {styleOptions.map(profile => <div key={profile.id} className={`rounded-xl border p-3 space-y-1 ${profile.id === brief.writingStyleId ? 'border-indigo-400 bg-indigo-500/20' : 'border-zinc-700'}`}>
+          <button type="button" role="radio" aria-checked={profile.id === brief.writingStyleId} aria-pressed={profile.id === brief.writingStyleId}
+            disabled={styleLocked} onClick={() => selectStyle(profile.id)} className="w-full text-left disabled:opacity-50">
+            <div>{profile.label}{profile.kind === 'custom' ? ' · 自定义' : ''}{profile.provisional ? ' · 待替换样例' : ''}</div>
+            <div className="text-xs text-zinc-400">{profile.description}</div>
+          </button>
+          <button type="button" aria-expanded={previewId === profile.id} onClick={() => setPreviewId(previewId === profile.id ? null : profile.id)}
+            className="text-xs text-indigo-300">{previewId === profile.id ? '收起范例' : '看范例'}</button>
+          {previewId === profile.id && <div className="space-y-1 text-xs text-zinc-300">
+            <p>规则：{profile.rules.join('；')}</p>
+            <p>禁用表达：{profile.bannedPatterns.join('、')}</p>
+            <p>范例：{profile.exemplar}</p>
+            <p className="text-zinc-500">反例：{profile.counterExemplar}</p>
+          </div>}
+        </div>)}
+      </div>
+      {selectedStyle && selectedStyle.provisional && <p className="text-sm text-amber-400">该档案是通用骨架，尚未用你的真实文案归纳；可在设置页粘贴样例反推自己的档案。</p>}
+    </div>
     <h4>视频时长</h4>
     <div className="grid grid-cols-3 gap-3">{(Object.keys(DURATION_PRESETS) as DurationPreset[]).map(key => {
       const preset = DURATION_PRESETS[key];

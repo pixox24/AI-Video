@@ -7,6 +7,8 @@ import { FILL_RATIO_MIN } from '../utils/scriptDuration';
 import { RESEARCH_DRAG_MIME, RESEARCH_FIELDS, workspaceTopicTitle } from '../utils/scriptWorkspace';
 import { CAMERA_ANGLE_LABEL, COVERAGE_JOB_LABEL, SHOT_SIZE_LABEL } from '../utils/shotCoverage';
 import { bibleSubjects, continuityShortLabel, occupancyReasonLabel } from '../utils/visualBible';
+import { findWritingStyleProfile } from '../shared/writingStyle';
+import { highlightBannedSentences } from '../../src-server/style/lint';
 import { RevisionBanner } from './ScriptOutlineStage';
 
 const ENERGY_LABEL: Record<ShotEnergy, string> = {
@@ -276,6 +278,8 @@ export function CopyStage({
   const over = budget.usedChars > budget.maxChars * 1.05;
   const under = budget.usedChars > 0 && budget.usedChars < budget.maxChars * FILL_RATIO_MIN && budget.durationMode === 'target-driven';
   const lockedTitle = workspaceTopicTitle(workspace);
+  const styleProfile = findWritingStyleProfile(workspace.contentBrief?.writingStyleId, workspace.writingStyles);
+  const highlighted = styleProfile ? highlightBannedSentences(workspace.fullNarration, styleProfile).filter(item => item.hit) : [];
   return (
     <div className="space-y-4 max-w-4xl">
       <SectionIntro title="整段口播" desc={workspace.durationBudget.durationMode === 'content-driven'
@@ -347,6 +351,13 @@ export function CopyStage({
           over || under ? 'border-amber-500/50' : 'border-[#2b2b36] focus:border-amber-500/50'
         }`}
       />
+      {styleProfile && <div aria-label="风格禁用词高亮" className="space-y-1">
+        <p className="text-[11px] text-zinc-500">风格「{styleProfile.label}」禁用词命中 {highlighted.length} 句（由本地确定性检查给出，不调模型）。</p>
+        {highlighted.map((item, index) => <p key={index} className="text-[12px] text-zinc-400">
+          <mark className="bg-amber-500/25 text-amber-200" title={`命中禁用表达：${item.hit}`}>{item.hit}</mark>
+          <span className="ml-2">{item.sentence.replace(item.hit!, '…')}</span>
+        </p>)}
+      </div>}
       <RhythmTape shots={workspace.forecastShots} onHoldChange={onHoldChange} />
     </div>
   );

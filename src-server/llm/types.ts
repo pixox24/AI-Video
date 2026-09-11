@@ -26,6 +26,7 @@ export type LlmStage =
   | "style_infer"
   | "style_rewrite"
   | "style_vision"
+  | "writing_style_infer"
   | "llm_test"
   | "topics_suggest";
 

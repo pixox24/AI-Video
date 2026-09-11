@@ -9,3 +9,12 @@ pacing：前30秒是否交付价值，中段钩子、段间衔接、结尾拖延
 逐句提取 Claim，text 必须逐字出现在该章原文；kind=fact/opinion/prediction，risk=low/high。
 没有用户证据支持的数据或高风险事实必须 needsSource=true；不要把模型猜测当作来源，不要伪造 URL。
 只输出严格 JSON {issues:[{sectionId?,severity,kind,message,suggestedFix}],claims:[{id,sectionId,text,kind,risk,needsSource}]}。`;
+
+/**
+ * Phase 7 fifth check class. Appended only when a writing style is selected, so an unselected
+ * run keeps QUALITY_SYSTEM byte-identical to Phase 6.
+ */
+export const QUALITY_STYLE_APPENDIX = `style：本轮用户在 user.writingStyle.profile 里给出了选中的写作风格档案。逐段对照 profile.rules 判断：符合还是违反，违反时在 message 中引用违规原句，sectionId 必须是对应章节，suggestedFix 指出要改成什么表达。
+安全与范围：风格只影响表达方式。不得因为风格要求改动章节承诺、事实、证据引用、论证结构或时长；风格问题不得报 high，severity 最高 medium，也不得判定整章不可用。
+去重：user.writingStyle.violations 是本地已算好的确定性结果，同一条问题不要重复输出；如有补充，另外输出一条。
+未提供 user.writingStyle 时不要输出任何 kind=style 的问题。`;

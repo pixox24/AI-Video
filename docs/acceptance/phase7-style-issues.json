@@ -1,0 +1,77 @@
+{
+  "writingStyleId": "pundit",
+  "modelFinding": {
+    "sectionId": "section-1",
+    "severity": "medium",
+    "kind": "style",
+    "message": "第 1 章连用两个反问，不符合「犀利观点」每段至多一个反问",
+    "suggestedFix": "删去第二个反问，改为陈述判断"
+  },
+  "report": {
+    "id": "a34f116e-2791-4540-8610-4fc36e11c33a",
+    "stage": "quality",
+    "issues": [
+      {
+        "sectionId": "section-1",
+        "severity": "medium",
+        "kind": "style",
+        "message": "第 1 章连用两个反问，不符合「犀利观点」每段至多一个反问",
+        "suggestedFix": "删去第二个反问，改为陈述判断"
+      },
+      {
+        "sectionId": "section-2",
+        "severity": "medium",
+        "kind": "style",
+        "message": "命中「犀利观点」档案的禁用表达：众所周知",
+        "suggestedFix": "改写含「众所周知」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+      },
+      {
+        "sectionId": "section-2",
+        "severity": "medium",
+        "kind": "style",
+        "message": "命中「犀利观点」档案的禁用表达：毋庸置疑",
+        "suggestedFix": "改写含「毋庸置疑」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+      },
+      {
+        "sectionId": "section-2",
+        "severity": "medium",
+        "kind": "style",
+        "message": "命中「犀利观点」档案的禁用表达：总的来说",
+        "suggestedFix": "改写含「总的来说」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+      }
+    ],
+    "claims": [],
+    "createdAt": "2026-09-11T08:28:23.850Z",
+    "projectDuration": {
+      "estimatedSec": 149.30232558139537,
+      "minSec": 125.58139534883722,
+      "maxSec": 209.30232558139537,
+      "verdict": "in_range",
+      "complete": true
+    },
+    "durations": [
+      {
+        "sectionId": "section-1",
+        "estimatedSec": 53.72093023255814,
+        "minSec": 41.86046511627907,
+        "maxSec": 69.76744186046511,
+        "verdict": "in_range"
+      },
+      {
+        "sectionId": "section-2",
+        "estimatedSec": 41.86046511627907,
+        "minSec": 41.86046511627907,
+        "maxSec": 69.76744186046511,
+        "verdict": "in_range"
+      },
+      {
+        "sectionId": "section-3",
+        "estimatedSec": 53.72093023255814,
+        "minSec": 41.86046511627907,
+        "maxSec": 69.76744186046511,
+        "verdict": "in_range"
+      }
+    ],
+    "verdict": "in_range"
+  }
+}

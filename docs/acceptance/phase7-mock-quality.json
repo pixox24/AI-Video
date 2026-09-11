@@ -1,0 +1,786 @@
+[
+  {
+    "endpoint": "/api/script/quality-check",
+    "writingStyleId": null,
+    "status": 200,
+    "response": {
+      "ok": true,
+      "report": {
+        "id": "f4702cad-f825-4b7c-b263-3b620a24b4b6",
+        "stage": "quality",
+        "issues": [],
+        "claims": [],
+        "createdAt": "2026-09-11T08:26:21.492Z",
+        "projectDuration": {
+          "estimatedSec": 149.30232558139537,
+          "minSec": 125.58139534883722,
+          "maxSec": 209.30232558139537,
+          "verdict": "in_range",
+          "complete": true
+        },
+        "durations": [
+          {
+            "sectionId": "section-1",
+            "estimatedSec": 53.72093023255814,
+            "minSec": 41.86046511627907,
+            "maxSec": 69.76744186046511,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "section-2",
+            "estimatedSec": 41.86046511627907,
+            "minSec": 41.86046511627907,
+            "maxSec": 69.76744186046511,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "section-3",
+            "estimatedSec": 53.72093023255814,
+            "minSec": 41.86046511627907,
+            "maxSec": 69.76744186046511,
+            "verdict": "in_range"
+          }
+        ],
+        "verdict": "in_range"
+      },
+      "sections": [
+        {
+          "id": "section-1",
+          "order": 1,
+          "role": "hook",
+          "title": "钩子",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-2",
+          "order": 2,
+          "role": "body",
+          "title": "论证",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。",
+          "beats": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-3",
+          "order": 3,
+          "role": "cta",
+          "title": "收束",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        }
+      ],
+      "rounds": 0,
+      "history": [
+        {
+          "id": "f4702cad-f825-4b7c-b263-3b620a24b4b6",
+          "stage": "quality",
+          "issues": [],
+          "claims": [],
+          "createdAt": "2026-09-11T08:26:21.492Z",
+          "projectDuration": {
+            "estimatedSec": 149.30232558139537,
+            "minSec": 125.58139534883722,
+            "maxSec": 209.30232558139537,
+            "verdict": "in_range",
+            "complete": true
+          },
+          "durations": [
+            {
+              "sectionId": "section-1",
+              "estimatedSec": 53.72093023255814,
+              "minSec": 41.86046511627907,
+              "maxSec": 69.76744186046511,
+              "verdict": "in_range"
+            },
+            {
+              "sectionId": "section-2",
+              "estimatedSec": 41.86046511627907,
+              "minSec": 41.86046511627907,
+              "maxSec": 69.76744186046511,
+              "verdict": "in_range"
+            },
+            {
+              "sectionId": "section-3",
+              "estimatedSec": 53.72093023255814,
+              "minSec": 41.86046511627907,
+              "maxSec": 69.76744186046511,
+              "verdict": "in_range"
+            }
+          ],
+          "verdict": "in_range"
+        }
+      ],
+      "stoppedReason": "checked",
+      "failures": []
+    }
+  },
+  {
+    "endpoint": "/api/script/section-draft",
+    "writingStyleId": null,
+    "status": 200,
+    "response": {
+      "ok": true,
+      "section": {
+        "id": "section-2",
+        "order": 2,
+        "role": "setup",
+        "title": "论证",
+        "outline": "",
+        "targetSeconds": 35.5,
+        "minUnits": 134,
+        "maxUnits": 156,
+        "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+        "beats": [
+          {
+            "id": "section-2-beat-1",
+            "order": 1,
+            "function": "setup",
+            "intent": "兑现本章承诺",
+            "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+            "targetSeconds": 35.5,
+            "energy": "medium",
+            "visualIntent": "主体站在窗边看着外面的雨，雨水打在玻璃上",
+            "needsHold": false,
+            "sectionId": "section-2"
+          }
+        ],
+        "promise": "给出可执行做法",
+        "audienceQuestion": "为什么会这样",
+        "beatLabelWarnings": [],
+        "usedEvidenceIds": [],
+        "status": "ready"
+      },
+      "sections": [
+        {
+          "id": "section-1",
+          "order": 1,
+          "role": "hook",
+          "title": "钩子",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-2",
+          "order": 2,
+          "role": "setup",
+          "title": "论证",
+          "outline": "",
+          "targetSeconds": 35.5,
+          "minUnits": 134,
+          "maxUnits": 156,
+          "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+          "beats": [
+            {
+              "id": "section-2-beat-1",
+              "order": 1,
+              "function": "setup",
+              "intent": "兑现本章承诺",
+              "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+              "targetSeconds": 35.5,
+              "energy": "medium",
+              "visualIntent": "主体站在窗边看着外面的雨，雨水打在玻璃上",
+              "needsHold": false,
+              "sectionId": "section-2"
+            }
+          ],
+          "promise": "给出可执行做法",
+          "audienceQuestion": "为什么会这样",
+          "beatLabelWarnings": [],
+          "usedEvidenceIds": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-3",
+          "order": 3,
+          "role": "cta",
+          "title": "收束",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        }
+      ],
+      "outline": {
+        "status": "confirmed",
+        "version": 1,
+        "oneSentenceThesis": "自律不是重点，降低诱惑成本才是",
+        "sections": [
+          {
+            "id": "section-1",
+            "order": 1,
+            "role": "hook",
+            "title": "钩子",
+            "audienceQuestion": "为什么会这样",
+            "promise": "给出可执行做法",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "开篇",
+            "bridgeToNext": "",
+            "targetSeconds": 8,
+            "targetUnits": 33,
+            "minUnits": 17,
+            "maxUnits": 45,
+            "status": "ready",
+            "narrationBudgetSec": 51,
+            "visualHoldBudgetSec": 9,
+            "retentionDevice": "反问",
+            "transitionOut": "下一章"
+          },
+          {
+            "id": "section-2",
+            "order": 2,
+            "role": "setup",
+            "title": "论证",
+            "audienceQuestion": "为什么会这样",
+            "promise": "给出可执行做法",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 35.5,
+            "targetUnits": 148,
+            "minUnits": 134,
+            "maxUnits": 156,
+            "status": "ready",
+            "narrationBudgetSec": 51,
+            "visualHoldBudgetSec": 9,
+            "retentionDevice": "反问",
+            "transitionOut": "下一章"
+          },
+          {
+            "id": "section-3",
+            "order": 3,
+            "role": "body",
+            "title": "收束",
+            "audienceQuestion": "为什么会这样",
+            "promise": "给出可执行做法",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 56.6,
+            "targetUnits": 236,
+            "minUnits": 213,
+            "maxUnits": 248,
+            "status": "ready",
+            "narrationBudgetSec": 51,
+            "visualHoldBudgetSec": 9,
+            "retentionDevice": "反问",
+            "transitionOut": "下一章"
+          },
+          {
+            "id": "section-4",
+            "order": 4,
+            "role": "body",
+            "title": "展开 2",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 56.6,
+            "targetUnits": 236,
+            "minUnits": 213,
+            "maxUnits": 248,
+            "status": "planned",
+            "narrationBudgetSec": 48.11,
+            "visualHoldBudgetSec": 8.49,
+            "retentionDevice": "",
+            "transitionOut": ""
+          },
+          {
+            "id": "section-5",
+            "order": 5,
+            "role": "proof",
+            "title": "证据 / 步骤",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 48.1,
+            "targetUnits": 200,
+            "minUnits": 180,
+            "maxUnits": 210,
+            "status": "planned",
+            "narrationBudgetSec": 40.885,
+            "visualHoldBudgetSec": 7.215,
+            "retentionDevice": "",
+            "transitionOut": ""
+          },
+          {
+            "id": "section-6",
+            "order": 6,
+            "role": "reveal",
+            "title": "关键一句",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 25.3,
+            "targetUnits": 105,
+            "minUnits": 95,
+            "maxUnits": 111,
+            "status": "planned",
+            "narrationBudgetSec": 21.505,
+            "visualHoldBudgetSec": 3.795,
+            "retentionDevice": "",
+            "transitionOut": ""
+          },
+          {
+            "id": "section-7",
+            "order": 7,
+            "role": "cta",
+            "title": "收束",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 9.9,
+            "targetUnits": 42,
+            "minUnits": 21,
+            "maxUnits": 54,
+            "status": "planned",
+            "narrationBudgetSec": 8.415000000000001,
+            "visualHoldBudgetSec": 1.485,
+            "retentionDevice": "",
+            "transitionOut": ""
+          }
+        ]
+      },
+      "scriptForm": "long",
+      "warnings": []
+    }
+  },
+  {
+    "endpoint": "/api/script/quality-check",
+    "writingStyleId": "pundit",
+    "status": 200,
+    "response": {
+      "ok": true,
+      "report": {
+        "id": "1bff528f-5ef8-4213-aa42-5a6857b43763",
+        "stage": "quality",
+        "issues": [
+          {
+            "sectionId": "section-2",
+            "severity": "medium",
+            "kind": "style",
+            "message": "命中「犀利观点」档案的禁用表达：众所周知",
+            "suggestedFix": "改写含「众所周知」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+          },
+          {
+            "sectionId": "section-2",
+            "severity": "medium",
+            "kind": "style",
+            "message": "命中「犀利观点」档案的禁用表达：毋庸置疑",
+            "suggestedFix": "改写含「毋庸置疑」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+          },
+          {
+            "sectionId": "section-2",
+            "severity": "medium",
+            "kind": "style",
+            "message": "命中「犀利观点」档案的禁用表达：总的来说",
+            "suggestedFix": "改写含「总的来说」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+          }
+        ],
+        "claims": [],
+        "createdAt": "2026-09-11T08:26:21.526Z",
+        "projectDuration": {
+          "estimatedSec": 149.30232558139537,
+          "minSec": 125.58139534883722,
+          "maxSec": 209.30232558139537,
+          "verdict": "in_range",
+          "complete": true
+        },
+        "durations": [
+          {
+            "sectionId": "section-1",
+            "estimatedSec": 53.72093023255814,
+            "minSec": 41.86046511627907,
+            "maxSec": 69.76744186046511,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "section-2",
+            "estimatedSec": 41.86046511627907,
+            "minSec": 41.86046511627907,
+            "maxSec": 69.76744186046511,
+            "verdict": "in_range"
+          },
+          {
+            "sectionId": "section-3",
+            "estimatedSec": 53.72093023255814,
+            "minSec": 41.86046511627907,
+            "maxSec": 69.76744186046511,
+            "verdict": "in_range"
+          }
+        ],
+        "verdict": "in_range"
+      },
+      "sections": [
+        {
+          "id": "section-1",
+          "order": 1,
+          "role": "hook",
+          "title": "钩子",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-2",
+          "order": 2,
+          "role": "body",
+          "title": "论证",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。众所周知，自律是成功的唯一路径。总的来说，只要足够自律，任何目标都能达成，这一点毋庸置疑。",
+          "beats": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-3",
+          "order": 3,
+          "role": "cta",
+          "title": "收束",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        }
+      ],
+      "rounds": 0,
+      "history": [
+        {
+          "id": "1bff528f-5ef8-4213-aa42-5a6857b43763",
+          "stage": "quality",
+          "issues": [
+            {
+              "sectionId": "section-2",
+              "severity": "medium",
+              "kind": "style",
+              "message": "命中「犀利观点」档案的禁用表达：众所周知",
+              "suggestedFix": "改写含「众所周知」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+            },
+            {
+              "sectionId": "section-2",
+              "severity": "medium",
+              "kind": "style",
+              "message": "命中「犀利观点」档案的禁用表达：毋庸置疑",
+              "suggestedFix": "改写含「毋庸置疑」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+            },
+            {
+              "sectionId": "section-2",
+              "severity": "medium",
+              "kind": "style",
+              "message": "命中「犀利观点」档案的禁用表达：总的来说",
+              "suggestedFix": "改写含「总的来说」的这句：直接给判断或具体事实，不要用套话起头。（依据「犀利观点」：禁止表达与抽象占位词清单）"
+            }
+          ],
+          "claims": [],
+          "createdAt": "2026-09-11T08:26:21.526Z",
+          "projectDuration": {
+            "estimatedSec": 149.30232558139537,
+            "minSec": 125.58139534883722,
+            "maxSec": 209.30232558139537,
+            "verdict": "in_range",
+            "complete": true
+          },
+          "durations": [
+            {
+              "sectionId": "section-1",
+              "estimatedSec": 53.72093023255814,
+              "minSec": 41.86046511627907,
+              "maxSec": 69.76744186046511,
+              "verdict": "in_range"
+            },
+            {
+              "sectionId": "section-2",
+              "estimatedSec": 41.86046511627907,
+              "minSec": 41.86046511627907,
+              "maxSec": 69.76744186046511,
+              "verdict": "in_range"
+            },
+            {
+              "sectionId": "section-3",
+              "estimatedSec": 53.72093023255814,
+              "minSec": 41.86046511627907,
+              "maxSec": 69.76744186046511,
+              "verdict": "in_range"
+            }
+          ],
+          "verdict": "in_range"
+        }
+      ],
+      "stoppedReason": "checked",
+      "failures": []
+    }
+  },
+  {
+    "endpoint": "/api/script/section-draft",
+    "writingStyleId": "pundit",
+    "status": 200,
+    "response": {
+      "ok": true,
+      "section": {
+        "id": "section-2",
+        "order": 2,
+        "role": "setup",
+        "title": "论证",
+        "outline": "",
+        "targetSeconds": 35.5,
+        "minUnits": 134,
+        "maxUnits": 156,
+        "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+        "beats": [
+          {
+            "id": "section-2-beat-1",
+            "order": 1,
+            "function": "setup",
+            "intent": "兑现本章承诺",
+            "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+            "targetSeconds": 35.5,
+            "energy": "medium",
+            "visualIntent": "主体站在窗边看着外面的雨，雨水打在玻璃上",
+            "needsHold": false,
+            "sectionId": "section-2"
+          }
+        ],
+        "promise": "给出可执行做法",
+        "audienceQuestion": "为什么会这样",
+        "beatLabelWarnings": [],
+        "usedEvidenceIds": [],
+        "status": "ready"
+      },
+      "sections": [
+        {
+          "id": "section-1",
+          "order": 1,
+          "role": "hook",
+          "title": "钩子",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-2",
+          "order": 2,
+          "role": "setup",
+          "title": "论证",
+          "outline": "",
+          "targetSeconds": 35.5,
+          "minUnits": 134,
+          "maxUnits": 156,
+          "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+          "beats": [
+            {
+              "id": "section-2-beat-1",
+              "order": 1,
+              "function": "setup",
+              "intent": "兑现本章承诺",
+              "narration": "第2章。模拟章节口播。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。这是一句可拍的口播内容，用来兑现本章承诺。",
+              "targetSeconds": 35.5,
+              "energy": "medium",
+              "visualIntent": "主体站在窗边看着外面的雨，雨水打在玻璃上",
+              "needsHold": false,
+              "sectionId": "section-2"
+            }
+          ],
+          "promise": "给出可执行做法",
+          "audienceQuestion": "为什么会这样",
+          "beatLabelWarnings": [],
+          "usedEvidenceIds": [],
+          "status": "ready"
+        },
+        {
+          "id": "section-3",
+          "order": 3,
+          "role": "cta",
+          "title": "收束",
+          "targetSeconds": 60,
+          "minUnits": 180,
+          "maxUnits": 300,
+          "narration": "别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。别再谈自律了。问题不是自律，是诱惑太便宜。手机就在手边，短视频三秒给一次反馈，你让大脑怎么选？把手机放到另一个房间，专注时长会明显变长。别改意志，改距离。",
+          "beats": [],
+          "status": "ready"
+        }
+      ],
+      "outline": {
+        "status": "confirmed",
+        "version": 1,
+        "oneSentenceThesis": "自律不是重点，降低诱惑成本才是",
+        "sections": [
+          {
+            "id": "section-1",
+            "order": 1,
+            "role": "hook",
+            "title": "钩子",
+            "audienceQuestion": "为什么会这样",
+            "promise": "给出可执行做法",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "开篇",
+            "bridgeToNext": "",
+            "targetSeconds": 8,
+            "targetUnits": 33,
+            "minUnits": 17,
+            "maxUnits": 45,
+            "status": "ready",
+            "narrationBudgetSec": 51,
+            "visualHoldBudgetSec": 9,
+            "retentionDevice": "反问",
+            "transitionOut": "下一章"
+          },
+          {
+            "id": "section-2",
+            "order": 2,
+            "role": "setup",
+            "title": "论证",
+            "audienceQuestion": "为什么会这样",
+            "promise": "给出可执行做法",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 35.5,
+            "targetUnits": 148,
+            "minUnits": 134,
+            "maxUnits": 156,
+            "status": "ready",
+            "narrationBudgetSec": 51,
+            "visualHoldBudgetSec": 9,
+            "retentionDevice": "反问",
+            "transitionOut": "下一章"
+          },
+          {
+            "id": "section-3",
+            "order": 3,
+            "role": "body",
+            "title": "收束",
+            "audienceQuestion": "为什么会这样",
+            "promise": "给出可执行做法",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 56.6,
+            "targetUnits": 236,
+            "minUnits": 213,
+            "maxUnits": 248,
+            "status": "ready",
+            "narrationBudgetSec": 51,
+            "visualHoldBudgetSec": 9,
+            "retentionDevice": "反问",
+            "transitionOut": "下一章"
+          },
+          {
+            "id": "section-4",
+            "order": 4,
+            "role": "body",
+            "title": "展开 2",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 56.6,
+            "targetUnits": 236,
+            "minUnits": 213,
+            "maxUnits": 248,
+            "status": "planned",
+            "narrationBudgetSec": 48.11,
+            "visualHoldBudgetSec": 8.49,
+            "retentionDevice": "",
+            "transitionOut": ""
+          },
+          {
+            "id": "section-5",
+            "order": 5,
+            "role": "proof",
+            "title": "证据 / 步骤",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 48.1,
+            "targetUnits": 200,
+            "minUnits": 180,
+            "maxUnits": 210,
+            "status": "planned",
+            "narrationBudgetSec": 40.885,
+            "visualHoldBudgetSec": 7.215,
+            "retentionDevice": "",
+            "transitionOut": ""
+          },
+          {
+            "id": "section-6",
+            "order": 6,
+            "role": "reveal",
+            "title": "关键一句",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 25.3,
+            "targetUnits": 105,
+            "minUnits": 95,
+            "maxUnits": 111,
+            "status": "planned",
+            "narrationBudgetSec": 21.505,
+            "visualHoldBudgetSec": 3.795,
+            "retentionDevice": "",
+            "transitionOut": ""
+          },
+          {
+            "id": "section-7",
+            "order": 7,
+            "role": "cta",
+            "title": "收束",
+            "audienceQuestion": "",
+            "promise": "",
+            "evidenceIds": [],
+            "bridgeFromPrevious": "",
+            "bridgeToNext": "",
+            "targetSeconds": 9.9,
+            "targetUnits": 42,
+            "minUnits": 21,
+            "maxUnits": 54,
+            "status": "planned",
+            "narrationBudgetSec": 8.415000000000001,
+            "visualHoldBudgetSec": 1.485,
+            "retentionDevice": "",
+            "transitionOut": ""
+          }
+        ]
+      },
+      "scriptForm": "long",
+      "warnings": []
+    }
+  }
+]

@@ -1,12 +1,14 @@
 import { BEAT_FUNCTIONS, normalizeBeatEnergy, normalizeBeatFunction } from '../../src/utils/scriptSections';
 import { z } from 'zod';
-import type { ScriptBrief, ScriptSection, ScriptRevisionAction, ScriptOutlineSection, ScriptLanguage } from '../../src/types';
+import type { QualityIssue, ScriptBrief, ScriptSection, ScriptRevisionAction, ScriptOutlineSection, ScriptLanguage } from '../../src/types';
+import type { WritingStyleProfile } from '../../src/shared/writingStyle';
 import { mergeSectionIntoWorkspaceSections } from '../../src/utils/scriptOutline';
 import { SECTION_REVISE_SYSTEM, sectionReviseUserPrompt } from '../../src/utils/scriptPrompts';
 import { generateStructured } from '../llm/gateway';
 import { LLM_LONGFORM_MAX_TOKENS, llmTimeoutMsForSeconds } from '../../src/utils/scriptDuration';
 import { toLoose, toLooseList } from '../loose';
 import { splitCoversSource } from '../../src/utils/scriptSplit';
+import { styleRevisionInstruction } from '../style/writingStyle';
 
 const revisionSchema = z.object({ narration: z.string().trim().min(1), usedEvidenceIds: z.array(z.string()),
   beats: z.array(z.object({ id: z.string().optional(), order: z.number().optional(), function: z.unknown().optional().describe(`节拍标签，优先使用 ${BEAT_FUNCTIONS.join(', ')}；标签异常会在本地修正`),
@@ -14,7 +16,9 @@ const revisionSchema = z.object({ narration: z.string().trim().min(1), usedEvide
   }).strict()).min(1)
 }).strict();
 export type RevisionInput = { sections: ScriptSection[]; planned?: Pick<ScriptOutlineSection, 'status' | 'minUnits' | 'maxUnits'>;
-  action: ScriptRevisionAction; language: ScriptLanguage; brief: ScriptBrief; targetSeconds: number; llmApi?: unknown; strict?: boolean; projectId?: string };
+  action: ScriptRevisionAction; language: ScriptLanguage; brief: ScriptBrief; targetSeconds: number; llmApi?: unknown; strict?: boolean; projectId?: string;
+  /** Phase 7: when present, the revision prompt carries the style-repair block instead of only the issue list. */
+  writingStyle?: WritingStyleProfile; styleFindings?: Pick<QualityIssue, 'message' | 'suggestedFix'>[] };
 export type RevisionResult = { status: number; section?: ScriptSection; sections: ScriptSection[]; code?: string; error?: string };
 
 /** One implementation shared by the existing endpoint and the quality loop. */
@@ -24,11 +28,17 @@ export async function executeSectionRevision(input: RevisionInput): Promise<Revi
   if (!current) return { status: 400, sections, error: '找不到要修订的章节。' };
   if (current.status === 'locked' || planned?.status === 'locked') return { status: 409, sections, code: 'draft_contract_failed', error: '锁定章节不会被自动回修。' };
   try {
+    const styleFindings = input.styleFindings || [];
+    const styleInstruction = input.writingStyle && styleFindings.length
+      ? styleRevisionInstruction(input.writingStyle, styleFindings)
+      : '';
     const result = await generateStructured({ stage: 'section_revise', role: 'drafter', clientLlmApi: input.llmApi,
       schema: input.strict ? revisionSchema : undefined, projectId: input.projectId, system: SECTION_REVISE_SYSTEM,
       user: sectionReviseUserPrompt({ language: input.language, section: { title: current.title, narration: current.narration,
-        minUnits: planned?.minUnits || current.minUnits, maxUnits: planned?.maxUnits || current.maxUnits }, action,
-        unitName: input.language === 'en' ? '词' : '字', brief: input.brief }),
+        minUnits: planned?.minUnits || current.minUnits, maxUnits: planned?.maxUnits || current.maxUnits },
+        action: styleInstruction ? { ...action, instruction: styleInstruction } : action,
+        unitName: input.language === 'en' ? '词' : '字', brief: input.brief,
+        ...(styleInstruction ? { styleInstruction } : {}) }),
       temperature: 0.4, timeoutMs: llmTimeoutMsForSeconds(input.targetSeconds), maxTokens: LLM_LONGFORM_MAX_TOKENS });
     const parsed = toLoose(result.data);
     const narration = String(parsed.narration || '').trim();

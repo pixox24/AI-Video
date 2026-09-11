@@ -21,12 +21,24 @@ test('strict schema distinguishes editable drafts from complete generated briefs
   assert.equal(contentBriefDraftSchema.safeParse({ ...emptyContentBrief(), lockedFields: ['audience.roles'] }).success, false);
 });
 test('all supported brief locks survive regeneration and preserve the input', () => {
-  const previous = { ...emptyContentBrief('旧主题'), audience: { roles: ['原受众'], knowledgeLevel: 'advanced' as const, primaryNeed: '需求' }, objective: '原目标', viewerPromise: '原承诺', mustCover: ['证据'], mustAvoid: ['杜撰'], lockedFields: ['topic', 'audience', 'objective', 'viewerPromise', 'contentType', 'mustCover', 'mustAvoid'] as const };
+  const previous = { ...emptyContentBrief('旧主题'), audience: { roles: ['原受众'], knowledgeLevel: 'advanced' as const, primaryNeed: '需求' }, objective: '原目标', viewerPromise: '原承诺', mustCover: ['证据'], mustAvoid: ['杜撰'], writingStyleId: 'pundit', lockedFields: ['topic', 'audience', 'objective', 'viewerPromise', 'contentType', 'mustCover', 'mustAvoid', 'writingStyleId'] as const };
   const input = { ...previous, lockedFields: [...previous.lockedFields] };
   assert.deepEqual(preserveBriefLocks(input, emptyContentBrief('新主题')), input);
   const unlocked = preserveBriefLocks(undefined, { ...input });
   assert.deepEqual(unlocked.lockedFields, []);
-  assert.equal(input.lockedFields.length, 7);
+  assert.equal(input.lockedFields.length, 8);
+});
+test('writingStyleId is a user choice: absent by default, lockable, and never overwritten by regeneration', () => {
+  assert.equal('writingStyleId' in emptyContentBrief(), false);
+  assert.equal(contentBriefDraftSchema.safeParse({ ...emptyContentBrief(), writingStyleId: 'pundit' }).success, true);
+  assert.equal(contentBriefDraftSchema.safeParse({ ...emptyContentBrief(), writingStyleId: '' }).success, false);
+  assert.equal(contentBriefDraftSchema.safeParse({ ...emptyContentBrief(), lockedFields: ['writingStyleId'] }).success, true);
+  const generated = { ...emptyContentBrief('新主题'), viewerPromise: '新承诺' };
+  assert.equal(preserveBriefLocks(undefined, generated).writingStyleId, undefined);
+  const chosen = { ...generated, writingStyleId: 'analyst' };
+  assert.equal(preserveBriefLocks(chosen, generated).writingStyleId, 'analyst');
+  assert.equal(preserveBriefLocks({ ...chosen, lockedFields: ['writingStyleId'] }, generated).writingStyleId, 'analyst');
+  assert.deepEqual(normalizeScriptWorkspace({ ...createDefaultScriptWorkspace(), contentBrief: chosen }).contentBrief, chosen);
 });
 test('duration presets map forms and reject invalid bounds, pace and extra fields', () => {
   assert.equal(durationSpecForm(durationSpecForPreset('insight')), 'long');

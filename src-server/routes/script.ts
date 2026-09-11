@@ -57,6 +57,8 @@ import {
 import { compileVisualBible } from "../../src/services/visualBibleService";
 import { errorMessage, requestBody, toLoose, toLooseList, type Loose } from "../loose";
 import { incomingStyleContract } from "../style-contract";
+import { findWritingStyleProfile } from "../../src/shared/writingStyle";
+import { writingStyleBlock } from "../style/writingStyle";
 import { isUsableLlmApi } from "../llm/client-api";
 import { generateGeminiJson, generateStructured, runScriptLlmJson, runScriptLlmJsonDetailed } from "../llm/gateway";
 import { cleanAndParseJSON } from "../llm/parse";
@@ -362,6 +364,7 @@ ${languageRule}
 });
 
 app.post("/api/script/draft", async (req, res) => {
+  const body = requestBody(req.body as unknown);
   const {
     topic,
     topicCard,
@@ -380,7 +383,7 @@ app.post("/api/script/draft", async (req, res) => {
     scriptFormOverride,
     confirmOutlineBeforeDraft,
     projectId
-  } = requestBody(req.body as unknown);
+  } = body;
   const language = normalizeScriptLanguage(scriptLanguage || budget?.scriptLanguage);
   const title = String(
     (intent === "have-title" ? lockedTitle : "") || topicCard?.title || topic || intentNotes || "这件事"
@@ -477,6 +480,9 @@ app.post("/api/script/draft", async (req, res) => {
   };
 
   const styleContract = incomingStyleContract(stylePack);
+  // Phase 7: no selected writing style leaves the whole draft prompt byte-identical to Phase 6.
+  const writingStyle = findWritingStyleProfile(body.writingStyleId || body.contentBrief?.writingStyleId, body.writingStyles);
+  const styleBlock = writingStyle ? writingStyleBlock(writingStyle) : "";
   const unitName = language === "en" ? "词" : "字";
   const budgetRule = language === "en"
     ? `- Write fullNarration and every beat.narration in natural spoken English. Do not write Chinese voiceover.
@@ -654,6 +660,7 @@ ${contextBlock}
           summaries: completedSectionSummaries(completed, language),
           contextBlock,
           styleContract,
+          ...(styleBlock ? { writingStyleBlock: styleBlock } : {}),
           unitName,
           notesRule: `${haveTitleRule}${notesRule}`
         })
@@ -827,6 +834,7 @@ app.post("/api/script/section-draft", async (req, res) => {
     return res.status(409).json({ ok: false, code: "draft_contract_failed", error: "该章已锁定，不会自动改写。" });
   }
   const styleContract = incomingStyleContract(body.stylePack);
+  const writingStyle = findWritingStyleProfile(body.writingStyleId || body.contentBrief?.writingStyleId, body.writingStyles);
   const contextBlock = `【题目】${title} 【目标时长】${targetSeconds}s`;
   const summaries = completedSectionSummaries(existing, language);
   try {
@@ -840,6 +848,7 @@ app.post("/api/script/section-draft", async (req, res) => {
       summaries,
       contextBlock,
       styleContract,
+      ...(writingStyle ? { writingStyleBlock: writingStyleBlock(writingStyle) } : {}),
       unitName
     });
     const result = await draftOneSection({
@@ -904,8 +913,11 @@ app.post("/api/script/section-revise", async (req, res) => {
   const action = body.action || body.revisionAction;
   if (!action?.sectionId || !action?.action) return res.status(400).json({ ok: false, error: "缺少章节修订动作。" });
   const existing = Array.isArray(body.sections) ? body.sections : [];
+  const writingStyle = findWritingStyleProfile(body.writingStyleId || body.contentBrief?.writingStyleId, body.writingStyles);
+  const styleFindings = writingStyle ? toLooseList(body.styleFindings).map(item => ({ message: String(item.message || ''), suggestedFix: String(item.suggestedFix || '') })).filter(item => item.message) : [];
   const result = await executeSectionRevision({ sections: existing, action, language, targetSeconds, brief, llmApi: body.llmApi,
-    planned: (body.outline?.sections || []).find((item: Loose) => item.id === action.sectionId), projectId: body.projectId });
+    planned: (body.outline?.sections || []).find((item: Loose) => item.id === action.sectionId), projectId: body.projectId,
+    ...(writingStyle && styleFindings.length ? { writingStyle, styleFindings } : {}) });
   if (result.status === 200) return res.json({ ok: true, section: result.section, sections: result.sections });
   return res.status(result.status).json({ ok: false, ...(result.code ? { code: result.code } : {}), error: result.error,
     ...(result.status === 503 ? { sections: result.sections } : {}) });

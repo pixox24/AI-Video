@@ -17,3 +17,9 @@
 | E009 | 章节角色与节拍类型校验 | 节拍必须属于章节角色允许列表，标签错误拒绝整章 | 用户确认取消角色组合限制；合法节拍类型保留，body→proof，大小写/空白归一化，未知或缺失标签按已有章节默认类型兜底并保存提示。仅修标签，不重写正文；生成、修订统一处理，正文与节拍覆盖仍硬校验 | 2026-09-10 / 用户确认节拍标签改造 |
 
 | E010 | 生成与质量接口节奏字段不一致 | 模型返回 high/中文/peak 等 energy 被生成层保存，质检严格枚举返回 400，前端隐藏原因 | 共用节奏归一化用于草稿、修订及旧章节质检输入；明确别名映射，未知值采用 medium 并提示，正文不重写。质检显示具体错误字段或服务端原因 | 2026-09-11 / 用户授权修复 |
+
+| E011 | SPEC-P7 §11 执行协议 | commit 并 `push origin longform` | 按用户指令从 `longform`（含 Phase 0–6 全部 16 个提交）切出 `style-pack` 分支开发，最终 `push origin style-pack`；`main` 上不存在 Phase 0–6，禁止从 main 切分支 | Phase 7 / 用户确认 |
+| E012 | SPEC-P7 §3 `WritingStyleProfile` 字段清单 | 档案字段为 id/kind/label/description/rules/bannedPatterns/exemplar/counterExemplar/derivedFromSamples/locked | 经用户批准增加两个字段：`lintThresholds{maxSentenceUnits,minShortSentenceShare,maxSentenceUnitsHard}`（让 styleLint 读档案声明而不是解析 rules 文本）与 `provisional`（标注内置档案尚未用真实优质文案归纳）。两个字段均可选，不改变既有字段语义 | Phase 7 / 用户确认 |
+| E013 | SPEC-P7 §7 evaluator 第五类检查 | "追加进评估器 prompt" | 不修改既有 `QUALITY_SYSTEM` 常量，新增独立常量 `QUALITY_STYLE_APPENDIX`，仅在选中风格时运行时拼接（未选中时 system 与 Phase 6 逐字节相同）。第五类同时包含模型 rubric 评分与 `styleLint` 确定性结果 | Phase 7 / 实现说明 |
+| E014 | SPEC-P7 §8 `GET /api/writing-styles` | 列出内置 + 当前项目自定义档案 | 端点只返回内置档案（服务端无项目态）；自定义档案由项目文件 `scriptWorkspace.writingStyles` 持有，按项目隔离，与 SPEC-P7 §2.2"不做跨项目风格继承/共享"一致 | Phase 7 / 实现说明 |
+| E015 | SPEC-P7 §6 styleLint 检查项 3 | "抽象占位词表（与既有禁令同源扩展）" | 抽象占位词为嵌入 lint 模块的固定代码表（很有氛围/电影感/高级感 等 12 项），档案不可改；档案自身 bannedPatterns 优先于该表报告，避免同一句重复报两条 | Phase 7 / 实现说明 |

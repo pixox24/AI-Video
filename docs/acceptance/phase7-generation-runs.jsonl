@@ -1,0 +1,4 @@
+{"id":"f4702cad-f825-4b7c-b263-3b620a24b4b6","stage":"quality","model":"mock","inputTokens":0,"outputTokens":0,"costUsd":0,"durationMs":4,"status":"mocked","promptHash":"37603b7b3fe758d6","createdAt":"2026-09-11T08:26:21.492Z"}
+{"id":"7ca26838-97de-4b4e-8145-a65a9bfd8613","stage":"script_section","model":"mock","inputTokens":0,"outputTokens":0,"costUsd":0,"durationMs":1,"status":"mocked","promptHash":"b69d5899074e16e8","createdAt":"2026-09-11T08:26:21.517Z"}
+{"id":"1bff528f-5ef8-4213-aa42-5a6857b43763","stage":"quality","model":"mock","inputTokens":0,"outputTokens":0,"costUsd":0,"durationMs":1,"status":"mocked","promptHash":"58f6f5afd65038f1","createdAt":"2026-09-11T08:26:21.526Z"}
+{"id":"2e10b0c0-270b-4f20-8105-fda24bbb66a9","stage":"script_section","model":"mock","inputTokens":0,"outputTokens":0,"costUsd":0,"durationMs":0,"status":"mocked","promptHash":"5b8052f8a2a8bfd5","createdAt":"2026-09-11T08:26:21.532Z"}

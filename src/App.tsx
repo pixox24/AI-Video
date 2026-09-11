@@ -1826,6 +1826,11 @@ export default function App() {
           onApplyStyleToExistingClips={handleApplyStyleToAllClips}
           onLibraryChange={setStyleLibrary}
           onOpenStylePanel={() => setActiveTab('style')}
+          writingStyles={project.scriptWorkspace?.writingStyles || []}
+          projectId={project.id}
+          onWritingStylesChange={(writingStyles) => updateProject({
+            scriptWorkspace: { ...(project.scriptWorkspace || hydrateScriptWorkspace(project)), writingStyles }
+          })}
         />
       ) : activeTab === 'script' ? (
         <ScriptWorkspaceView
