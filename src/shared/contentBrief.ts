@@ -3,7 +3,8 @@ import { MAX_VIDEO_SECONDS } from '../utils/scriptDuration';
 
 export const durationPresetSchema = z.enum(['insight', 'deep_dive', 'tutorial']);
 export const scriptPaceSchema = z.enum(['ultrafast', 'fast', 'medium', 'slow', 'cinematic']);
-export const contentBriefFields = ['topic', 'audience', 'objective', 'viewerPromise', 'contentType', 'mustCover', 'mustAvoid'] as const;
+/** Lockable brief fields. `writingStyleId` joined the lock set in Phase 7. */
+export const contentBriefFields = ['topic', 'audience', 'objective', 'viewerPromise', 'contentType', 'mustCover', 'mustAvoid', 'writingStyleId'] as const;
 const text = z.string().trim().min(1);
 export const contentBriefDraftSchema = z.object({
   topic: z.string(),
@@ -13,6 +14,8 @@ export const contentBriefDraftSchema = z.object({
   contentType: z.enum(['analysis', 'tutorial', 'commentary', 'story']),
   mustCover: z.array(z.string()),
   mustAvoid: z.array(z.string()),
+  /** Selected writing style archive; absent = no style constraints (Phase 6 behaviour, byte-identical). */
+  writingStyleId: z.string().trim().min(1).optional(),
   lockedFields: z.array(z.enum(contentBriefFields))
 }).strict();
 export const contentBriefSchema = contentBriefDraftSchema.extend({

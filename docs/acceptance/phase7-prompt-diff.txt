@@ -1,0 +1,30 @@
+Phase 7 prompt diff verification (acceptance 6)
+generated: 2026-09-11T08:27:03.215Z
+
+OUTLINE_SYSTEM: PASS — frozen baseline preserved verbatim as prefix (166 chars)
+APPENDED (168 chars):
+
+【Phase 2 追加约束】必须围绕 viewerPromise 规划唯一核心命题；每段输出 narrationBudgetSec、visualHoldBudgetSec、retentionDevice、transitionOut。口播预算合计须在全片预算 ±10%，hook 总预算不超过 35 秒，30 秒内交付第一份实质信息。
+
+SECTION_DRAFT_SYSTEM: PASS — frozen baseline preserved verbatim as prefix (241 chars)
+APPENDED (155 chars):
+
+【篇幅原则】章节字数是参考预算，优先兑现本章承诺。讲清楚即可，禁止为了凑字重复或编造；篇幅偏差交给全文质量评估。
+
+【Phase 7 追加】按用户选中的写作风格约束表达方式；风格只影响怎么说话，不得改动本章 promise、evidenceIds 与时长预算，冲突时内容与时长优先。未选中风格时不适用本段。
+
+SECTION_REVISE_SYSTEM: PASS — frozen baseline preserved verbatim as prefix (145 chars)
+APPENDED (260 chars):
+
+【Phase 3 追加】仅按本章的质量问题定向修复，禁止全文重写。扩写只允许证据、案例、推导、演示、反例、可执行步骤；不得伪造来源、数据、人物或案例。压缩不得删除结论成立所必需的论证。无来源高风险事实应删去或明确标为待核实，不得捏造引文。
+
+【篇幅原则】按具体内容缺口修订，字数区间与增减量仅供参考。事实修正、概念解释和衔接修复不必强行改变篇幅；资料不足时保留有依据的内容，不编造、不凑字。
+
+【Phase 7 追加】收到【风格修复】时只调整表达方式，不改变事实、论证结构与时长预算。未收到风格修复要求时不适用本段。
+
+OUTLINE_SYSTEM unchanged since Phase 2 (no Phase 7 addition): PASS
+QUALITY_SYSTEM (Phase 3 four classes) untouched; the fifth class is a separate constant appended only when a style is selected: PASS
+QUALITY_STYLE_APPENDIX length: 350 chars
+prompt-baseline.md byte size: 1763 (unchanged; git diff longform shows no modification)
+
+RESULT: all three system prompts kept their original sentences verbatim.

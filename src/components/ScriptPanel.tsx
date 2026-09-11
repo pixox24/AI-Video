@@ -502,6 +502,8 @@ export const ScriptPanel: React.FC<ScriptPanelProps> = ({
           brief: source.brief,
           contentBrief: source.contentBrief,
           durationSpec: source.durationSpec,
+          writingStyleId: source.contentBrief?.writingStyleId,
+          writingStyles: source.writingStyles,
           outline: source.outline,
           sections: source.sections,
           scriptFormOverride: source.scriptFormOverride,

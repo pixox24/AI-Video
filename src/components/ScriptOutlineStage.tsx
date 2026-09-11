@@ -112,6 +112,8 @@ export function ScriptOutlineStage({
           stylePack,
           scriptLanguage: workspace.scriptLanguage,
           scriptFormOverride: workspace.scriptFormOverride,
+          writingStyleId: workspace.contentBrief?.writingStyleId,
+          writingStyles: workspace.writingStyles,
           projectId
         })
       });
@@ -164,6 +166,8 @@ export function ScriptOutlineStage({
           scriptLanguage: workspace.scriptLanguage,
           scriptFormOverride: workspace.scriptFormOverride,
           confirmOutlineBeforeDraft: workspace.confirmOutlineBeforeDraft,
+          writingStyleId: workspace.contentBrief?.writingStyleId,
+          writingStyles: workspace.writingStyles,
           projectId
         })
       });
@@ -541,7 +545,9 @@ export function RevisionBanner({
                     brief: workspace.brief,
                     budget: workspace.durationBudget,
                     llmApi: customLlmApi,
-                    scriptLanguage: workspace.scriptLanguage
+                    scriptLanguage: workspace.scriptLanguage,
+                    writingStyleId: workspace.contentBrief?.writingStyleId,
+                    writingStyles: workspace.writingStyles
                   })
                 });
                 const data = await res.json().catch(() => ({}));

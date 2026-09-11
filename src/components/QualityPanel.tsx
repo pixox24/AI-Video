@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { CustomLlmApiConfig, ScriptWorkspace } from '../types';
+import type { CustomLlmApiConfig, QualityReport, ScriptWorkspace } from '../types';
 import { qualityFailureMessage, qualityInputKey, qualityResponseSchema } from '../shared/quality';
+import { findWritingStyleProfile } from '../shared/writingStyle';
 import { flattenSectionBeats, joinSectionNarrations } from '../utils/scriptSections';
 import { rebuildForecast } from '../utils/scriptWorkspace';
 
@@ -16,18 +17,19 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
   const request = {
     sections: workspace.sections || [], outline: workspace.outline, scriptLanguage: workspace.scriptLanguage || 'zh',
     pace: workspace.durationBudget.pace, durationSpec: workspace.durationSpec, contentBrief: workspace.contentBrief,
-    brief: workspace.brief, claims: workspace.claims || [], llmApi: customLlmApi, projectId
+    brief: workspace.brief, claims: workspace.claims || [], llmApi: customLlmApi, projectId,
+    writingStyleId: workspace.contentBrief?.writingStyleId, writingStyles: workspace.writingStyles
   };
   const report = workspace.qualityReport;
   // Exclude secrets from persisted comparison data.
   const sourceKey = qualityInputKey(request);
   const stale = workspace.qualityInputKey !== sourceKey;
   const locked = (id: string) => workspace.sections?.some(s => s.id === id && s.status === 'locked') || workspace.outline?.sections.some(s => s.id === id && s.status === 'locked');
-  const run = async (repair = false, sectionIds?: string[]) => {
+  const run = async (repair = false, sectionIds?: string[], styleFindings?: QualityReport['issues']) => {
     const snapshot = workspace;
     setBusy(true); setMessage(''); setLabelWarnings([]);
     try {
-      const response = await fetch('/api/script/quality-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...request, repair, sectionIds }) });
+      const response = await fetch('/api/script/quality-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...request, repair, sectionIds, styleFindings }) });
       const data: unknown = await response.json().catch(() => null);
       if (!response.ok) throw new Error(qualityFailureMessage(response.status, data));
       const result = qualityResponseSchema.parse(data);
@@ -44,9 +46,15 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
   };
   const canCheck = Boolean(workspace.outline?.sections.length && workspace.sections?.length);
   const hasEditable = report?.issues.some(i => i.sectionId && !locked(i.sectionId));
+  const activeStyle = findWritingStyleProfile(workspace.contentBrief?.writingStyleId, workspace.writingStyles);
+  const styleIssues = (report?.issues || []).filter(i => i.kind === 'style');
+  const styleSectionIds = [...new Set(styleIssues.map(i => i.sectionId).filter((id): id is string => Boolean(id)))];
+  const styleViolatingCount = styleSectionIds.filter(id => !locked(id)).length;
+  const conformingCount = Math.max(0, (workspace.sections || []).filter(s => !styleSectionIds.includes(s.id)).length);
+  const fixStyle = (sectionId: string) => void run(true, [sectionId], styleIssues.filter(i => i.sectionId === sectionId));
   return <section className="mt-6 rounded-xl border border-zinc-700 p-4 space-y-3 text-zinc-200" aria-label="质量评估">
     <h3 className="font-semibold">质量评估</h3>
-    <p className="text-sm text-zinc-400">检查承诺、时长、事实风险与节奏；修复只作用于有问题的未锁定章节，最多两轮。</p>
+    <p className="text-sm text-zinc-400">检查承诺、时长、事实风险与节奏{activeStyle ? '，以及所选写作风格' : ''}；修复只作用于有问题的未锁定章节，最多两轮。</p>
     <button disabled={busy || !canCheck} onClick={() => void run()} className="rounded bg-indigo-600 px-3 py-2 disabled:opacity-40">{busy ? '检查 / 修复中…' : '检查质量'}</button>
     {hasEditable && <button disabled={busy || stale} onClick={() => void run(true)} className="ml-3 rounded bg-amber-600 px-3 py-2 disabled:opacity-40">一键修复未锁定问题</button>}
     {!canCheck && <p>请先生成大纲与章节口播。</p>}
@@ -55,6 +63,16 @@ export function QualityPanel({ workspace, onChange, customLlmApi, projectId }: {
     {[...new Set([...(workspace.sections?.flatMap(s => s.beatLabelWarnings || []) || []), ...labelWarnings])].map((warning, index) => <p key={index} className="text-sm text-zinc-400">{warning}</p>)}
     {report && <>
       <p>全文口播预算：{report.projectDuration?.complete === false ? '章节尚未写完，暂不作全文判定' : report.verdict} · {report.issues.length} 个内容 / 全文预算问题</p>
+      {activeStyle && <div className="rounded-lg border border-zinc-700 p-3 space-y-1" aria-label="写作风格检查">
+        <p>写作风格：{activeStyle.label} · {styleSectionIds.length === 0 ? '全部章节符合档案' : `${conformingCount} 章符合 / ${styleSectionIds.length} 章有风格问题`}</p>
+        <p className="text-xs text-zinc-400">风格问题 severity 上限为中，永不阻断导出；修复风格不改变承诺、事实与时长预算。</p>
+      </div>}
+      {styleIssues.map((issue, index) => <div key={`style-${index}`} className="border-l-2 border-sky-500 pl-3 text-sm">
+        <p>风格 · {workspace.sections?.find(s => s.id === issue.sectionId)?.title || issue.sectionId || '全文'} · {issue.message}</p>
+        <p className="text-zinc-400">{issue.suggestedFix}</p>
+        {issue.sectionId && <button disabled={busy || stale || locked(issue.sectionId)} onClick={() => fixStyle(issue.sectionId!)}
+          className="text-sky-300 disabled:text-zinc-500">{locked(issue.sectionId) ? '已锁定，不修订' : '按风格修复本章'}</button>}
+      </div>)}
       {report.projectDuration && <p className="text-sm text-zinc-400">当前预计口播 {report.projectDuration.estimatedSec.toFixed(1)} 秒 · 全文参考 {report.projectDuration.minSec.toFixed(1)}–{report.projectDuration.maxSec.toFixed(1)} 秒</p>}
       {report.durations.filter(d => d.verdict !== 'in_range').map(d => <p key={d.sectionId} className="text-sm text-zinc-400">
         {workspace.sections?.find(s => s.id === d.sectionId)?.title || d.sectionId}：预计 {d.estimatedSec.toFixed(1)} 秒，章节参考 {d.minSec.toFixed(1)}–{d.maxSec.toFixed(1)} 秒。仅作篇幅提示，不要求凑字或自动重写。

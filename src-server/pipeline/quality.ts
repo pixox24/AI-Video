@@ -1,12 +1,50 @@
 import type { Claim, QualityIssue, QualityReport, ScriptSection, ScriptRevisionAction } from '../../src/types';
 import { evaluatorSchema, type QualityInput } from '../../src/shared/quality';
+import { findWritingStyleProfile, type WritingStyleProfile } from '../../src/shared/writingStyle';
 import { emptyScriptBrief } from '../../src/utils/scriptOutline';
 import { splitCompleteSentences } from '../../src/utils/speechSpans';
 import { fnv1a64Hex } from '../../src/utils/scriptEntity';
 import { assessProjectDuration, assessSectionDuration } from '../duration/engine';
 import { generateStructured } from '../llm/gateway';
-import { QUALITY_SYSTEM } from '../llm/prompts/quality';
+import { QUALITY_STYLE_APPENDIX, QUALITY_SYSTEM } from '../llm/prompts/quality';
 import { executeSectionRevision } from './section-revise';
+import { sectionStyleViolations, styleRevisionInstruction, violatedStyleRules } from '../style/writingStyle';
+import type { StyleViolation } from '../style/lint';
+
+/** Phase 7: the style archive selected for this evaluation, or undefined when no style is selected. */
+export function selectedWritingStyle(input: QualityInput): WritingStyleProfile | undefined {
+  return findWritingStyleProfile(input.writingStyleId || input.contentBrief?.writingStyleId, input.writingStyles);
+}
+
+/**
+ * Style findings for one chapter. When the caller already holds the report's style findings we reuse
+ * them verbatim, so the revision prompt quotes exactly what the panel showed the user.
+ */
+export function chapterStyleFindings(input: QualityInput, report: QualityReport, sectionId: string): QualityIssue[] {
+  const fromReport = report.issues.filter(issue => issue.sectionId === sectionId && issue.kind === 'style');
+  if (fromReport.length) return fromReport;
+  return (input.styleFindings || []).filter(issue => issue.sectionId === sectionId && issue.kind === 'style');
+}
+
+/** Deterministic banned-word / sentence-length findings, folded into QualityIssue as kind='style'. */
+export function deterministicStyleIssues(input: QualityInput, profile: WritingStyleProfile | undefined): QualityIssue[] {
+  if (!profile) return [];
+  const issues: QualityIssue[] = [];
+  for (const section of input.sections) {
+    for (const violation of sectionStyleViolations(profile, section.narration, input.scriptLanguage)) {
+      issues.push({ sectionId: section.id, severity: violation.severity, kind: 'style',
+        message: violation.message, suggestedFix: `${violation.suggestedFix}（依据「${profile.label}」：${styleFixHint(profile, violation)}）` });
+    }
+  }
+  return issues;
+}
+
+function styleFixHint(profile: WritingStyleProfile, violation: StyleViolation): string {
+  const rule = profile.rules.find(item => violation.message.includes(item));
+  if (rule) return rule;
+  if (violation.code === 'banned_pattern' || violation.code === 'abstract_placeholder') return '禁止表达与抽象占位词清单';
+  return `句长阈值（单句 ≤ ${profile.lintThresholds?.maxSentenceUnits ?? '-'} 字）`;
+}
 
 export function sectionIsLocked(input: QualityInput, sectionId: string): boolean {
   return input.sections.some(s => s.id === sectionId && s.status === 'locked') || input.outline.sections.some(s => s.id === sectionId && s.status === 'locked');
@@ -45,9 +83,13 @@ export async function evaluateQuality(input: QualityInput): Promise<QualityRepor
     return assessSectionDuration(s.id, s.narration, plan.minUnits, plan.maxUnits, input.scriptLanguage, pace);
   });
   const projectDuration = assessProjectDuration(input.sections, input.outline, input.scriptLanguage, pace, input.durationSpec);
-  const { llmApi, repair: _repair, sectionIds: _sectionIds, ...context } = input;
+  const writingStyle = selectedWritingStyle(input);
+  // Phase 7: no selected style keeps the Phase 6 request payload byte-identical.
+  const { llmApi, repair: _repair, sectionIds: _sectionIds, writingStyles: _writingStyles, styleFindings: _styleFindings, ...context } = input;
   const result = await generateStructured({ stage: 'quality', role: 'evaluator', schema: evaluatorSchema,
-    clientLlmApi: llmApi, projectId: input.projectId, system: QUALITY_SYSTEM, user: JSON.stringify({ ...context, durations, projectDuration }) });
+    clientLlmApi: llmApi, projectId: input.projectId,
+    system: writingStyle ? `${QUALITY_SYSTEM}\n${QUALITY_STYLE_APPENDIX}` : QUALITY_SYSTEM,
+    user: JSON.stringify({ ...context, durations, projectDuration, ...(writingStyle ? { writingStyle: { profile: writingStyle, violations: deterministicStyleIssues(input, writingStyle) } } : {}) }) });
   if (!result.data) throw new Error(result.reason || '质量评估器未返回有效结果');
   const claims = groundedClaims(input, result.data.claims);
   const issues: QualityIssue[] = result.data.issues.filter(issue => !issue.sectionId || input.sections.some(s => s.id === issue.sectionId));
@@ -63,27 +105,35 @@ export async function evaluateQuality(input: QualityInput): Promise<QualityRepor
     issues.push({ sectionId: claim.sectionId, severity: claim.risk === 'high' ? 'high' : 'medium', kind: 'fact_risk',
       message: `待核实事实：${claim.text}`, suggestedFix: `没有可靠来源时删去或明确限定这条事实，不得编造出处：${claim.text}` });
   }
+  issues.push(...deterministicStyleIssues(input, writingStyle));
   const verdict = projectDuration.verdict;
   return { id: result.run.id, stage: 'quality', createdAt: result.run.createdAt, issues, claims, durations, verdict, projectDuration };
 }
 
 /** Group all issues for a chapter into one existing revision action. No global rewrite action. */
 export function qualityRevisionActions(input: QualityInput, report: QualityReport): ScriptRevisionAction[] {
+  const writingStyle = selectedWritingStyle(input);
   const groups = new Map<string, QualityIssue[]>();
   for (const issue of report.issues) {
     if (!issue.sectionId || sectionIsLocked(input, issue.sectionId) || (input.sectionIds && !input.sectionIds.includes(issue.sectionId))) continue;
     groups.set(issue.sectionId, [...(groups.get(issue.sectionId) || []), issue]);
   }
-  return [...groups].map(([sectionId, issues]) => ({
-    sectionId,
-    action: 'replace-transition' as const,
-    targetDeltaUnits: 0,
-    instruction: `按以下具体内容问题修订，不以章节字数是否达标决定扩写或压缩。资料不足时不编造，可保留有依据的正文。\n${issues.map(i => `[${i.kind}] ${i.suggestedFix}`).join('\n')}`
-  }));
+  return [...groups].map(([sectionId, issues]) => {
+    const styleFindings = writingStyle ? chapterStyleFindings(input, report, sectionId) : [];
+    return {
+      sectionId,
+      action: 'replace-transition' as const,
+      targetDeltaUnits: 0,
+      instruction: styleFindings.length
+        ? styleRevisionInstruction(writingStyle!, styleFindings)
+        : `按以下具体内容问题修订，不以章节字数是否达标决定扩写或压缩。资料不足时不编造，可保留有依据的正文。\n${issues.map(i => `[${i.kind}] ${i.suggestedFix}`).join('\n')}`
+    };
+  });
 }
 
 export async function runQualityLoop(input: QualityInput) {
   let sections: ScriptSection[] = structuredClone(input.sections);
+  const writingStyle = selectedWritingStyle(input);
   let report = await evaluateQuality({ ...input, sections });
   const history = [report];
   const failures: { sectionId: string; status: number; error: string }[] = [];
@@ -98,7 +148,8 @@ export async function runQualityLoop(input: QualityInput) {
       for (const action of actions) {
         const result = await executeSectionRevision({ sections, action, planned: input.outline.sections.find(s => s.id === action.sectionId),
           language: input.scriptLanguage, brief: input.brief || emptyScriptBrief(), targetSeconds: input.durationSpec?.targetSeconds || 300,
-          llmApi: input.llmApi, strict: true, projectId: input.projectId });
+          llmApi: input.llmApi, strict: true, projectId: input.projectId,
+          ...(writingStyle ? { writingStyle, styleFindings: chapterStyleFindings(input, report, action.sectionId) } : {}) });
         if (result.status !== 200) failures.push({ sectionId: action.sectionId, status: result.status, error: result.error || '修订失败' });
         else sections = result.sections;
       }

@@ -1,6 +1,7 @@
 import { BEAT_FUNCTIONS, BEAT_ENERGIES, normalizeBeatEnergy } from '../utils/scriptSections';
 import { z } from 'zod';
 import { contentBriefDraftSchema, durationSpecSchema, scriptPaceSchema } from './contentBrief';
+import { writingStyleProfileSchema } from './writingStyle';
 
 export const claimSchema = z.object({
   id: z.string(), sectionId: z.string(), text: z.string().min(1),
@@ -8,7 +9,7 @@ export const claimSchema = z.object({
   sourceUrl: z.string().optional(), sourceNote: z.string().optional()
 }).strict();
 export const qualityIssueSchema = z.object({ sectionId: z.string().optional(), severity: z.enum(['high', 'medium', 'low']),
-  kind: z.enum(['architecture', 'duration', 'fact_risk', 'pacing']), message: z.string().min(1), suggestedFix: z.string().min(1)
+  kind: z.enum(['architecture', 'duration', 'fact_risk', 'pacing', 'style']), message: z.string().min(1), suggestedFix: z.string().min(1)
 }).strict();
 export const evaluatorSchema = z.object({ issues: z.array(qualityIssueSchema), claims: z.array(claimSchema) }).strict();
 export const sectionStatusSchema = z.enum(['planned', 'drafting', 'ready', 'locked', 'needs-revision', 'failed']);
@@ -45,10 +46,16 @@ export const qualityRequestSchema = z.object({
   sections: z.array(qualityInputSectionSchema).min(1), outline: qualityOutlineSchema,
   scriptLanguage: z.enum(['zh', 'en']).default('zh'), pace: scriptPaceSchema.default('medium'),
   contentBrief: contentBriefDraftSchema.optional(), durationSpec: durationSpecSchema.optional(),
+  /** Phase 7: selected writing style archive. Absent = style checking is skipped entirely. */
+  writingStyleId: z.string().trim().min(1).optional(),
+  /** Phase 7: project-scoped custom archives so a custom id resolves server-side. */
+  writingStyles: z.array(writingStyleProfileSchema).optional(),
   brief: z.object({ audience: z.string(), coreQuestion: z.string(), coreConclusion: z.string(),
     evidence: z.array(z.object({ id: z.string(), claim: z.string(), source: z.string().optional(), confidence: z.enum(['user', 'researched', 'unverified']) }).strict()),
     forbiddenClaims: z.array(z.string()), requiredTerms: z.array(z.string()), callToAction: z.string().optional() }).strict().optional(),
   claims: z.array(claimSchema).default([]),
+  /** Phase 7: style findings the caller already holds, fed into the style-repair revision prompt. */
+  styleFindings: z.array(qualityIssueSchema).optional(),
   llmApi: z.object({ enabled: z.boolean().optional(), provider: z.string().optional(), endpoint: z.string().optional(), apiKey: z.string().optional(), model: z.string().optional() }).strict().optional(),
   repair: z.boolean().default(false), sectionIds: z.array(z.string()).optional(), projectId: z.string().optional()
 }).strict().superRefine((input, ctx) => {
@@ -62,7 +69,7 @@ export type QualityInput = z.infer<typeof qualityRequestSchema>;
 export function qualityInputKey(input: unknown): string {
   const parsed = qualityRequestSchema.safeParse(input);
   if (!parsed.success) return '';
-  const { llmApi, repair, sectionIds, ...content } = parsed.data;
+  const { llmApi, repair, sectionIds, styleFindings: _styleFindings, ...content } = parsed.data;
   return JSON.stringify(content);
 }
 export const durationAssessmentSchema = z.object({ sectionId: z.string(), estimatedSec: z.number(), minSec: z.number(), maxSec: z.number(), verdict: z.enum(['too_short', 'in_range', 'too_long']) }).strict();

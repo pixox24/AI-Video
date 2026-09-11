@@ -899,6 +899,8 @@ export interface ScriptWorkspace {
   claims?: Claim[];
   contentBrief?: ContentBrief;
   durationSpec?: DurationSpec;
+  /** Project-scoped custom writing style archives (Phase 7); built-ins live in shared/writingStyle.ts. */
+  writingStyles?: WritingStyleProfile[];
   stage: ScriptStage;
   gate: ScriptGate;
   scriptLanguage?: ScriptLanguage;
@@ -986,3 +988,5 @@ export interface DurationSpec {
 export type Claim = import('zod').infer<typeof import('./shared/quality').claimSchema>;
 export type QualityIssue = import('zod').infer<typeof import('./shared/quality').qualityIssueSchema>;
 export type QualityReport = import('zod').infer<typeof import('./shared/quality').qualityReportSchema>;
+/** Phase 7 writing style archive; see src/shared/writingStyle.ts for the built-in presets. */
+export type WritingStyleProfile = import('zod').infer<typeof import('./shared/writingStyle').writingStyleProfileSchema>;

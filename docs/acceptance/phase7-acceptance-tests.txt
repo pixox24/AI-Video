@@ -1,0 +1,55 @@
+﻿TAP version 13
+# Subtest: acceptance 1: an unselected style produces byte-identical prompts across two runs
+ok 1 - acceptance 1: an unselected style produces byte-identical prompts across two runs
+  ---
+  duration_ms: 102.8537
+  ...
+# Subtest: acceptance 2: with pundit selected the draft prompt carries the complete style block (snapshot)
+ok 2 - acceptance 2: with pundit selected the draft prompt carries the complete style block (snapshot)
+  ---
+  duration_ms: 28.3271
+  ...
+# Subtest: acceptance 4: the evaluator returns kind=style issues from both the model and the deterministic lint
+ok 3 - acceptance 4: the evaluator returns kind=style issues from both the model and the deterministic lint
+  ---
+  duration_ms: 33.0138
+  ...
+# Subtest: acceptance 4b: without a selected style the evaluator payload and system prompt stay Phase 6 identical
+ok 4 - acceptance 4b: without a selected style the evaluator payload and system prompt stay Phase 6 identical
+  ---
+  duration_ms: 16.7192
+  ...
+# Subtest: acceptance 5: the style repair keeps promise, evidence ids and duration untouched
+ok 5 - acceptance 5: the style repair keeps promise, evidence ids and duration untouched
+  ---
+  duration_ms: 37.9691
+  ...
+# Subtest: acceptance 5b: a locked chapter is never style-repaired and reports no revision
+ok 6 - acceptance 5b: a locked chapter is never style-repaired and reports no revision
+  ---
+  duration_ms: 18.4035
+  ...
+# Subtest: acceptance 7: the infer endpoint satisfies its Zod schema with an exemplar taken from the samples
+ok 7 - acceptance 7: the infer endpoint satisfies its Zod schema with an exemplar taken from the samples
+  ---
+  duration_ms: 22.6225
+  ...
+# Subtest: acceptance 7b: an out-of-range exemplar index is refused; a verbatim draft saves, locks and then resists rewrite
+ok 8 - acceptance 7b: an out-of-range exemplar index is refused; a verbatim draft saves, locks and then resists rewrite
+  ---
+  duration_ms: 33.6081
+  ...
+# Subtest: custom archives resolve by id and built-ins stay built-in
+ok 9 - custom archives resolve by id and built-ins stay built-in
+  ---
+  duration_ms: 0.38
+  ...
+1..9
+# tests 9
+# suites 0
+# pass 9
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2185.8501

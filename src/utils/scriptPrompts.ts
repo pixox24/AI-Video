@@ -18,7 +18,9 @@ export const SECTION_DRAFT_SYSTEM = `你只写指定章节，不能改题、不�
 每个 beat 必须给可拍的 visualIntent；不得使用“很有氛围”“电影感”等抽象占位词。
 只输出 JSON。
 
-【篇幅原则】章节字数是参考预算，优先兑现本章承诺。讲清楚即可，禁止为了凑字重复或编造；篇幅偏差交给全文质量评估。`;
+【篇幅原则】章节字数是参考预算，优先兑现本章承诺。讲清楚即可，禁止为了凑字重复或编造；篇幅偏差交给全文质量评估。
+
+【Phase 7 追加】按用户选中的写作风格约束表达方式；风格只影响怎么说话，不得改动本章 promise、evidenceIds 与时长预算，冲突时内容与时长优先。未选中风格时不适用本段。`;
 
 export const SECTION_REVISE_SYSTEM = `你是精确编辑，只改指定章节以修正时长偏差。
 保持章节承诺、事实、术语、角色、前后衔接和已有 beat 顺序。
@@ -27,7 +29,9 @@ export const SECTION_REVISE_SYSTEM = `你是精确编辑，只改指定章节以
 
 【Phase 3 追加】仅按本章的质量问题定向修复，禁止全文重写。扩写只允许证据、案例、推导、演示、反例、可执行步骤；不得伪造来源、数据、人物或案例。压缩不得删除结论成立所必需的论证。无来源高风险事实应删去或明确标为待核实，不得捏造引文。
 
-【篇幅原则】按具体内容缺口修订，字数区间与增减量仅供参考。事实修正、概念解释和衔接修复不必强行改变篇幅；资料不足时保留有依据的内容，不编造、不凑字。`;
+【篇幅原则】按具体内容缺口修订，字数区间与增减量仅供参考。事实修正、概念解释和衔接修复不必强行改变篇幅；资料不足时保留有依据的内容，不编造、不凑字。
+
+【Phase 7 追加】收到【风格修复】时只调整表达方式，不改变事实、论证结构与时长预算。未收到风格修复要求时不适用本段。`;
 
 export function outlineUserPrompt(input: {
   title: string;
@@ -76,6 +80,8 @@ export function sectionDraftUserPrompt(input: {
   summaries: string;
   contextBlock: string;
   styleContract: string;
+  /** Phase 7 style block; empty or absent keeps Phase 6 output byte-identical. */
+  writingStyleBlock?: string;
   unitName: string;
   notesRule?: string;
 }): string {
@@ -99,6 +105,7 @@ ${countRule}
 ${input.notesRule || ''}
 
 ${input.styleContract}
+${input.writingStyleBlock ? `\n${input.writingStyleBlock}\n` : ''}
 ${input.contextBlock}
 
 【全片结论】${input.brief.coreConclusion || input.thesis || '（未填）'}
@@ -123,10 +130,13 @@ export function sectionReviseUserPrompt(input: {
   action: ScriptRevisionAction;
   unitName: string;
   brief: ScriptBrief;
+  /** Phase 7 style-repair instruction; absent keeps Phase 6 output byte-identical. */
+  styleInstruction?: string;
 }): string {
   const lang = normalizeScriptLanguage(input.language);
+  const style = String(input.styleInstruction || '').trim();
   return `只修订这一章。
-修订方向：${input.action.action === 'compress' ? '删除重复和冗余' : input.action.action === 'expand' ? '补充确有依据的解释、例子或步骤' : '按下述具体质量问题定向修订，不强制增减字数'}。
+${style ? `本次修订只调整表达方式，方向由下面的风格修复要求决定，不强制增减字数。\n${style}` : `修订方向：${input.action.action === 'compress' ? '删除重复和冗余' : input.action.action === 'expand' ? '补充确有依据的解释、例子或步骤' : '按下述具体质量问题定向修订，不强制增减字数'}。`}
 ${input.action.targetDeltaUnits > 0 ? `参考增减量约 ${input.action.targetDeltaUnits} ${input.unitName}，不作为通过条件。` : ''}
 硬约束：
 - 不能改变本章核心结论，也不得修改其他章节

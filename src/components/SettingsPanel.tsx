@@ -25,9 +25,10 @@ import {
   Clapperboard,
   Construction,
   Shield,
-  Palette
+  Palette,
+  PenLine
 } from 'lucide-react';
-import { ProjectSettings, CustomLlmApiConfig, CustomTtsApiConfig } from '../types';
+import { ProjectSettings, CustomLlmApiConfig, CustomTtsApiConfig, WritingStyleProfile } from '../types';
 import {
   DEFAULT_CUSTOM_LLM_API,
   DEFAULT_CUSTOM_TTS_API,
@@ -66,8 +67,9 @@ import {
 } from '../utils/styleLibrary';
 import { showStatusToast } from '../utils/statusToast';
 import { ImageApiSettingsSection } from './ImageApiSettings';
+import { WritingStyleSettings } from './WritingStyleSettings';
 
-type SettingsSection = 'llm' | 'image' | 'style' | 'tts' | 'video' | 'system';
+type SettingsSection = 'llm' | 'image' | 'style' | 'writing' | 'tts' | 'video' | 'system';
 
 interface SettingsPanelProps {
   settings: ProjectSettings;
@@ -76,6 +78,10 @@ interface SettingsPanelProps {
   onApplyStyleToExistingClips?: (pack?: StylePack) => void;
   onLibraryChange?: (entries: StyleLibraryEntry[]) => void;
   onOpenStylePanel?: () => void;
+  /** Phase 7 project-scoped writing style archives. */
+  writingStyles?: WritingStyleProfile[];
+  onWritingStylesChange?: (styles: WritingStyleProfile[]) => void;
+  projectId?: string;
 }
 
 function sanitizeEndpoint(raw: string) {
@@ -183,7 +189,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   hasStoryboardClips = false,
   onApplyStyleToExistingClips,
   onLibraryChange,
-  onOpenStylePanel
+  onOpenStylePanel,
+  writingStyles = [],
+  onWritingStylesChange,
+  projectId
 }) => {
   const [section, setSection] = useState<SettingsSection>('llm');
   const llmApi = resolveLlmApi(settings.customLlmApi);
@@ -222,6 +231,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       hint: '风格契约 / 上传反推',
       icon: <Palette className="w-4 h-4" />,
       status: usingStyleVision ? 'on' : undefined
+    },
+    {
+      id: 'writing',
+      label: '写作风格',
+      hint: '样例反推 / 档案锁定',
+      icon: <PenLine className="w-4 h-4" />,
+      status: writingStyles.length ? 'on' : undefined
     },
     {
       id: 'tts',
@@ -324,6 +340,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               onLibraryChange={onLibraryChange}
               onOpenStylePanel={onOpenStylePanel}
             />
+          )}
+          {section === 'writing' && (
+            <div className="p-6 space-y-5">
+              {onWritingStylesChange ? <WritingStyleSettings
+                writingStyles={writingStyles}
+                onChange={onWritingStylesChange}
+                customLlmApi={llmApi}
+                projectId={projectId}
+              /> : <p className="text-[12px] text-zinc-500">当前项目未加载文案工作区，无法管理写作风格档案。</p>}
+            </div>
           )}
           {section === 'tts' && <TtsProviderSection settings={settings} onChange={onChange} />}
           {section === 'video' && (
