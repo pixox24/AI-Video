@@ -44,6 +44,7 @@ import { clampOutroHold, clampSentenceGap, SENTENCE_GAP_DEFAULT } from './senten
 import {
   applyHoldToShots,
   applyPinnedHolds,
+  assignSceneIds,
   beatsFromNarration,
   buildDurationBudget,
   budgetFromWordCount,
@@ -148,7 +149,9 @@ export function hydrateScriptWorkspace(project: VideoProject): ScriptWorkspace {
   const topicTitle = (project.topic || project.title || '').trim();
   const beats = hasCopy ? beatsFromClips(project.clips) : [];
   const forecastShots = hasCopy
-    ? (project.clips.length >= 2 ? shotsFromClips(project.clips) : predictShots({ narration, beats, budget: durationBudget }))
+    ? (project.clips.length >= 2
+      ? shotsFromClips(project.clips)
+      : assignSceneIds(predictShots({ narration, beats, budget: durationBudget }), durationBudget))
     : [];
 
   if (hasCopy) {
@@ -351,22 +354,25 @@ export function rebuildForecast(workspace: ScriptWorkspace): ScriptWorkspace {
     ? normalizeSpeechSpans(workspace.speechSpans, workspace.fullNarration, scriptLanguage)
     : buildSpeechSpans(workspace.fullNarration, workspace.beats, scriptLanguage);
   const sections = syncSectionsWithBeats(workspace.sections, workspace.beats, scriptLanguage);
-  const forecastShots = withCoverage(
-    stampShotsWithBible(
-      applyPinnedHolds(
-        predictShots({
-          narration: workspace.fullNarration,
-          beats: workspace.beats,
-          budget: durationBudget,
-          spans: speechSpans,
-          scriptLanguage
-        }),
-        workspace.forecastShots
+  const forecastShots = assignSceneIds(
+    withCoverage(
+      stampShotsWithBible(
+        applyPinnedHolds(
+          predictShots({
+            narration: workspace.fullNarration,
+            beats: workspace.beats,
+            budget: durationBudget,
+            spans: speechSpans,
+            scriptLanguage
+          }),
+          workspace.forecastShots
+        ),
+        workspace.visualBible
       ),
-      workspace.visualBible
+      workspace.visualBible,
+      workspace.forecastShots
     ),
-    workspace.visualBible,
-    workspace.forecastShots
+    durationBudget
   );
   const next = { ...workspace, sections, durationBudget, speechSpans, forecastShots };
   const directorNotes = [

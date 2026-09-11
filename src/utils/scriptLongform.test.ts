@@ -6,7 +6,8 @@ import {
   estimatedShotCount,
   narrationFromBeats,
   predictShots,
-  redistributeHolds
+  redistributeHolds,
+  assignSceneIds
 } from './scriptBudget';
 import {
   MAX_VIDEO_SECONDS,
@@ -43,7 +44,23 @@ import {
   validateOutline
 } from './scriptOutline';
 import { createDefaultScriptWorkspace, normalizeScriptWorkspace, resumeLongformWorkspace } from './scriptWorkspace';
-import type { ScriptBeat } from '../types';
+import type { ForecastShot, ScriptBeat } from '../types';
+
+function maxSceneRun(shots: ForecastShot[]): number {
+  let max = 0;
+  let run = 0;
+  let current: string | undefined;
+  shots.forEach((shot) => {
+    if (shot.sceneId === current) {
+      run += 1;
+    } else {
+      current = shot.sceneId;
+      run = 1;
+    }
+    if (run > max) max = run;
+  });
+  return max;
+}
 
 function chineseSentences(count: number): string {
   return Array.from({ length: count }, (_, index) => `这是第${index + 1}句用来测试长视频拆句和节拍映射的口播。`).join('');
@@ -272,9 +289,10 @@ test('目标镜头数拆分保持全文覆盖并受资源上限保护', () => {
   assert.ok(maxForecastShotsForDuration(1800) <= MAX_FORECAST_SHOTS);
   const narration = chineseSentences(400);
   const budget = buildDurationBudget({ pace: 'medium', targetSeconds: 1800, usedChars: narration.length });
-  const shots = predictShots({ narration, budget, scriptLanguage: 'zh' });
+  const shots = assignSceneIds(predictShots({ narration, budget, scriptLanguage: 'zh' }), budget);
   assert.ok(shots.length <= MAX_FORECAST_SHOTS);
-  assert.ok(new Set(shots.map((shot) => shot.sceneId)).size <= maxUniqueScenesForDuration(1800));
+  const stride = Math.max(2, Math.ceil(shots.length / maxUniqueScenesForDuration(1800)));
+  assert.ok(maxSceneRun(shots) <= stride, `同场景连续镜 ${maxSceneRun(shots)} 超过硬上限 ${stride}`);
 });
 
 test('预算字段迁移出 targetUnits/minUnits/maxUnits', () => {
@@ -420,8 +438,43 @@ test('预测镜会带停留，口播加停留才能靠近目标时长', () => {
   const speech = shots.reduce((sum, shot) => sum + shot.speechDuration, 0);
   assert.ok(hold > 0.4, `停留仍是 0：${hold}`);
   assert.ok(speech + hold > speech, '总长应大于纯口播');
-  const scenes = new Set(shots.map((shot) => shot.sceneId).filter(Boolean));
+  const scenes = new Set(assignSceneIds(shots, budget).map((shot) => shot.sceneId).filter(Boolean));
   assert.ok(scenes.size > 0);
+});
+
+test('同场景连续镜受硬上限保护，location/continuity 变化会切场景', () => {
+  const makeShot = (over: Partial<ForecastShot>): ForecastShot => ({
+    id: 'shot',
+    order: 1,
+    start: 0,
+    speechDuration: 2,
+    holdDuration: 0,
+    energy: 'medium',
+    function: 'setup',
+    visualIntent: '',
+    narration: '',
+    splitReason: '',
+    ...over
+  });
+  const budget = buildDurationBudget({ pace: 'medium', targetSeconds: 30 });
+  const flat = Array.from({ length: 10 }, (_, index) => makeShot({ id: `s${index}`, order: index + 1 }));
+  const grouped = assignSceneIds(flat, budget);
+  const stride = Math.max(2, Math.ceil(flat.length / maxUniqueScenesForDuration(30)));
+  assert.ok(maxSceneRun(grouped) <= stride, `同场景连续镜 ${maxSceneRun(grouped)} 超过硬上限 ${stride}`);
+
+  const moved = assignSceneIds([
+    makeShot({ id: 'a', order: 1, locationId: 'loc-a' }),
+    makeShot({ id: 'b', order: 2, locationId: 'loc-a' }),
+    makeShot({ id: 'c', order: 3, locationId: 'loc-b' })
+  ], budget);
+  assert.equal(moved[0].sceneId, moved[1].sceneId);
+  assert.notEqual(moved[1].sceneId, moved[2].sceneId);
+
+  const contrast = assignSceneIds([
+    makeShot({ id: 'a', order: 1, locationId: 'loc-a' }),
+    makeShot({ id: 'b', order: 2, locationId: 'loc-a', continuity: 'contrast' })
+  ], budget);
+  assert.notEqual(contrast[0].sceneId, contrast[1].sceneId);
 });
 
 test('提纲可上移增删并重算预算，锁定章编辑不改状态', () => {
